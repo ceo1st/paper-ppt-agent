@@ -17,27 +17,35 @@ A local tool that converts a paper PDF or LaTeX source package into an editable 
 ## Quick Start
 
 1. Copy `.env.example` to `.env` if you want backend defaults
-2. Install backend dependencies
+2. Start the app directly
+
+```powershell
+.\start-dev.bat
+```
+
+OR
+
+3. Install backend dependencies
 
 ```powershell
 uv sync --locked
 ```
 
-3. Install frontend dependencies
+4. Install frontend dependencies
 
 ```powershell
 cd frontend
 npm install
 ```
 
-4. Start the app
+5. Start the app
 
 ```powershell
 cd ..
 .\start-dev.bat
 ```
 
-5. Open
+6. Open
 
 - Backend: [http://127.0.0.1:8000](http://127.0.0.1:8000)
 - Frontend: [http://127.0.0.1:5173](http://127.0.0.1:5173)

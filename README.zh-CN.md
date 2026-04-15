@@ -17,27 +17,35 @@
 ## 快速开始
 
 1. 如需后端默认配置，可将 `.env.example` 复制为 `.env`
-2. 安装后端依赖
+2. 直接启动项目
+
+```powershell
+.\start-dev.bat
+```
+
+或
+
+3. 安装后端依赖
 
 ```powershell
 uv sync --locked
 ```
 
-3. 安装前端依赖
+4. 安装前端依赖
 
 ```powershell
 cd frontend
 npm install
 ```
 
-4. 启动项目
+5. 启动项目
 
 ```powershell
 cd ..
 .\start-dev.bat
 ```
 
-5. 打开以下地址
+6. 打开以下地址
 
 - 后端: [http://127.0.0.1:8000](http://127.0.0.1:8000)
 - 前端: [http://127.0.0.1:5173](http://127.0.0.1:5173)
