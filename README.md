@@ -141,7 +141,7 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 - [PPTAgent](https://github.com/icip-cas/PPTAgent) — 流程设计与 Agent 架构参考
 - [ppt-master](https://github.com/hugohe3/ppt-master) — 部分工程实现参考
-- [PPTist](https://github.com/pipipi-pikachu/PPTist) — PPT 编辑器能力参考与集成基础，感谢 pipipi-pikachu/PPTist 项目
+- [PPTist](https://github.com/pipipi-pikachu/PPTist) — PPT 编辑器能力参考与集成基础
 
 ## 📄 许可证
 
