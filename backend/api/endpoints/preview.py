@@ -1,5 +1,6 @@
 """Preview endpoint for generated SVG slides."""
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 import json
@@ -38,11 +39,12 @@ from backend.generator.pptx_scene import (
     slide_render_path,
     slide_scene_path,
 )
-from backend.generator.svg_finalize.render_ready import prepare_svg_content_for_render, prepare_svg_file_for_render
-from backend.runtime import aoffload, apath_exists, aread_bytes, aread_text, aremove, awrite_bytes, awrite_text
+from backend.generator.svg_finalize.render_ready import prepare_svg_content_for_render, prepare_svg_file_content_for_render
+from backend.runtime import aoffload, apath_exists, aread_bytes, aread_text, awrite_bytes, awrite_text
 from backend.session.manager import session_manager
 
 router = APIRouter()
+_preview_response_lock = asyncio.Lock()
 
 
 class SlideUpdateRequest(BaseModel):
@@ -593,6 +595,24 @@ async def _build_preview_response(
     *,
     last_slide_only: bool = False,
 ) -> PreviewResponse:
+    async with _preview_response_lock:
+        return await _build_preview_response_locked(
+            job_id,
+            project_dir,
+            output_path,
+            status_value,
+            last_slide_only=last_slide_only,
+        )
+
+
+async def _build_preview_response_locked(
+    job_id: str,
+    project_dir: Path | None,
+    output_path: str | None,
+    status_value: str,
+    *,
+    last_slide_only: bool = False,
+) -> PreviewResponse:
     slides: list[PreviewSlide] = []
     if project_dir and project_dir.exists():
         final_files = get_svg_files(project_dir, "final")
@@ -608,16 +628,13 @@ async def _build_preview_response(
         for fallback_index, svg_path in enumerate(slide_files, start=1):
             index = _slide_index_from_svg_path(svg_path, fallback_index)
             emitted_slide_indexes.add(index)
-            # ``prepare_svg_file_for_render`` rewrites href base64 inlines etc.
-            # — synchronous CPU work; offload it.
+            # Preparing render-ready SVG rewrites href base64 inlines etc.
+            # Keep temp-file creation/read/cleanup in one offloaded call so a
+            # transient temp path cannot disappear between awaits.
             try:
-                prepared_path = await aoffload(prepare_svg_file_for_render, svg_path)
+                content = await aoffload(prepare_svg_file_content_for_render, svg_path)
             except FileNotFoundError:
                 continue
-            try:
-                content = await aread_text(prepared_path, encoding="utf-8")
-            finally:
-                await aremove(prepared_path, missing_ok=True)
             slide_payload: dict[str, Any] = dict(
                 index=index,
                 name=svg_path.stem,

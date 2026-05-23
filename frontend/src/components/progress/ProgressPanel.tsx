@@ -50,7 +50,24 @@ export function ProgressPanel({ job, connectionStatus, enrichmentStats, slideCou
     activeStatus && STAGE_INDEX.has(activeStatus) ? STAGE_INDEX.get(activeStatus)! : -1;
   const allComplete = jobStatus === "complete";
   const isStopped = jobStatus === "error" || jobStatus === "cancelled";
+  const isTerminalRun = allComplete || isStopped;
   const statusLabel = translateStageStatus(jobStatus, locale, "progress");
+  const connectionDotClass = isTerminalRun
+    ? allComplete
+      ? "status-dot-connected"
+      : "status-dot-disconnected"
+    : isConnected
+    ? "status-dot-connected"
+    : isConnecting
+    ? "status-dot-connecting"
+    : "status-dot-disconnected";
+  const connectionLabel = isTerminalRun
+    ? statusLabel
+    : isConnected
+    ? t("status.connected")
+    : isConnecting
+    ? t("status.connecting")
+    : t("status.disconnected");
   const activeMessage = translateJobMessage(job?.message, locale);
   const showEnrichment = !!enrichmentStats && (
     !!enrichmentStats.arxiv ||
@@ -115,20 +132,8 @@ export function ProgressPanel({ job, connectionStatus, enrichmentStats, slideCou
           <p className="panel-title">{t("progress.title")}</p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.82rem", color: "var(--muted)" }}>
-          <span
-            className={`status-dot ${
-              isConnected
-                ? "status-dot-connected"
-                : isConnecting
-                ? "status-dot-connecting"
-                : "status-dot-disconnected"
-            }`}
-          />
-          {isConnected
-            ? t("status.connected")
-            : isConnecting
-            ? t("status.connecting")
-            : t("status.disconnected")}
+          <span className={`status-dot ${connectionDotClass}`} />
+          {connectionLabel}
         </div>
       </div> : null}
 
