@@ -6,8 +6,10 @@ preview/export do not depend on previous finalize state being perfect.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import uuid
 import re
+import threading
 from pathlib import Path
 
 from backend.config import settings
@@ -18,6 +20,11 @@ from .flatten_tspan import flatten_text_in_svg
 from .merge_adjacent_text import merge_adjacent_text_in_svg
 from .normalize_fonts import normalize_text_fonts_in_svg
 from .repair_svg import repair_svg_file
+
+_PREVIEW_CONTENT_CACHE_LIMIT = 256
+_preview_content_cache: OrderedDict[str, tuple[int, int, str]] = OrderedDict()
+_preview_content_cache_lock = threading.Lock()
+_preview_prepare_lock = threading.Lock()
 
 
 def prepare_svg_file_for_render(svg_path: Path) -> Path:
@@ -35,6 +42,45 @@ def prepare_svg_file_for_render(svg_path: Path) -> Path:
 
     _prepare_in_place(temp_path)
     return temp_path
+
+
+def prepare_svg_file_content_for_render(svg_path: Path) -> str:
+    """Return normalized SVG text from a temporary render copy."""
+    source_path = Path(svg_path)
+    stat = source_path.stat()
+    cache_key = str(source_path.resolve())
+    fingerprint = (stat.st_mtime_ns, stat.st_size)
+
+    with _preview_content_cache_lock:
+        cached = _preview_content_cache.get(cache_key)
+        if cached and cached[:2] == fingerprint:
+            _preview_content_cache.move_to_end(cache_key)
+            return cached[2]
+
+    # The prepare passes are CPU-heavy and may be requested concurrently by
+    # several preview panes. Serialize cache misses so they do not saturate
+    # the shared offload pool and starve lightweight health/status requests.
+    with _preview_prepare_lock:
+        stat = source_path.stat()
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+        with _preview_content_cache_lock:
+            cached = _preview_content_cache.get(cache_key)
+            if cached and cached[:2] == fingerprint:
+                _preview_content_cache.move_to_end(cache_key)
+                return cached[2]
+
+        prepared_path = prepare_svg_file_for_render(source_path)
+        try:
+            content = prepared_path.read_text(encoding="utf-8")
+        finally:
+            prepared_path.unlink(missing_ok=True)
+
+        with _preview_content_cache_lock:
+            _preview_content_cache[cache_key] = (fingerprint[0], fingerprint[1], content)
+            _preview_content_cache.move_to_end(cache_key)
+            while len(_preview_content_cache) > _PREVIEW_CONTENT_CACHE_LIMIT:
+                _preview_content_cache.popitem(last=False)
+        return content
 
 
 def prepare_svg_content_for_render(svg_content: str, svg_dir: Path) -> str:

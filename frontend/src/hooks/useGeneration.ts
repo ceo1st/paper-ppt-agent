@@ -28,8 +28,10 @@ const PERSISTED_LOG_LIMIT = 80;
 const LIVE_JOB_STORAGE_PREFIX = "paper-ppt-live-job:";
 const HISTORY_STATUS_SYNC_TIMEOUT_MS = 4000;
 const BACKEND_HEALTH_TIMEOUT_MS = 6000;
+const BACKEND_HEALTH_FAILURE_LIMIT = 2;
 const PREVIEW_REFRESH_DEBOUNCE_MS = 500;
 const previewRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let backendHealthFailures = 0;
 
 /** Per-job seq deduper. Replays after reconnect can re-deliver events
  *  the client already processed; we drop anything with seq <= the last
@@ -527,6 +529,7 @@ export const useGeneration = create<GenerationState>()(
         }));
         try {
           const response = await fetchBackendHealthWithTimeout();
+          backendHealthFailures = 0;
           set({
             backendStatus:
               response.status === "ok"
@@ -536,15 +539,28 @@ export const useGeneration = create<GenerationState>()(
                 : "disconnected",
           });
         } catch {
-          set({ backendStatus: hasActiveRecoverableRun(get().runs) ? "connecting" : "disconnected" });
+          backendHealthFailures += 1;
+          set((state) => ({
+            backendStatus:
+              hasActiveRecoverableRun(state.runs) || backendHealthFailures < BACKEND_HEALTH_FAILURE_LIMIT
+                ? "connecting"
+                : "disconnected",
+          }));
         }
       },
       async loadProviders() {
         try {
           const response = await fetchProviders();
+          backendHealthFailures = 0;
           set({ providers: response.providers, backendStatus: "connected" });
         } catch (error) {
-          set({ backendStatus: "disconnected" });
+          backendHealthFailures += 1;
+          set((state) => ({
+            backendStatus:
+              hasActiveRecoverableRun(state.runs) || backendHealthFailures < BACKEND_HEALTH_FAILURE_LIMIT
+                ? "connecting"
+                : "disconnected",
+          }));
           throw error;
         }
       },
