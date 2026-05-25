@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/CRui5in/paper-ppt-agent/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="AGPL-3.0 License"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white" alt="FastAPI">
   <img src="https://img.shields.io/badge/React-18+-61DAFB?logo=react&logoColor=black" alt="React">
@@ -145,7 +145,7 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 ## 📄 许可证
 
-[MIT License](./LICENSE)
+本项目基于 [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE) 发布。
 
 ## 📬 联系方式
 
