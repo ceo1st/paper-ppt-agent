@@ -133,8 +133,6 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 ## 🗺️ Roadmap
 
-- [x] 🤖 Claude Code-powered PPT generation integration
-- [x] 🧭 Codex-powered PPT generation integration
 - [ ] 🧠 Local model support
 
 ---

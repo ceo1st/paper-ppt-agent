@@ -133,8 +133,6 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 ## 🗺️ 开发计划
 
-- [x] 🤖 Claude Code 生成 PPT 接入
-- [x] 🧭 Codex 生成 PPT 接入
 - [ ] 🧠 本地大模型支持
 
 ---
