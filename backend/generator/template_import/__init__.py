@@ -277,7 +277,7 @@ def update_review(import_id: str, draft: dict[str, Any]) -> ReviewDraft:
             hints[str(page_type)] = {
                 str(name): str(original)
                 for name, original in values.items()
-                if str(name).strip() and str(original).strip()
+                if str(name).strip()
             }
         review["placeholder_hints"] = hints  # type: ignore[typeddict-item]
         current["placeholder_hints"] = hints

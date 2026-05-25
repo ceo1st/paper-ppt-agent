@@ -41,6 +41,7 @@ A multi-agent pipeline for automatically generating editable PowerPoint presenta
 | Feature | Description |
 |:--------|:------------|
 | **Multi-Agent Pipeline** | Strategist → Executor → Critic three-stage collaboration for content extraction and layout generation |
+| **Agent Generation Mode** | The workbench supports local Claude Code / Codex runtimes for presentation generation |
 | **Static + Visual QA** | Automatically detects text overflow, element overlap, low contrast, and triggers repair |
 | **Icon Semantic Matching** | RAG semantic search via Gemini Embedding to automatically match icons to slide content |
 | **Feedback Iteration** | Targeted or full regeneration with structural changes (insert, remove, reorder) and version snapshots |
@@ -67,7 +68,7 @@ A multi-agent pipeline for automatically generating editable PowerPoint presenta
 
 An API key for at least one model provider: OpenAI / Anthropic / Gemini / DeepSeek or a custom BaseURL-compatible API.
 
-Optional: the template-import Agent mode requires the backend environment to have access to the Claude Code CLI and Agent SDK.
+Optional: workbench Agent generation requires Claude Code or Codex to be installed and configured locally. Template-import Agent mode currently uses Claude Code and requires it to be installed and configured locally.
 
 ## 🚀 Quick Start
 
@@ -114,6 +115,7 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 - 🎯 **Icon RAG Semantic Search** — Gemini Embedding-based semantic search for icon candidates, independently toggleable
 - 🎨 **Template System & Custom Fonts** — Pre-built industry-style templates with custom heading/body font configuration
 - 🧩 **Template Import** — PPTX direct import, five-page template mapping, and Claude Code Agent mode for automated template analysis and templateization
+- 🤖 **Agent Generation Mode** — Integrated Claude Code / Codex presentation generation in the workbench
 - 📝 **PPT Editor** — Visual PPT editor integrated into generated results and template-import workflows, with slide editing, notes, saving, and re-export
 - 🔬 **Deep Research Workflow** — External research enrichment (arXiv / Semantic Scholar / Web) with relevance filtering
 - 🖼️ **Online Image Search** — Search for images online using Tavily / SerpAPI, with AI layout analysis, one-click undo, and download
@@ -131,8 +133,6 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 ## 🗺️ Roadmap
 
-- [ ] 🤖 Claude Code-powered PPT generation integration
-- [ ] 🧭 Codex-powered PPT generation integration
 - [ ] 🧠 Local model support
 
 ---

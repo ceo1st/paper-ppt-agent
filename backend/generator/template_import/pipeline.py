@@ -933,7 +933,7 @@ def _pptist_placeholders_for_page(
         }
         parts.append(_placeholder_text("SUBTITLE", subtitle, font_size=22, weight="400", color="#4B5563", anchor="middle"))
         meta_y = min(canvas_h * 0.82, subtitle["y"] + subtitle["height"] + canvas_h * 0.08)
-        for idx, name in enumerate(("GROUP", "AUTHOR", "DATE")):
+        for idx, name in enumerate(("AUTHOR", "DATE")):
             box = {
                 "x": canvas_w * 0.24,
                 "y": meta_y + idx * canvas_h * 0.055,
@@ -1335,9 +1335,9 @@ def _slot_for_token(
         if token in {"{{TITLE}}", "{{SUBTITLE}}"}:
             pool = [slot for slot in by_area if slot["box"]["y"] < canvas_h * 0.64] or by_area
             return pool[0 if token == "{{TITLE}}" or len(pool) == 1 else min(1, len(pool) - 1)]
-        if token in {"{{GROUP}}", "{{AUTHOR}}", "{{DATE}}"}:
+        if token in {"{{AUTHOR}}", "{{DATE}}"}:
             ordered = lower_slots or by_y
-            offset = {"{{GROUP}}": 0, "{{AUTHOR}}": 1, "{{DATE}}": 2}[token]
+            offset = {"{{AUTHOR}}": 0, "{{DATE}}": 1}[token]
             return ordered[min(offset, len(ordered) - 1)]
     if page_type == "toc" and token.startswith("{{TOC_ITEM_"):
         ordered = [slot for slot in by_y if slot["box"]["x"] > canvas_w * 0.22] or by_y

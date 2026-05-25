@@ -1270,10 +1270,11 @@ def _build_agent_task(
             "Preserve source chrome, logos, backgrounds, bands, and navigation unless the user explicitly asks to change them.",
             "Preserve repeated logos and brand marks that appear in the same nearby position across slides; do not remove them as body content.",
             "Keep every SVG visually upright on a normal top-left-origin 16:9 canvas; do not rely on flipped raw-coordinate interpretations.",
-            "Replace reusable content/text with the standard placeholder contract, keeping alignment, spacing, and reading order tidy.",
+            "Replace reusable content/text with the standard placeholder contract only after reading the visible source text and confirming which placeholder type it represents.",
+            "Do not replace a text node just because it is visually prominent; infer TITLE, SUBTITLE, AUTHOR, DATE, TOC_ITEM_N, CHAPTER_TITLE, CHAPTER_NUMBER, PAGE_TITLE, CONTENT_AREA, ENDING_TITLE, or ENDING_MESSAGE from the text meaning and page role. If the type is unclear, keep or remove it instead of inventing a placeholder.",
             "When replacing a source text node with a placeholder, keep that node's x/y, text-anchor, fill, font-family, font-size, font-weight, and surrounding bbox unless the user explicitly asks for a redesign.",
             "Place placeholders in the reusable visual zones; avoid drifting into logos, navigation, or decorative chrome.",
-            "Use only these new placeholder names: cover={{TITLE}}, {{SUBTITLE}}, {{AUTHOR}}, {{DATE}}, {{GROUP}}; toc={{TOC_ITEM_1}}..{{TOC_ITEM_5}}; chapter={{CHAPTER_TITLE}}, {{CHAPTER_NUMBER}}; content={{PAGE_TITLE}}, {{CONTENT_AREA}}; ending={{ENDING_TITLE}}, {{ENDING_MESSAGE}}.",
+            "Use only these new placeholder names: cover={{TITLE}}, {{SUBTITLE}}, {{AUTHOR}}, {{DATE}}; toc={{TOC_ITEM_1}}..{{TOC_ITEM_5}}; chapter={{CHAPTER_TITLE}}, {{CHAPTER_NUMBER}}; content={{PAGE_TITLE}}, {{CONTENT_AREA}}; ending={{ENDING_TITLE}}, {{ENDING_MESSAGE}}.",
             "Write agent_template/manifest.patch.json with source_kind=pptist_import, clean_generation_ready=true, page_selections, changed page types, and warnings.",
         ],
         "pages": pages,
@@ -2354,11 +2355,15 @@ Editing contract:
 - Keep the visual direction upright and consistent. If a raw SVG uses flipped transforms,
   preserve how it looks in PowerPoint/PPTist, not the misleading raw coordinate direction.
 - Replace reusable content only with this standard placeholder contract:
-  cover: ``{{{{TITLE}}}}``, ``{{{{SUBTITLE}}}}``, ``{{{{AUTHOR}}}}``, ``{{{{DATE}}}}``, ``{{{{GROUP}}}}``;
+  cover: ``{{{{TITLE}}}}``, ``{{{{SUBTITLE}}}}``, ``{{{{AUTHOR}}}}``, ``{{{{DATE}}}}``;
   toc: ``{{{{TOC_ITEM_1}}}}`` through ``{{{{TOC_ITEM_5}}}}``;
   chapter: ``{{{{CHAPTER_TITLE}}}}`` and ``{{{{CHAPTER_NUMBER}}}}``;
   content: ``{{{{PAGE_TITLE}}}}`` and ``{{{{CONTENT_AREA}}}}``;
   ending: ``{{{{ENDING_TITLE}}}}`` and ``{{{{ENDING_MESSAGE}}}}``.
+- Before replacing any text with a placeholder, read the original visible text and
+  decide the placeholder type from its meaning and page role. Do not replace a node
+  when the text meaning is ambiguous; keep reusable chrome text or remove one-off
+  content instead.
 - Place placeholders in the same visual zones as the original content: keep alignment,
   spacing, and reading order tidy; avoid piling tokens together or drifting into chrome.
 - For text placeholders, do not invent left-to-right positions. Replace the original

@@ -37,6 +37,20 @@ class ModelConfig(BaseModel):
     openai_settings: OpenAISettings | None = None
 
 
+class AgentGenerationConfig(BaseModel):
+    """Configuration for the independent Claude Code / Codex generation path."""
+
+    runtime: Literal["claude_code", "codex"] = "claude_code"
+    model: str | None = None
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
+    max_turns: int | None = Field(default=None, ge=1)
+    load_project_settings: bool = True
+    allow_external_research: bool = False
+    allow_deep_research: bool = False
+    enable_visual_qa: bool = True
+    reply_language: Literal["zh", "en"] = "zh"
+
+
 class StyleOverrides(BaseModel):
     palette: list[str] | None = None  # e.g. ["#0b1220", "#ff8a3d", "#f5f7fb"]
     font: str | None = None           # Default font for all text
@@ -70,6 +84,8 @@ class ResearchConfig(BaseModel):
 
 
 class GenerationOptions(BaseModel):
+    generation_backend: Literal["provider", "agent"] = "provider"
+    agent_config: AgentGenerationConfig | None = None
     canvas_format: str = "ppt169"
     style: str = "academic"
     num_pages: int | None = None
@@ -94,13 +110,23 @@ class GenerationOptions(BaseModel):
 class GenerateRequest(BaseModel):
     session_id: str
     instruction: str = ""
-    model_settings: ModelConfig = Field(alias="model_config")
+    model_settings: ModelConfig | None = Field(default=None, alias="model_config")
     options: GenerationOptions = Field(default_factory=GenerationOptions)
 
 
 class GenerateResponse(BaseModel):
     job_id: str
     status: str = "started"
+
+
+class AgentFeedbackRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
+class AgentFeedbackResponse(BaseModel):
+    job_id: str
+    status: str
+    path: str | None = None
 
 
 class JobStatus(BaseModel):
@@ -111,6 +137,9 @@ class JobStatus(BaseModel):
     total_slides: int = 0
     output_path: str | None = None
     error: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    base_url: str | None = None
 
 
 class CancelJobResponse(BaseModel):

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Bot,
@@ -22,12 +23,14 @@ import {
   Redo2,
   Save,
   Search,
+  Send,
   Settings2,
   Sparkles,
   Square,
   Table2,
   Type,
   Undo2,
+  User,
   Video,
   Wand2,
   X,
@@ -48,6 +51,7 @@ import { fetchTemplates } from "../lib/api";
 import type {
   DeepSeekSettings,
   GenerationHistoryItem,
+  GenerationAgentMessage,
   JobStatus,
   OpenAISettings,
   PreviewSlide,
@@ -87,6 +91,8 @@ interface RoutingProfile {
 type RoutingProfileMap = Record<string, RoutingProfile>;
 
 interface PresentationSettingsDraft {
+  generationBackend?: "provider" | "agent";
+  agentRuntime?: "claude_code" | "codex";
   canvasFormat?: string;
   languageMode?: LanguageMode;
   customLanguage?: string;
@@ -167,6 +173,7 @@ export function GeneratePage() {
     job,
     slides,
     logs,
+    agentMessages,
     criticEvents,
     enrichmentStats,
     connectionStatus,
@@ -179,6 +186,8 @@ export function GeneratePage() {
     clearUploadSession,
     startGeneration,
     cancelCurrentRun,
+    interruptCurrentAgent,
+    sendAgentFeedback,
     connect,
     resumeCurrentRun,
     refreshHistoryStatuses,
@@ -196,6 +205,14 @@ export function GeneratePage() {
   const [openAISettings, setOpenAISettings] = useState<OpenAISettings>(
     DEFAULT_OPENAI_SETTINGS,
   );
+  const [generationBackend, setGenerationBackend] = useState<"provider" | "agent">(
+    initialSettings.generationBackend ?? "provider",
+  );
+  const [agentRuntime, setAgentRuntime] = useState<"claude_code" | "codex">(
+    initialSettings.agentRuntime ?? "claude_code",
+  );
+  const [showAgentModeConfirm, setShowAgentModeConfirm] = useState(false);
+  const [showCodexRuntimeConfirm, setShowCodexRuntimeConfirm] = useState(false);
   const [density, setDensity] = useState(initialSettings.density ?? "normal");
   const [customFont, setCustomFont] = useState(initialSettings.customFont ?? "");
   const [headingFont, setHeadingFont] = useState(initialSettings.headingFont ?? "");
@@ -452,6 +469,8 @@ export function GeneratePage() {
     }
     try {
       writePresentationSettingsDraft({
+        generationBackend,
+        agentRuntime,
         canvasFormat,
         languageMode,
         customLanguage,
@@ -487,6 +506,8 @@ export function GeneratePage() {
     customLanguage,
     density,
     detailLevel,
+    generationBackend,
+    agentRuntime,
     enableDeepResearch,
     enableIcon,
     enableIconRag,
@@ -517,27 +538,43 @@ export function GeneratePage() {
       return;
     }
     const normalizedModel = model.trim();
-    const profiles = readRoutingProfiles();
-    profiles[provider] = {
-      model: normalizedModel,
-      baseUrl,
-      apiKey,
-      deepseekSettings: provider === "deepseek" ? deepSeekSettings : undefined,
-      openaiSettings: provider === "openai" ? openAISettings : undefined,
-    };
-    writeRoutingProfiles(profiles);
+    if (generationBackend === "provider") {
+      const profiles = readRoutingProfiles();
+      profiles[provider] = {
+        model: normalizedModel,
+        baseUrl,
+        apiKey,
+        deepseekSettings: provider === "deepseek" ? deepSeekSettings : undefined,
+        openaiSettings: provider === "openai" ? openAISettings : undefined,
+      };
+      writeRoutingProfiles(profiles);
+    }
     const nextJobId = await startGeneration({
       session_id: uploadSession.session_id,
       instruction,
-      model_config: {
-        provider,
-        model: normalizedModel,
-        api_key: apiKey,
-        base_url: baseUrl || undefined,
-        deepseek_settings: provider === "deepseek" ? deepSeekSettings : undefined,
-        openai_settings: provider === "openai" ? openAISettings : undefined,
-      },
+      model_config: generationBackend === "provider"
+        ? {
+            provider,
+            model: normalizedModel,
+            api_key: apiKey,
+            base_url: baseUrl || undefined,
+            deepseek_settings: provider === "deepseek" ? deepSeekSettings : undefined,
+            openai_settings: provider === "openai" ? openAISettings : undefined,
+          }
+        : undefined,
       options: {
+        generation_backend: generationBackend,
+        agent_config: generationBackend === "agent"
+          ? {
+              runtime: agentRuntime,
+              allow_external_research: Boolean(researchConfig.arxiv_search_enabled || researchConfig.semantic_scholar_enabled || researchConfig.web_search_enabled),
+              allow_deep_research: enableDeepResearch,
+              enable_visual_qa: enableVisualCritic,
+              reasoning_effort: enableDeepResearch || detailLevel === "very_high" ? "xhigh" : detailLevel === "high" ? "high" : "medium",
+              load_project_settings: true,
+              reply_language: locale === "zh" ? "zh" : "en",
+            }
+          : undefined,
         canvas_format: canvasFormat,
         style: "academic",
         language: resolveRequestedLanguage(languageMode, customLanguage),
@@ -577,11 +614,33 @@ export function GeneratePage() {
 
   const generationDisabled =
     !uploadSession ||
-    !provider ||
-    !model.trim() ||
-    !apiKey ||
+    (generationBackend === "provider" && (!provider || !model.trim() || !apiKey)) ||
     (languageMode === "custom" && !customLanguage.trim()) ||
     canCancelCurrentRun;
+  const activeAgentGeneration = Boolean(
+    jobId && selectedRunConfig?.provider?.startsWith("agent:") && job,
+  );
+  const requestGenerationBackend = (nextBackend: "provider" | "agent") => {
+    if (nextBackend === "provider") {
+      setShowAgentModeConfirm(false);
+      setShowCodexRuntimeConfirm(false);
+      setGenerationBackend(nextBackend);
+      return;
+    }
+    if (generationBackend !== "agent") {
+      setShowAgentModeConfirm(true);
+    }
+  };
+  const requestAgentRuntime = (nextRuntime: "claude_code" | "codex") => {
+    if (nextRuntime === "claude_code") {
+      setShowCodexRuntimeConfirm(false);
+      setAgentRuntime(nextRuntime);
+      return;
+    }
+    if (agentRuntime !== "codex") {
+      setShowCodexRuntimeConfirm(true);
+    }
+  };
 
   return (
     <Layout showSidebar={false} contentClassName="studio-page scholarly-workspace-page">
@@ -631,7 +690,65 @@ export function GeneratePage() {
           loading={Boolean(targetJobId && !job && slides.length === 0)}
         />
 
+        {activeAgentGeneration ? (
+          <GenerationAgentConsole
+            job={job}
+            jobId={jobId}
+            runtime={selectedRunConfig?.provider?.replace(/^agent:/, "") || agentRuntime}
+            messages={agentMessages}
+            canStop={canCancelCurrentRun}
+            stopPending={cancelLoading || job?.status === "cancelling"}
+            onStop={async () => {
+              setCancelLoading(true);
+              try {
+                await interruptCurrentAgent();
+              } finally {
+                setCancelLoading(false);
+              }
+            }}
+            onSend={(text) => sendAgentFeedback(text)}
+            allowSendWhenTerminal={true}
+          />
+        ) : (
         <aside className="configuration-panel">
+          <section className="agent-mode-section">
+            <div className="segmented-control generation-backend-toggle" role="tablist">
+              <button
+                type="button"
+                className={generationBackend === "provider" ? "active" : ""}
+                onClick={() => requestGenerationBackend("provider")}
+              >
+                LLM
+              </button>
+              <button
+                type="button"
+                className={generationBackend === "agent" ? "active" : ""}
+                onClick={() => requestGenerationBackend("agent")}
+              >
+                Agent
+              </button>
+            </div>
+            {generationBackend === "agent" ? (
+              <div className="agent-generation-config">
+                <div className="segmented-control runtime-toggle" role="tablist">
+                  <button
+                    type="button"
+                    className={agentRuntime === "claude_code" ? "active" : ""}
+                    onClick={() => requestAgentRuntime("claude_code")}
+                  >
+                    Claude Code
+                  </button>
+                  <button
+                    type="button"
+                    className={agentRuntime === "codex" ? "active" : ""}
+                    onClick={() => requestAgentRuntime("codex")}
+                  >
+                    Codex
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </section>
           <div className="workspace-panel-header">
             <div className="workspace-panel-title">
               <Settings2 size={18} />
@@ -639,7 +756,8 @@ export function GeneratePage() {
             </div>
           </div>
           <div className="configuration-scroll">
-            <ModelSelector
+            {generationBackend === "provider" ? (
+              <ModelSelector
                 providers={providers}
                 provider={provider}
                 model={model}
@@ -655,8 +773,10 @@ export function GeneratePage() {
                 onApiKeyChange={setApiKey}
                 onDeepSeekSettingsChange={setDeepSeekSettings}
                 onOpenAISettingsChange={setOpenAISettings}
-            />
+              />
+            ) : null}
             <OptionsPanel
+                agentMode={generationBackend === "agent"}
                 canvasFormat={canvasFormat}
                 languageMode={languageMode}
                 customLanguage={customLanguage}
@@ -740,6 +860,7 @@ export function GeneratePage() {
             ) : null}
           </div>
         </aside>
+        )}
 
         <AgentMonitor
           job={job}
@@ -753,6 +874,30 @@ export function GeneratePage() {
           onOpenPanel={setSecondaryPanel}
         />
       </section>
+      {showAgentModeConfirm
+        ? createPortal(
+            <AgentModeEntryConfirm
+              onClose={() => setShowAgentModeConfirm(false)}
+              onConfirm={() => {
+                setShowAgentModeConfirm(false);
+                setGenerationBackend("agent");
+              }}
+            />,
+            document.body,
+          )
+        : null}
+      {showCodexRuntimeConfirm
+        ? createPortal(
+            <CodexRuntimeConfirm
+              onClose={() => setShowCodexRuntimeConfirm(false)}
+              onConfirm={() => {
+                setShowCodexRuntimeConfirm(false);
+                setAgentRuntime("codex");
+              }}
+            />,
+            document.body,
+          )
+        : null}
       <FloatingInspector
         open={secondaryPanel === "log"}
         title={t("log.title")}
@@ -771,6 +916,576 @@ export function GeneratePage() {
       </FloatingInspector>
     </Layout>
   );
+}
+
+function AgentModeEntryConfirm({
+  onClose,
+  onConfirm,
+}: {
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useLocale();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="workbench-agent-confirm-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="workbench-agent-confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workbench-agent-mode-confirm-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="workbench-agent-confirm-header">
+          <div className="workbench-agent-confirm-icon"><Bot size={18} /></div>
+          <div>
+            <h2 id="workbench-agent-mode-confirm-title">{t("generation.agentModeConfirm.title")}</h2>
+            <p>{t("generation.agentModeConfirm.description")}</p>
+          </div>
+          <button type="button" className="workbench-agent-confirm-close" onClick={onClose} aria-label={t("generation.agentModeConfirm.close")}>
+            <X size={16} />
+          </button>
+        </header>
+        <div className="workbench-agent-confirm-notice">
+          <strong>{t("generation.agentModeConfirm.requirementTitle")}</strong>
+          <p>{t("generation.agentModeConfirm.requirement")}</p>
+        </div>
+        <footer className="workbench-agent-confirm-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>{t("generation.agentModeConfirm.cancel")}</button>
+          <button type="button" className="primary-button" onClick={onConfirm}>
+            <Bot size={15} />
+            {t("generation.agentModeConfirm.confirm")}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function CodexRuntimeConfirm({
+  onClose,
+  onConfirm,
+}: {
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useLocale();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="workbench-agent-confirm-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="workbench-agent-confirm-dialog workbench-codex-confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workbench-codex-confirm-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="workbench-agent-confirm-header">
+          <div className="workbench-agent-confirm-icon workbench-agent-confirm-icon-warning"><Sparkles size={18} /></div>
+          <div>
+            <h2 id="workbench-codex-confirm-title">{t("generation.codexConfirm.title")}</h2>
+            <p>{t("generation.codexConfirm.description")}</p>
+          </div>
+          <button type="button" className="workbench-agent-confirm-close" onClick={onClose} aria-label={t("generation.codexConfirm.close")}>
+            <X size={16} />
+          </button>
+        </header>
+        <div className="workbench-agent-confirm-notice workbench-agent-confirm-warning">
+          <strong>{t("generation.codexConfirm.recommendTitle")}</strong>
+          <p>{t("generation.codexConfirm.recommendation")}</p>
+        </div>
+        <footer className="workbench-agent-confirm-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>{t("generation.codexConfirm.cancel")}</button>
+          <button type="button" className="primary-button" onClick={onConfirm}>{t("generation.codexConfirm.confirm")}</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+export function GenerationAgentConsole({
+  job,
+  jobId,
+  runtime,
+  messages,
+  canStop,
+  stopPending,
+  onStop,
+  onSend,
+  allowSendWhenTerminal = false,
+}: {
+  job?: JobStatus;
+  jobId?: string;
+  runtime: string;
+  messages: GenerationAgentMessage[];
+  canStop: boolean;
+  stopPending: boolean;
+  onStop: () => Promise<void> | void;
+  onSend: (text: string) => Promise<void> | void;
+  allowSendWhenTerminal?: boolean;
+}) {
+  const { t } = useLocale();
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [activeChannel, setActiveChannel] = useState("main");
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const terminal = Boolean(job && ["complete", "error", "cancelled"].includes(job.status));
+  const canSend = Boolean(jobId && draft.trim() && (!terminal || allowSendWhenTerminal) && !sending);
+  const displayRuntime = runtime === "claude_code" ? "Claude Code" : "Codex";
+  const linkedMessages = useMemo(() => linkGenerationSubagentMessages(messages), [messages]);
+  const usage = useMemo(() => latestGenerationAgentUsage(linkedMessages), [linkedMessages]);
+  const subagents = useMemo(() => generationSubagentChannels(linkedMessages), [linkedMessages]);
+  const showChannelTabs = subagents.length > 0;
+  const visibleMessages = useMemo(
+    () => linkedMessages.filter((message) => message.kind !== "usage" && (activeChannel === "main" ? !message.subagentId : message.subagentId === activeChannel)),
+    [activeChannel, linkedMessages],
+  );
+  const forceCloseToolState = job?.status === "error" || job?.status === "cancelled" || job?.status === "cancelling"
+    ? "error"
+    : job?.status === "complete"
+      ? "done"
+      : undefined;
+  const activityItems = useMemo(
+    () => generationActivityItems(visibleMessages, t, forceCloseToolState),
+    [forceCloseToolState, t, visibleMessages],
+  );
+  const hasActiveToolGroup = useMemo(
+    () => activityItems.some((item) => item.kind === "group" && item.state === "active"),
+    [activityItems],
+  );
+  const showThinking = Boolean(job && !terminal && job.status !== "idle" && !hasActiveToolGroup);
+
+  useEffect(() => {
+    const node = scrollerRef.current;
+    if (!node) return;
+    const frame = window.requestAnimationFrame(() => {
+      node.scrollTop = node.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activityItems.length, job?.message, showThinking]);
+
+  useEffect(() => {
+    if (activeChannel !== "main" && !subagents.some((item) => item.id === activeChannel)) {
+      setActiveChannel("main");
+    }
+  }, [activeChannel, subagents]);
+
+  const submit = async () => {
+    const text = draft.trim();
+    if (!text || !jobId || (terminal && !allowSendWhenTerminal)) return;
+    setDraft("");
+    setSending(true);
+    try {
+      await onSend(text);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <aside className="generation-agent-console">
+      <div className="generation-agent-console-header">
+        <div className="workspace-panel-title">
+          <Bot size={18} />
+          <span>{displayRuntime}</span>
+        </div>
+      </div>
+      {showChannelTabs ? (
+        <div className="generation-agent-channel-tabs" role="tablist">
+          <button
+            type="button"
+            className={activeChannel === "main" ? "active" : ""}
+            onClick={() => setActiveChannel("main")}
+          >
+            {t("generation.agent.main")}
+          </button>
+          {subagents.map((subagent, index) => (
+            <button
+              type="button"
+              key={subagent.id}
+              className={activeChannel === subagent.id ? "active" : ""}
+              onClick={() => setActiveChannel(subagent.id)}
+              title={subagent.detail || undefined}
+            >
+              {t("generation.agent.subagent").replace("{n}", String(index + 1))}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div ref={scrollerRef} className="generation-agent-chat">
+        {activityItems.map((item) => <GenerationAgentActivityItem key={item.id} item={item} />)}
+        {showThinking ? <GenerationAgentThinking /> : null}
+      </div>
+      <div className="generation-agent-composer">
+        <textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+          placeholder={t("generation.agent.placeholder")}
+          disabled={terminal && !allowSendWhenTerminal}
+          rows={3}
+        />
+        <div className="generation-agent-composer-footer">
+          <div className="generation-agent-composer-meta">
+            <span title={t("template.collab.model")}>
+              <Bot size={10} />
+              <em>{usage.model || displayRuntime}</em>
+            </span>
+            <span title={generationTokensTooltip(t, usage)}>
+              {formatGenerationTokens(usage.total_tokens || generationUsageTotal(usage))}
+            </span>
+          </div>
+          <div className="generation-agent-actions">
+            {canStop ? (
+              <button
+                type="button"
+                className="secondary-button danger-button generation-agent-icon-button"
+                disabled={stopPending}
+                onClick={() => void onStop()}
+                aria-label={t("generation.agent.pause")}
+                title={t("generation.agent.pause")}
+              >
+                {stopPending ? <LoaderCircle size={14} className="spin" /> : <Square size={13} fill="currentColor" />}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="primary-button generation-agent-icon-button"
+              disabled={!canSend}
+              onClick={() => void submit()}
+              aria-label={t("template.collab.send")}
+              title={t("template.collab.send")}
+            >
+              {sending ? <LoaderCircle size={14} className="spin" /> : <Send size={14} />}
+            </button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function GenerationAgentThinking() {
+  const { t } = useLocale();
+  return (
+    <div className="generation-agent-bubble-row" data-role="assistant" data-kind="thinking">
+      <div className="generation-agent-bubble generation-agent-thinking">
+        <div className="generation-agent-bubble-head">
+          <span><Bot size={11} /></span>
+          <strong>Agent</strong>
+        </div>
+        <p>
+          <span>{t("template.collab.thinking")}</span>
+          <span className="generation-agent-thinking-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+interface GenerationAgentActivity {
+  id: string;
+  kind: "message" | "tool" | "group" | "status";
+  role?: "user" | "assistant" | "system";
+  label: string;
+  detail?: string;
+  state?: "active" | "done" | "error" | "info";
+  count?: number;
+  children?: GenerationAgentMessage[];
+}
+
+function GenerationAgentActivityItem({ item }: { item: GenerationAgentActivity }) {
+  const isUser = item.role === "user";
+  if (item.kind === "group") {
+    return <GenerationAgentToolGroup item={item} />;
+  }
+  return (
+    <div className="generation-agent-bubble-row" data-role={isUser ? "user" : "assistant"} data-kind={item.kind}>
+      <div className="generation-agent-bubble">
+        <div className="generation-agent-bubble-head">
+          <span>{isUser ? <User size={11} /> : item.kind === "tool" ? <CircleCheck size={11} /> : <Bot size={11} />}</span>
+          <strong>{item.label}</strong>
+        </div>
+        {item.detail ? <p>{item.detail}</p> : null}
+      </div>
+    </div>
+  );
+}
+
+function GenerationAgentToolGroup({ item }: { item: GenerationAgentActivity }) {
+  const [open, setOpen] = useState(false);
+  const state = item.state ?? "info";
+  return (
+    <div className="generation-agent-tool-group" data-state={state} data-open={open ? "true" : "false"}>
+      <button
+        type="button"
+        className="generation-agent-tool-summary"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <ChevronDown size={12} className="generation-agent-tool-chevron" />
+        <span className="generation-agent-tool-state-icon">
+          {state === "active" ? <LoaderCircle size={11} className="spin" /> : <CircleCheck size={11} />}
+        </span>
+        <strong>{item.label}</strong>
+        {item.detail ? <em>{item.detail}</em> : null}
+        {item.count ? <b>{item.count}</b> : null}
+      </button>
+      {open ? (
+        <div className="generation-agent-tool-details">
+          {(item.children ?? []).map((message) => (
+            <div key={message.id} className="generation-agent-tool-detail" data-state={message.status ?? "info"}>
+              <span>{message.status === "running" ? <LoaderCircle size={10} className="spin" /> : <CircleCheck size={10} />}</span>
+              <em>{describeGenerationTool(message)}</em>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function latestGenerationAgentUsage(messages: GenerationAgentMessage[]) {
+  const fallback = {
+    model: "",
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    reasoning_output_tokens: 0,
+    total_tokens: 0,
+  };
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.kind !== "usage") continue;
+    const data = message.data ?? {};
+    return {
+      model: typeof data.model === "string" ? data.model : "",
+      input_tokens: Number(data.input_tokens ?? 0),
+      output_tokens: Number(data.output_tokens ?? 0),
+      cache_read_input_tokens: Number(data.cache_read_input_tokens ?? 0),
+      cache_creation_input_tokens: Number(data.cache_creation_input_tokens ?? 0),
+      reasoning_output_tokens: Number(data.reasoning_output_tokens ?? 0),
+      total_tokens: Number(data.total_tokens ?? 0),
+    };
+  }
+  return fallback;
+}
+
+function generationUsageTotal(usage: ReturnType<typeof latestGenerationAgentUsage>): number {
+  return (
+    usage.input_tokens +
+    usage.output_tokens +
+    usage.cache_read_input_tokens +
+    usage.cache_creation_input_tokens +
+    usage.reasoning_output_tokens
+  );
+}
+
+function generationTokensTooltip(
+  t: (key: string) => string,
+  usage: ReturnType<typeof latestGenerationAgentUsage>,
+): string {
+  const lines = [
+    t("template.collab.tokensThisTask"),
+    `${t("template.collab.tokensInput")}: ${usage.input_tokens.toLocaleString()}`,
+    `${t("template.collab.tokensOutput")}: ${usage.output_tokens.toLocaleString()}`,
+  ];
+  if (usage.cache_read_input_tokens > 0) {
+    lines.push(`${t("template.collab.tokensCacheRead")}: ${usage.cache_read_input_tokens.toLocaleString()}`);
+  }
+  if (usage.cache_creation_input_tokens > 0) {
+    lines.push(`${t("template.collab.tokensCacheCreate")}: ${usage.cache_creation_input_tokens.toLocaleString()}`);
+  }
+  if (usage.reasoning_output_tokens > 0) {
+    lines.push(`Reasoning: ${usage.reasoning_output_tokens.toLocaleString()}`);
+  }
+  const total = usage.total_tokens || generationUsageTotal(usage);
+  lines.push(`Total: ${total.toLocaleString()}`);
+  return lines.join("\n");
+}
+
+function linkGenerationSubagentMessages(messages: GenerationAgentMessage[]): GenerationAgentMessage[] {
+  const subagentByToolUseId = new Map<string, string>();
+  messages.forEach((message) => {
+    if (message.toolUseId && message.subagentId) {
+      subagentByToolUseId.set(message.toolUseId, message.subagentId);
+    }
+  });
+  return messages.map((message) => {
+    if (message.subagentId || !message.toolUseId) {
+      return message;
+    }
+    const subagentId = subagentByToolUseId.get(message.toolUseId);
+    return subagentId ? { ...message, subagentId } : message;
+  });
+}
+
+function generationSubagentChannels(messages: GenerationAgentMessage[]) {
+  const byId = new Map<string, { id: string; detail: string }>();
+  messages.forEach((message) => {
+    if (!message.subagentId) return;
+    byId.set(message.subagentId, {
+      id: message.subagentId,
+      detail: describeGenerationTool(message),
+    });
+  });
+  return Array.from(byId.values());
+}
+
+function generationActivityItems(
+  messages: GenerationAgentMessage[],
+  t: (key: string) => string,
+  forceCloseToolState?: "done" | "error",
+): GenerationAgentActivity[] {
+  const out: GenerationAgentActivity[] = [];
+  let pendingTools: GenerationAgentMessage[] = [];
+  const flushTools = () => {
+    if (!pendingTools.length) return;
+    const children = normalizeGenerationToolEvents(pendingTools, forceCloseToolState);
+    const visibleTools = children.filter((message) => message.status === "running");
+    const last =
+      visibleTools[visibleTools.length - 1] ??
+      children[children.length - 1] ??
+      pendingTools[pendingTools.length - 1];
+    const hasRunning = visibleTools.length > 0;
+    out.push({
+      id: `tools:${pendingTools[0].toolUseId ?? pendingTools[0].id}`,
+      kind: "group",
+      label: hasRunning
+          ? t("template.collab.steps")
+          : t("template.collab.stepsDone"),
+      detail: describeGenerationTool(last),
+      state: children.some((message) => message.status === "error") ? "error" : hasRunning ? "active" : "done",
+      count: children.length,
+      children,
+    });
+    pendingTools = [];
+  };
+  messages.forEach((message) => {
+    if (message.kind === "status" || message.kind === "usage") {
+      return;
+    }
+    if (message.kind === "tool") {
+      pendingTools.push(message);
+      return;
+    }
+    flushTools();
+    out.push({
+      id: message.id,
+      kind: "message",
+      role: message.role,
+      label: message.role === "user" ? t("template.chatUser") : "Agent",
+      detail: message.content,
+      state: message.status === "error" ? "error" : message.status === "complete" ? "done" : "info",
+    });
+  });
+  flushTools();
+  return out.slice(-60);
+}
+
+function normalizeGenerationToolEvents(
+  messages: GenerationAgentMessage[],
+  forceCloseToolState?: "done" | "error",
+): GenerationAgentMessage[] {
+  const rows: GenerationAgentMessage[] = [];
+  const openById = new Map<string, number>();
+  const openWithoutId: number[] = [];
+
+  for (const message of messages) {
+    const isResult =
+      (message.status === "complete" || message.status === "error") &&
+      (!message.tool || message.content === "Tool result");
+    if (isResult) {
+      let targetIndex: number | undefined;
+      if (message.toolUseId) {
+        targetIndex = openById.get(message.toolUseId);
+      }
+      if (targetIndex === undefined) {
+        targetIndex = openWithoutId.shift();
+      }
+      if (targetIndex !== undefined && rows[targetIndex]) {
+        rows[targetIndex] = {
+          ...rows[targetIndex],
+          status: message.status,
+          data: {
+            ...(rows[targetIndex].data ?? {}),
+            result: message.data,
+          },
+        };
+        continue;
+      }
+      if (message.status === "error") {
+        rows.push(message);
+      }
+      continue;
+    }
+
+    const rowIndex = rows.length;
+    rows.push(message);
+    if (message.status === "running") {
+      if (message.toolUseId) {
+        openById.set(message.toolUseId, rowIndex);
+      } else {
+        openWithoutId.push(rowIndex);
+      }
+    }
+  }
+
+  if (forceCloseToolState) {
+    return rows.map((row) =>
+      row.status === "running"
+        ? { ...row, status: forceCloseToolState === "done" ? "complete" : "error" }
+        : row,
+    );
+  }
+  return rows;
+}
+
+function describeGenerationTool(message: GenerationAgentMessage): string {
+  const tool = message.tool || "";
+  const input = message.data?.input;
+  if (input && typeof input === "object") {
+    const obj = input as Record<string, unknown>;
+    const command = typeof obj.command === "string" ? obj.command : "";
+    const path = typeof obj.file_path === "string" ? obj.file_path : typeof obj.path === "string" ? obj.path : "";
+    const prompt = typeof obj.prompt === "string" ? obj.prompt : "";
+    const value = command || path.replace(/\\/g, "/").split("/").slice(-2).join("/") || prompt;
+    return [tool, value].filter(Boolean).join(" ").slice(0, 140);
+  }
+  return message.content;
+}
+
+function formatGenerationTokens(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return String(value);
 }
 
 function SourcesPanel({

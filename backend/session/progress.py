@@ -7,10 +7,12 @@ from typing import Any
 from .manager import Job
 
 PIPELINE_STAGES = (
+    "agent",
     "parsing",
     "research",
     "strategy",
     "generation",
+    "paused",
     "postprocess",
     "export",
     "cancelled",
@@ -105,6 +107,9 @@ def payloads_from_progress_event(job_id: str, job: Job, event: Any) -> list[tupl
     if event.stage == "export" and event.status == "complete":
         updates["output_path"] = event.data.get("output_path") if event.data else None
         updates["status"] = "complete"
+        updates["error"] = None
+    elif event.data and event.data.get("agent_paused"):
+        updates["status"] = "paused"
         updates["error"] = None
     elif event.stage == "error" or event.status == "error":
         updates["status"] = "error"

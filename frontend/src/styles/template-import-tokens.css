@@ -1909,6 +1909,340 @@
   stroke: #334155;
 }
 
+.ti-direct-guide-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.ti-direct-guide {
+  display: flex;
+  width: min(760px, calc(100vw - 40px));
+  max-height: min(760px, calc(100vh - 40px));
+  flex-direction: column;
+  gap: 18px;
+  overflow-y: auto;
+  border: 1px solid var(--ti-line);
+  border-radius: 8px;
+  padding: 22px;
+  background: var(--ti-surface);
+  box-shadow: 0 28px 72px rgba(15, 23, 42, 0.24);
+  color: var(--ti-text);
+}
+
+.ti-agent-upload-guide {
+  display: flex;
+  width: min(520px, calc(100vw - 40px));
+  flex-direction: column;
+  gap: 18px;
+  border: 1px solid var(--ti-line);
+  border-radius: 8px;
+  padding: 22px;
+  background: var(--ti-surface);
+  box-shadow: 0 28px 72px rgba(15, 23, 42, 0.24);
+  color: var(--ti-text);
+}
+
+.ti-direct-guide-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.ti-direct-guide-kicker {
+  margin: 0 0 6px;
+  color: var(--ti-accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ti-direct-guide-header h2 {
+  margin: 0 0 7px;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.ti-direct-guide-header p:not(.ti-direct-guide-kicker) {
+  max-width: 580px;
+  margin: 0;
+  color: var(--ti-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ti-direct-guide-close {
+  display: grid;
+  flex: 0 0 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid var(--ti-line);
+  border-radius: 6px;
+  background: var(--ti-surface);
+  color: var(--ti-muted);
+}
+
+.ti-direct-guide-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid color-mix(in srgb, var(--ti-accent) 25%, var(--ti-line));
+  border-radius: 7px;
+  padding: 11px 12px;
+  background: color-mix(in srgb, var(--ti-accent) 7%, var(--ti-surface));
+  color: var(--ti-text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ti-direct-guide-notice svg {
+  flex: 0 0 auto;
+  color: var(--ti-accent);
+}
+
+.ti-agent-upload-requirement {
+  display: flex;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--ti-accent) 25%, var(--ti-line));
+  border-radius: 7px;
+  padding: 13px;
+  background: color-mix(in srgb, var(--ti-accent) 7%, var(--ti-surface));
+}
+
+.ti-agent-upload-requirement svg {
+  flex: 0 0 auto;
+  color: var(--ti-accent);
+}
+
+.ti-agent-upload-requirement strong {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 14px;
+}
+
+.ti-agent-upload-requirement p {
+  margin: 0;
+  color: var(--ti-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ti-direct-spec-confirm {
+  max-width: 580px;
+}
+
+.ti-direct-spec-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--ti-accent) 25%, var(--ti-line));
+  border-radius: 7px;
+  padding: 13px;
+  background: color-mix(in srgb, var(--ti-accent) 7%, var(--ti-surface));
+}
+
+.ti-direct-spec-info svg {
+  flex: 0 0 auto;
+  color: var(--ti-accent);
+}
+
+.ti-direct-spec-info p {
+  margin: 0 0 8px;
+  color: var(--ti-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ti-direct-spec-info p:last-child {
+  margin-bottom: 0;
+}
+
+.ti-direct-spec-cost {
+  margin: 0;
+  color: var(--ti-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ti-direct-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ti-direct-guide-page {
+  min-width: 0;
+  border: 1px solid var(--ti-line);
+  border-radius: 7px;
+  padding: 10px 9px;
+  background: var(--ti-surface-inset);
+}
+
+.ti-direct-guide-page-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 9px;
+  font-size: 13px;
+}
+
+.ti-direct-guide-page-title b {
+  color: var(--ti-accent);
+  font-size: 11px;
+}
+
+.ti-direct-guide-page-title strong {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.ti-direct-guide-page p {
+  margin: 0;
+  color: var(--ti-muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.ti-direct-guide-rules {
+  border-top: 1px solid var(--ti-line);
+  padding-top: 15px;
+}
+
+.ti-direct-guide-rules h3 {
+  margin: 0 0 9px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.ti-direct-guide-rules ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 19px;
+  color: var(--ti-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ti-direct-guide-actions {
+  position: sticky;
+  bottom: -22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  border-top: 1px solid var(--ti-line);
+  margin: 0 -22px -22px;
+  padding: 16px 22px 22px;
+  background: var(--ti-surface);
+}
+
+.ti-agent-upload-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  border-top: 1px solid var(--ti-line);
+  padding-top: 16px;
+}
+
+.ti-upload-guide-optout {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-right: auto;
+  color: var(--ti-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ti-upload-guide-optout input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--ti-accent);
+}
+
+.ti-upload-guide-buttons {
+  display: flex;
+  gap: 9px;
+}
+
+.ti-direct-spec-actions {
+  justify-content: flex-end;
+}
+
+.ti-direct-guide-secondary,
+.ti-direct-guide-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  border-radius: 7px;
+  padding: 0 15px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ti-direct-guide-secondary {
+  border: 1px solid var(--ti-line);
+  background: var(--ti-surface);
+  color: var(--ti-text);
+}
+
+.ti-direct-guide-primary {
+  background: var(--ti-accent);
+  color: var(--ti-accent-fg);
+}
+
+@media (max-width: 720px) {
+  .ti-direct-guide {
+    padding: 17px;
+  }
+
+  .ti-agent-upload-guide {
+    padding: 17px;
+  }
+
+  .ti-direct-guide-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ti-direct-guide-actions {
+    bottom: -17px;
+    align-items: stretch;
+    flex-direction: column;
+    margin: 0 -17px -17px;
+    padding: 14px 17px 17px;
+  }
+
+  .ti-direct-guide-secondary,
+  .ti-direct-guide-primary {
+    width: 100%;
+  }
+
+  .ti-agent-upload-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ti-upload-guide-optout {
+    padding-bottom: 5px;
+  }
+
+  .ti-upload-guide-buttons {
+    flex-direction: column-reverse;
+  }
+}
+
 .ti-agent-runtime-card {
   display: flex;
   flex-direction: column;

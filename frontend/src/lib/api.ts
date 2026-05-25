@@ -5,6 +5,7 @@ import type {
   DeckScene,
   GenerateRequestPayload,
   GenerateResponse,
+  GenerationAgentFeedbackResponse,
   ImageApplyRequest,
   ImageApplyResponse,
   ImageSearchRequest,
@@ -130,7 +131,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const detail = await response.text();
-    throw new ApiError(detail || `Request failed: ${response.status}`, response.status);
+    throw new ApiError(formatApiError(detail) || `Request failed: ${response.status}`, response.status);
   }
   if (response.status === 204) {
     return undefined as T;
@@ -195,8 +196,35 @@ export async function updateTemplateReview(
   return request<TemplateReview>(`/api/templates/import/${importId}/review`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(draft),
+    body: JSON.stringify(normalizeTemplateReviewDraft(draft)),
   });
+}
+
+function formatApiError(raw: string): string {
+  const text = raw.trim();
+  if (!text) return "";
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === "object" && "detail" in parsed) {
+      const detail = (parsed as { detail?: unknown }).detail;
+      if (typeof detail === "string") return detail;
+      if (Array.isArray(detail)) {
+        return detail
+          .map((item) => {
+            if (item && typeof item === "object" && "msg" in item) {
+              return String((item as { msg?: unknown }).msg ?? "");
+            }
+            return String(item ?? "");
+          })
+          .filter(Boolean)
+          .join("; ");
+      }
+      if (detail != null) return String(detail);
+    }
+  } catch {
+    /* fall through to raw text */
+  }
+  return text;
 }
 
 export async function assistTemplateImport(
@@ -219,7 +247,11 @@ export async function optimizeTemplateImportWithFeedback(
   return request<TemplateReview>(`/api/templates/import/${importId}/feedback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model_config: modelConfig, feedback, draft }),
+    body: JSON.stringify({
+      model_config: modelConfig,
+      feedback,
+      draft: draft ? normalizeTemplateReviewDraft(draft) : undefined,
+    }),
   });
 }
 
@@ -251,7 +283,10 @@ export async function startTemplateImportAgent(
   return request<TemplateAgentStartResponse>(`/api/templates/import/${importId}/agent`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      ...payload,
+      draft: payload.draft ? normalizeTemplateReviewDraft(payload.draft) : undefined,
+    }),
   });
 }
 
@@ -289,8 +324,41 @@ export async function previewTemplateImportDraft(
   return request<TemplatePreview>(`/api/templates/import/${importId}/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(draft ?? {}),
+    body: JSON.stringify(draft ? normalizeTemplateReviewDraft(draft) : {}),
   });
+}
+
+function normalizeTemplateReviewDraft(draft: TemplateReviewDraft): TemplateReviewDraft {
+  const rawHints = draft.placeholder_hints as unknown;
+  if (!rawHints || typeof rawHints !== "object" || Array.isArray(rawHints)) {
+    return draft;
+  }
+  const placeholder_hints: NonNullable<TemplateReviewDraft["placeholder_hints"]> = {};
+  for (const [pageType, rawValue] of Object.entries(rawHints as Record<string, unknown>)) {
+    if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+      placeholder_hints[pageType as TemplatePageType] = Object.fromEntries(
+        Object.entries(rawValue as Record<string, unknown>)
+          .map(([key, value]) => [normalizePlaceholderHintName(key), value == null ? "" : String(value)])
+          .filter(([key]) => key),
+      );
+      continue;
+    }
+    if (Array.isArray(rawValue)) {
+      placeholder_hints[pageType as TemplatePageType] = Object.fromEntries(
+        rawValue
+          .map((item) => normalizePlaceholderHintName(item))
+          .filter(Boolean)
+          .map((name) => [name, ""]),
+      );
+    }
+  }
+  return { ...draft, placeholder_hints };
+}
+
+function normalizePlaceholderHintName(value: unknown): string {
+  const text = String(value ?? "").trim();
+  const match = text.match(/^\{\{\s*([A-Za-z0-9_]+)\s*\}\}$/);
+  return match?.[1] ?? text;
 }
 
 export async function confirmTemplateImport(importId: string): Promise<ImportStatus> {
@@ -397,6 +465,25 @@ export async function generatePresentation(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+}
+
+export async function sendGenerationAgentFeedback(
+  jobId: string,
+  message: string,
+): Promise<GenerationAgentFeedbackResponse> {
+  return request<GenerationAgentFeedbackResponse>(`/api/generate/${jobId}/agent-feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+}
+
+export async function interruptGenerationAgent(
+  jobId: string,
+): Promise<GenerationAgentFeedbackResponse> {
+  return request<GenerationAgentFeedbackResponse>(`/api/generate/${jobId}/agent-interrupt`, {
+    method: "POST",
   });
 }
 

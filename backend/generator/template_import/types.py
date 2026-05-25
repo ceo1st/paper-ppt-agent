@@ -73,7 +73,6 @@ PlaceholderName = Literal[
     "SUBTITLE",
     "AUTHOR",
     "DATE",
-    "GROUP",
     "CHAPTER_NUM",
     "CHAPTER_NUMBER",
     "CHAPTER_TITLE",

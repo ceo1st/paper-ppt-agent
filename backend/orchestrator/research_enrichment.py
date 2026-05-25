@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 
 from backend.api.schemas import ResearchConfig
@@ -41,6 +42,7 @@ class ResearchFinding:
     citation_count: int | None = None
     url: str = ""
     relevance_note: str = ""
+    opened_url: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +54,7 @@ class ResearchFinding:
             "citation_count": self.citation_count,
             "url": self.url,
             "relevance_note": self.relevance_note,
+            "opened_url": self.opened_url,
         }
 
 
@@ -284,12 +287,21 @@ async def _enrich_web_search(
             results = await _serpapi_search(httpx, query, serpapi_key, config.max_results_per_source)
 
         for r in results:
+            opened = str(r.get("opened_url", "")).lower() == "true"
+            body = str(r.get("body", "") or "").strip()
+            snippet = str(r.get("content", "") or "").strip()
             ctx.findings.append(
                 ResearchFinding(
                     source="web",
                     title=r.get("title") or r.get("url", ""),
-                    abstract=r.get("content", "").strip(),
+                    abstract=body or snippet,
                     url=r.get("url", ""),
+                    relevance_note=(
+                        "Opened and read page body"
+                        if opened
+                        else "Search result only; page body could not be fetched"
+                    ),
+                    opened_url=opened,
                 )
             )
         stats.web_found = len(results)
@@ -303,39 +315,123 @@ async def _enrich_web_search(
 
 
 async def _tavily_search(httpx_mod: Any, query: str, api_key: str, max_results: int) -> list[dict[str, str]]:
-    async with httpx_mod.AsyncClient(timeout=10.0) as client:
+    async with httpx_mod.AsyncClient(timeout=20.0) as client:
         resp = await client.post(
             "https://api.tavily.com/search",
-            json={"query": query, "api_key": api_key, "max_results": max_results, "include_images": False},
+            json={
+                "query": query,
+                "api_key": api_key,
+                "max_results": max_results,
+                "include_images": False,
+                "search_depth": "advanced",
+                "include_raw_content": True,
+            },
         )
         resp.raise_for_status()
         data = resp.json()
-        return [
+        results = [
             {
                 "title": r.get("title", ""),
                 "url": r.get("url", ""),
                 "content": str(r.get("content", ""))[:500],
+                "raw_content": str(r.get("raw_content", "") or ""),
             }
             for r in data.get("results", [])
+            if isinstance(r, dict)
         ]
+        return await _open_web_results(client, results)
 
 
 async def _serpapi_search(httpx_mod: Any, query: str, api_key: str, max_results: int) -> list[dict[str, str]]:
-    async with httpx_mod.AsyncClient(timeout=10.0) as client:
+    async with httpx_mod.AsyncClient(timeout=20.0) as client:
         resp = await client.get(
             "https://serpapi.com/search",
             params={"engine": "google", "q": query, "api_key": api_key, "num": max_results},
         )
         resp.raise_for_status()
         data = resp.json()
-        return [
+        results = [
             {
                 "title": r.get("title", ""),
                 "url": r.get("link", ""),
                 "content": str(r.get("snippet", ""))[:500],
             }
             for r in data.get("organic_results", [])
+            if isinstance(r, dict)
         ]
+        return await _open_web_results(client, results)
+
+
+async def _open_web_results(client: Any, results: list[dict[str, str]]) -> list[dict[str, str]]:
+    opened: list[dict[str, str]] = []
+    for result in results:
+        item = dict(result)
+        raw_content = str(item.get("raw_content", "") or "").strip()
+        if raw_content:
+            item["body"] = _compact_text(raw_content)[:2500]
+            item["opened_url"] = "true"
+            opened.append(item)
+            continue
+
+        url = str(item.get("url", "") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            opened.append(item)
+            continue
+        try:
+            resp = await client.get(
+                url,
+                follow_redirects=True,
+                headers={"User-Agent": "PaperPPTAgent/1.0 research reader"},
+                timeout=12.0,
+            )
+            content_type = str(resp.headers.get("content-type", "")).lower()
+            if resp.status_code < 400 and "text/html" in content_type:
+                text = _html_to_text(resp.text)
+                if text:
+                    item["body"] = text[:2500]
+                    item["opened_url"] = "true"
+        except Exception:
+            logger.debug("Failed to open web research result: %s", url, exc_info=True)
+        opened.append(item)
+    return opened
+
+
+class _TextExtractingHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._skip_depth = 0
+        self._chunks: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style", "noscript", "svg"}:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style", "noscript", "svg"} and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        text = data.strip()
+        if text:
+            self._chunks.append(text)
+
+    def text(self) -> str:
+        return _compact_text(" ".join(self._chunks))
+
+
+def _html_to_text(html: str) -> str:
+    parser = _TextExtractingHTMLParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return ""
+    return parser.text()
+
+
+def _compact_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -1877,7 +1877,6 @@ def _template_vars_by_page(pages: list[str]) -> dict[int, dict[str, str]]:
             "VENUE": "",
             "CONFERENCE": "",
             "DATE": "",
-            "GROUP": "",
             "BRAND_LABEL": "",
             "COVER_QUOTE": "",
             "ENDING_TITLE": title,

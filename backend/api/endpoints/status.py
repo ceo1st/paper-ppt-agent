@@ -29,6 +29,9 @@ async def get_job_status(job_id: str) -> JobStatus:
         total_slides=job.total_slides,
         output_path=job.output_path,
         error=None if normalized_status == "complete" else job.error,
+        provider=job.provider,
+        model=job.model_name,
+        base_url=job.base_url,
     )
 
 
@@ -46,10 +49,8 @@ async def cancel_job(job_id: str) -> CancelJobResponse:
 
     cancelled = session_manager.cancel_job(job_id)
     if not cancelled:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Job is not cancellable.",
-        )
+        session_manager.mark_job_cancelled(job_id)
+        return CancelJobResponse(job_id=job_id, status="cancelled")
 
     return CancelJobResponse(job_id=job_id, status="cancelling")
 

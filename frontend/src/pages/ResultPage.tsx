@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Bot, CircleCheck, Database, FileText, Info, Loader2, MessageSquareText, Sparkles, Type, Wand2, X } from "lucide-react";
 import { Layout } from "../components/layout/Layout";
@@ -17,6 +17,7 @@ import { Switch } from "../components/ui/switch";
 import { Progress } from "../components/ui/progress";
 import { RecentTasksPanel } from "../components/history/RecentTasksPanel";
 import { PptistStudioHost } from "../components/pptist/PptistStudioHost";
+import { GenerationAgentConsole } from "./GeneratePage";
 
 // Routing profile stored by GeneratePage so we can re-use model config here.
 const ROUTING_PROFILE_STORAGE_KEY = "paper-ppt-agent-routing-profiles-v1";
@@ -64,16 +65,19 @@ export function ResultPage() {
     history,
     startRefine,
     cancelCurrentRun,
+    interruptCurrentAgent,
     connect,
     activeJobId,
     job: liveJob,
     slides: liveSlides,
     result: liveResult,
     logs: globalLogs,
+    agentMessages: globalAgentMessages,
     criticEvents: globalCriticEvents,
     connectionStatus,
     runs,
     removeHistory,
+    sendAgentFeedback,
   } = useGeneration();
 
   // Read logs, criticEvents, and config from the specific run matching the
@@ -84,6 +88,7 @@ export function ResultPage() {
   const resolvedRun = jobId ? runs[jobId] : undefined;
   const isActiveJob = jobId === activeJobId;
   const logs = isActiveJob ? globalLogs : (resolvedRun?.logs ?? []);
+  const agentMessages = isActiveJob ? globalAgentMessages : (resolvedRun?.agentMessages ?? []);
   const localCritic = isActiveJob ? globalCriticEvents : (resolvedRun?.criticEvents ?? []);
   const criticEvents = localCritic.length > 0 ? localCritic : (remoteCriticEvents ?? []);
   // Direct-bind the global error-store setters so we can mirror local
@@ -128,6 +133,28 @@ export function ResultPage() {
       jobId === activeJobId &&
       job &&
       !["complete", "error", "cancelled"].includes(job.status),
+  );
+  const isAgentResult = Boolean(
+    historyEntry?.options?.generation_backend === "agent" ||
+      historyEntry?.provider?.startsWith("agent:") ||
+      job?.provider?.startsWith("agent:"),
+  );
+  const agentRuntime =
+    historyEntry?.options?.agent_config?.runtime ??
+    (historyEntry?.provider?.startsWith("agent:")
+      ? historyEntry.provider.slice("agent:".length)
+      : job?.provider?.startsWith("agent:")
+        ? job.provider.slice("agent:".length)
+        : "claude_code");
+
+  const handleAgentResultSend = async (text: string) => {
+    if (!jobId) return;
+    connect(jobId);
+    await sendAgentFeedback(text, jobId);
+  };
+  const pptistPreviewRevision = useMemo(
+    () => `${outputPath ?? ""}:${slides.map((slide) => `${slide.index}:${hashPreviewContent(slide.content)}`).join("|")}`,
+    [outputPath, slides],
   );
 
   useEffect(() => {
@@ -573,6 +600,7 @@ export function ResultPage() {
           selectedSlide={selectedSlide}
           onSelect={setSelectedSlide}
           downloadHref={downloadHref}
+          previewRevision={pptistPreviewRevision}
           onReexport={() => void handleReexport()}
           reexportLoading={reexportLoading}
           reexportNotice={reexportNotice}
@@ -591,90 +619,111 @@ export function ResultPage() {
           } : undefined}
         />
 
-        <aside className="configuration-panel result-configuration-panel">
-          <div className="workspace-panel-header">
-            <div className="workspace-panel-title">
-              <Wand2 size={17} />
-              <span>{t("result.refineTitle")}</span>
-            </div>
-          </div>
-          <div className="configuration-scroll">
-            <section className="panel result-refine">
-              <div className="refine-form">
-                <div className="selectPages-toolbar">
-                  <strong>{t("result.selectPages")}</strong>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setTargetPagesSet(
-                        targetPagesSet.size === slides.length
-                          ? new Set()
-                          : new Set(slides.map((_, i) => i + 1)),
-                      )
-                    }
-                    disabled={refineLoading || slides.length === 0}
-                    className="ghost-button"
-                  >
-                    {t("result.selectAll")} ({targetPagesSet.size}/{slides.length})
-                  </button>
-                </div>
-                <div className="result-page-chip-grid">
-                  {slides.map((slide, idx) => {
-                    const page = idx + 1;
-                    const selected = targetPagesSet.has(page);
-                    return (
-                      <button
-                        type="button"
-                        key={slide.name ?? idx}
-                        className={`result-page-chip ${selected ? "result-page-chip-active" : ""}`}
-                        disabled={refineLoading}
-                        onClick={() => {
-                          setTargetPagesSet((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(page)) next.delete(page);
-                            else next.add(page);
-                            return next;
-                          });
-                        }}
-                      >
-                        {page}
-                      </button>
-                    );
-                  })}
-                </div>
-                <label className="checkbox-row">
-                  <Switch checked={allowStructureChanges} onCheckedChange={setAllowStructureChanges} disabled={refineLoading} />
-                  <span>{t("result.allowStructure")}</span>
-                </label>
-                <textarea className="refine-textarea" rows={4} placeholder={t("result.refinePlaceholder")} value={feedback} onChange={(e) => setFeedback(e.target.value)} disabled={refineLoading} />
-                <button type="button" className="primary-button full-width" disabled={!feedback.trim() || refineLoading || canCancelDisplayedRun || !jobId} onClick={() => void handleRefine()}>
-                  {refineLoading || canCancelDisplayedRun ? <Loader2 size={16} className="spin" /> : <Wand2 size={16} />}
-                  {refineLoading || canCancelDisplayedRun ? t("result.refineLoading") : t("result.refineSubmit")}
-                </button>
-                {canCancelDisplayedRun ? (
-                  <button
-                    type="button"
-                    className="secondary-button danger-button full-width cancel-generation-button"
-                    disabled={cancelLoading || resultRunStatus === "cancelling"}
-                    onClick={async () => {
-                      setCancelLoading(true);
-                      try {
-                        await cancelCurrentRun();
-                      } finally {
-                        setCancelLoading(false);
-                      }
-                    }}
-                  >
-                    {cancelLoading || resultRunStatus === "cancelling" ? <Loader2 size={15} className="spin" /> : null}
-                    {cancelLoading || resultRunStatus === "cancelling" ? t("studio.canceling") : t("studio.cancel")}
-                  </button>
-                ) : null}
+        {isAgentResult ? (
+          <GenerationAgentConsole
+            job={job ?? undefined}
+            jobId={jobId ?? undefined}
+            runtime={agentRuntime}
+            messages={agentMessages}
+            canStop={canCancelDisplayedRun}
+            stopPending={cancelLoading || resultRunStatus === "cancelling"}
+            allowSendWhenTerminal
+            onStop={async () => {
+              setCancelLoading(true);
+              try {
+                await interruptCurrentAgent();
+              } finally {
+                setCancelLoading(false);
+              }
+            }}
+            onSend={handleAgentResultSend}
+          />
+        ) : (
+          <aside className="configuration-panel result-configuration-panel">
+            <div className="workspace-panel-header">
+              <div className="workspace-panel-title">
+                <Wand2 size={17} />
+                <span>{t("result.refineTitle")}</span>
               </div>
-            </section>
+            </div>
+            <div className="configuration-scroll">
+              <section className="panel result-refine">
+                <div className="refine-form">
+                  <div className="selectPages-toolbar">
+                    <strong>{t("result.selectPages")}</strong>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTargetPagesSet(
+                          targetPagesSet.size === slides.length
+                            ? new Set()
+                            : new Set(slides.map((_, i) => i + 1)),
+                        )
+                      }
+                      disabled={refineLoading || slides.length === 0}
+                      className="ghost-button"
+                    >
+                      {t("result.selectAll")} ({targetPagesSet.size}/{slides.length})
+                    </button>
+                  </div>
+                  <div className="result-page-chip-grid">
+                    {slides.map((slide, idx) => {
+                      const page = idx + 1;
+                      const selected = targetPagesSet.has(page);
+                      return (
+                        <button
+                          type="button"
+                          key={slide.name ?? idx}
+                          className={`result-page-chip ${selected ? "result-page-chip-active" : ""}`}
+                          disabled={refineLoading}
+                          onClick={() => {
+                            setTargetPagesSet((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(page)) next.delete(page);
+                              else next.add(page);
+                              return next;
+                            });
+                          }}
+                        >
+                          {page}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <label className="checkbox-row">
+                    <Switch checked={allowStructureChanges} onCheckedChange={setAllowStructureChanges} disabled={refineLoading} />
+                    <span>{t("result.allowStructure")}</span>
+                  </label>
+                  <textarea className="refine-textarea" rows={4} placeholder={t("result.refinePlaceholder")} value={feedback} onChange={(e) => setFeedback(e.target.value)} disabled={refineLoading} />
+                  <button type="button" className="primary-button full-width" disabled={!feedback.trim() || refineLoading || canCancelDisplayedRun || !jobId} onClick={() => void handleRefine()}>
+                    {refineLoading || canCancelDisplayedRun ? <Loader2 size={16} className="spin" /> : <Wand2 size={16} />}
+                    {refineLoading || canCancelDisplayedRun ? t("result.refineLoading") : t("result.refineSubmit")}
+                  </button>
+                  {canCancelDisplayedRun ? (
+                    <button
+                      type="button"
+                      className="secondary-button danger-button full-width cancel-generation-button"
+                      disabled={cancelLoading || resultRunStatus === "cancelling"}
+                      onClick={async () => {
+                        setCancelLoading(true);
+                        try {
+                          await cancelCurrentRun();
+                        } finally {
+                          setCancelLoading(false);
+                        }
+                      }}
+                    >
+                      {cancelLoading || resultRunStatus === "cancelling" ? <Loader2 size={15} className="spin" /> : null}
+                      {cancelLoading || resultRunStatus === "cancelling" ? t("studio.canceling") : t("studio.cancel")}
+                    </button>
+                  ) : null}
+                </div>
+              </section>
 
-            <VersionHistory jobId={jobId} onError={setReexportError} />
-          </div>
-        </aside>
+              <VersionHistory jobId={jobId} onError={setReexportError} />
+            </div>
+          </aside>
+        )}
 
         <ResultMonitor
           job={job ?? undefined}
@@ -743,6 +792,7 @@ function ResultSourceSummary({ historyEntry }: { historyEntry?: GenerationHistor
 function ResultSlideWorkspace({
   jobId,
   downloadHref,
+  previewRevision,
   onReexport,
   reexportLoading,
   reexportNotice,
@@ -755,6 +805,7 @@ function ResultSlideWorkspace({
   selectedSlide?: PreviewSlide;
   onSelect: (slide: PreviewSlide) => void;
   downloadHref?: string;
+  previewRevision?: string;
   onReexport: () => void;
   reexportLoading: boolean;
   reexportNotice: string | null;
@@ -790,7 +841,7 @@ function ResultSlideWorkspace({
       ) : null}
       {jobId ? (
         <PptistStudioHost
-          source={{ kind: "preview", jobId }}
+          source={{ kind: "preview", jobId, revision: previewRevision }}
           className="pptist-result-host"
           downloadHref={downloadHref}
           onReexport={onReexport}
@@ -1033,6 +1084,9 @@ function buildStoredJob(historyItem: GenerationHistoryItem): JobStatus {
     total_slides: historyItem.slideCount,
     output_path: historyItem.outputPath ?? null,
     error: historyItem.status === "error" ? historyItem.error ?? "Job not found." : null,
+    provider: historyItem.provider,
+    model: historyItem.model,
+    base_url: historyItem.baseUrl,
   };
 }
 
@@ -1054,6 +1108,14 @@ function imageFilenameFromUrl(url: string) {
   } catch {
     return "search-image.png";
   }
+}
+
+function hashPreviewContent(value: string) {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) | 0;
+  }
+  return `${value.length}:${hash >>> 0}`;
 }
 
 function formatStatusLabel(

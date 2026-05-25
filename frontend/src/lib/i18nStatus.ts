@@ -17,6 +17,7 @@ const STAGE_LABELS: Record<string, { zh: string; en: string }> = {
   strategy: { zh: "策略规划", en: "Strategy" },
   image_search: { zh: "搜索配图", en: "Image Search" },
   generation: { zh: "生成页面", en: "Generation" },
+  agent: { zh: "生成页面", en: "Generation" },
   template_design_spec: { zh: "模板设计规范", en: "Template Design Spec" },
   sequential: { zh: "默认顺序", en: "Default Order" },
   chapter_parallel: { zh: "按章节并行", en: "Parallel by Chapter" },
@@ -31,6 +32,7 @@ const STAGE_LABELS: Record<string, { zh: string; en: string }> = {
   error: { zh: "失败", en: "Error" },
   cancelled: { zh: "已取消", en: "Cancelled" },
   cancelling: { zh: "取消中", en: "Cancelling" },
+  paused: { zh: "已暂停", en: "Paused" },
   unknown: { zh: "未知", en: "Unknown" },
   "(unknown)": { zh: "未知", en: "Unknown" },
 };
@@ -43,6 +45,7 @@ const HISTORY_LABELS: Record<string, { zh: string; en: string }> = {
   research: { zh: "研究中", en: "Research" },
   strategy: { zh: "规划中", en: "Strategy" },
   generation: { zh: "生成中", en: "Generation" },
+  agent: { zh: "生成中", en: "Generation" },
   visual_qa: { zh: "视觉QA中", en: "Visual QA" },
   repair: { zh: "修复中", en: "Repair" },
   postprocess: { zh: "后处理中", en: "Post-process" },
@@ -51,6 +54,7 @@ const HISTORY_LABELS: Record<string, { zh: string; en: string }> = {
   error: { zh: "失败", en: "Error" },
   cancelled: { zh: "已取消", en: "Cancelled" },
   cancelling: { zh: "取消中", en: "Cancelling" },
+  paused: { zh: "已暂停", en: "Paused" },
 };
 
 export function normalizeProgressStage(status: string | undefined | null): string {
@@ -83,6 +87,18 @@ export function translateJobMessage(message: string | undefined, locale: Locale)
     "Refinement started": "优化任务已开始",
     "Queued for generation": "已加入生成队列",
     "Queued for refinement": "已加入优化队列",
+    "Queued for Agent feedback revision": "已加入 Agent 反馈优化队列",
+    "Preparing Agent workspace...": "正在准备 Agent 工作区...",
+    "Agent is generating the deck...": "Agent 正在生成演示文稿...",
+    "Codex Agent started.": "Codex Agent 已启动。",
+    "Codex Agent completed.": "Codex Agent 已完成。",
+    "Codex Agent usage updated.": "Codex Agent 用量已更新。",
+    "Agent is applying feedback...": "Agent 正在根据反馈调整...",
+    "Agent pause requested. Send guidance to continue.": "已请求暂停 Agent。发送指导后可继续。",
+    "Pausing Agent...": "正在暂停 Agent...",
+    "Agent paused. Send guidance to continue from the current workspace.": "Agent 已暂停。发送指导后将从当前工作区继续。",
+    "Agent is applying guidance...": "Agent 正在根据指导继续...",
+    "Interrupt requested. Waiting for the Agent to pause...": "已请求中断，正在等待 Agent 暂停...",
     "Parsing paper...": "正在解析论文...",
     "Analyzing paper content...": "正在分析论文内容...",
     "Deep reading: analyzing paper content...": "深度研读：分析论文内容...",
@@ -90,6 +106,8 @@ export function translateJobMessage(message: string | undefined, locale: Locale)
     "Enriching with external research APIs...": "正在通过外部研究 API 补充信息...",
     "Querying external research sources...": "正在查询外部信息源...",
     "External research returned no results": "外部研究未返回结果",
+    "External research prefetch failed": "外部研究预取失败",
+    "Agent job stopped before a live session was available.": "Agent 会话启动前已停止任务。",
     "Preparing paper brief": "正在准备论文概要",
     "Generating manuscript": "正在生成讲稿",
     "Generating manuscript from brief": "正在根据论文概要生成讲稿",
@@ -106,8 +124,11 @@ export function translateJobMessage(message: string | undefined, locale: Locale)
     "Generating slide SVGs in parallel...": "正在并行生成幻灯片 SVG...",
     "Generating Direct template design_spec.md with LLM.": "正在使用 LLM 生成直接导入模板的 design_spec.md。",
     "Finalizing SVGs...": "正在整理 SVG...",
+    "Finalizing updated SVGs...": "正在整理更新后的 SVG...",
     "Exporting to PowerPoint...": "正在导出 PowerPoint...",
+    "Exporting updated PowerPoint...": "正在导出更新后的 PowerPoint...",
     "PowerPoint generated!": "PowerPoint 已生成",
+    "Updated PowerPoint generated!": "更新后的 PowerPoint 已生成",
     "Re-generating slides with feedback...": "正在根据反馈重新生成幻灯片...",
     "Re-generating selected slides with feedback...": "正在根据反馈重新生成选定页面...",
     "Refined PowerPoint generated!": "优化后的 PowerPoint 已生成",
@@ -121,6 +142,10 @@ export function translateJobMessage(message: string | undefined, locale: Locale)
   };
   if (exact[message]) {
     return exact[message];
+  }
+
+  if (message.startsWith("External research prefetch failed:")) {
+    return message.replace("External research prefetch failed:", "外部研究预取失败：");
   }
 
   const parsedMatch = message.match(/^Parsed:\s*(.+)$/);

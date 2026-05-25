@@ -1,11 +1,12 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { cancelJob, deleteJob, deleteSession, fetchBackendHealth, fetchJobStatus, fetchPreview, fetchProjectPreview, fetchProviders, generatePresentation, isNotFoundError, refinePresentation, uploadPaper } from "../lib/api";
+import { cancelJob, deleteJob, deleteSession, fetchBackendHealth, fetchJobStatus, fetchPreview, fetchProjectPreview, fetchProviders, generatePresentation, interruptGenerationAgent, isNotFoundError, refinePresentation, sendGenerationAgentFeedback, uploadPaper } from "../lib/api";
 import type {
   CriticEvent,
   GenerateRequestPayload,
   GenerationOptions,
   GenerationHistoryItem,
+  GenerationAgentMessage,
   JobEvent,
   JobStatus,
   PreviewResponse,
@@ -24,7 +25,7 @@ const HISTORY_STORAGE_LIMIT = 50;
 const HISTORY_STATUS_SYNC_LIMIT = 8;
 const LEGACY_GENERATION_STORAGE_KEY = "paper-ppt-agent-generation-v1";
 const GENERATION_STORAGE_KEY = "paper-ppt-agent-generation-v2";
-const PERSISTED_LOG_LIMIT = 80;
+const PERSISTED_LOG_LIMIT = 500;
 const LIVE_JOB_STORAGE_PREFIX = "paper-ppt-live-job:";
 const HISTORY_STATUS_SYNC_TIMEOUT_MS = 4000;
 const BACKEND_HEALTH_TIMEOUT_MS = 6000;
@@ -80,6 +81,7 @@ interface RunSnapshot {
   job?: JobStatus;
   slides: PreviewSlide[];
   logs: string[];
+  agentMessages: GenerationAgentMessage[];
   criticEvents: CriticEvent[];
   selectedSlide?: PreviewSlide;
   error?: string;
@@ -106,6 +108,7 @@ interface GenerationState {
   job?: JobStatus;
   slides: PreviewSlide[];
   logs: string[];
+  agentMessages: GenerationAgentMessage[];
   criticEvents: CriticEvent[];
   enrichmentStats?: ResearchEnrichmentStats;
   selectedSlide?: PreviewSlide;
@@ -125,6 +128,8 @@ interface GenerationState {
   startGeneration: (payload: GenerateRequestPayload) => Promise<string>;
   startRefine: (payload: RefineRequestPayload) => Promise<string>;
   cancelCurrentRun: () => Promise<void>;
+  interruptCurrentAgent: () => Promise<void>;
+  sendAgentFeedback: (message: string, jobId?: string) => Promise<void>;
   connect: (jobId: string) => void;
   hydrateResult: (jobId: string) => Promise<void>;
   refreshHistoryStatuses: () => Promise<void>;
@@ -226,9 +231,9 @@ function buildHistoryItemFromRun(history: GenerationHistoryItem[], run?: RunSnap
       existing?.projectDir ??
       deriveProjectDirFromOutputPath(run.job?.output_path ?? run.result?.output_path ?? existing?.outputPath),
     outputPath: run.job?.output_path ?? run.result?.output_path ?? existing?.outputPath ?? null,
-    provider: run.currentRunConfig?.provider ?? existing?.provider,
-    model: run.currentRunConfig?.model ?? existing?.model,
-    baseUrl: run.currentRunConfig?.baseUrl ?? existing?.baseUrl,
+    provider: run.currentRunConfig?.provider ?? run.job?.provider ?? existing?.provider,
+    model: run.currentRunConfig?.model ?? run.job?.model ?? existing?.model,
+    baseUrl: run.currentRunConfig?.baseUrl ?? run.job?.base_url ?? existing?.baseUrl,
     options: run.currentRunConfig?.options ?? existing?.options,
     parentJobId: run.currentRunConfig?.parentJobId ?? existing?.parentJobId ?? null,
     // Persist the live error so a failed run, when re-opened from the
@@ -307,6 +312,9 @@ function buildStoredJob(historyItem: GenerationHistoryItem, result?: PreviewResp
     slides_completed: slideCount,
     total_slides: slideCount,
     output_path: historyItem.outputPath ?? result?.output_path ?? null,
+    provider: historyItem.provider,
+    model: historyItem.model,
+    base_url: historyItem.baseUrl,
     // Use the persisted error message if we have one. Falling back to
     // "Job not found." (the previous behaviour) hid the real failure
     // reason when re-opening a failed run from the sidebar.
@@ -321,6 +329,7 @@ function createRunSnapshot(
   params?: Partial<Omit<RunSnapshot, "jobId" | "slides" | "logs" | "criticEvents" | "connectionStatus">> & {
     slides?: PreviewSlide[];
     logs?: string[];
+    agentMessages?: GenerationAgentMessage[];
     criticEvents?: CriticEvent[];
     connectionStatus?: ConnectionStatus;
   },
@@ -332,6 +341,7 @@ function createRunSnapshot(
     slides: params?.slides ?? [],
     criticEvents: params?.criticEvents ?? [],
     logs: params?.logs ?? [],
+    agentMessages: params?.agentMessages ?? [],
     selectedSlide: params?.selectedSlide,
     error: params?.error,
     result: params?.result,
@@ -377,12 +387,74 @@ function normalizeEnrichmentPayload(raw: unknown, fallback?: ResearchEnrichmentS
   return raw as ResearchEnrichmentStats;
 }
 
+function isGenerationAgentMessage(value: unknown): value is GenerationAgentMessage {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<GenerationAgentMessage>;
+  return (
+    typeof candidate.id === "string" &&
+    (candidate.role === "user" || candidate.role === "assistant" || candidate.role === "system") &&
+    typeof candidate.content === "string" &&
+    typeof candidate.created_at === "number" &&
+    (!candidate.data || typeof candidate.data === "object")
+  );
+}
+
+function agentMessageFromEvent(event: JobEvent): GenerationAgentMessage | null {
+  if (event.stage !== "agent") {
+    return null;
+  }
+  const data = event.data as Record<string, unknown>;
+  const feedback = data.agent_feedback as { message?: unknown } | undefined;
+  if (feedback && typeof feedback.message === "string") {
+    return null;
+  }
+  const rawAgent = data.agent_event as Record<string, unknown> | undefined;
+  const payload = (rawAgent?.data && typeof rawAgent.data === "object" ? rawAgent.data : data) as Record<string, unknown>;
+  const eventType = typeof rawAgent?.type === "string" ? rawAgent.type : "";
+  const eventStatus = typeof rawAgent?.status === "string" ? rawAgent.status : event.status;
+  const rawMessage = event.message.trim();
+  if (!rawMessage) {
+    return null;
+  }
+  const tool = typeof payload.tool === "string" ? payload.tool : undefined;
+  const kind: GenerationAgentMessage["kind"] =
+    eventType === "usage"
+      ? "usage"
+      : eventType === "tool" || tool
+        ? "tool"
+        : eventType === "message"
+          ? "message"
+          : "status";
+  const toolUseId = typeof payload.tool_use_id === "string" ? payload.tool_use_id : undefined;
+  return {
+    id: `${event.job_id}:${event.seq ?? `${event.ts ?? Date.now()}:${rawMessage}`}`,
+    role: "assistant",
+    content: rawMessage,
+    created_at: event.ts ? event.ts * 1000 : Date.now(),
+    kind,
+    status: eventStatus,
+    tool,
+    toolUseId,
+    subagentId: isGenerationSubagentTool(tool) ? toolUseId || "subagent" : undefined,
+    data: payload,
+  };
+}
+
+function isGenerationSubagentTool(tool: string | undefined): boolean {
+  if (!tool) return false;
+  const normalized = tool.toLowerCase();
+  return normalized === "task" || normalized.endsWith(":task");
+}
+
 function applyRunToCurrent(run?: RunSnapshot) {
   if (!run) {
     return {};
   }
   const slides = Array.isArray(run.slides) ? run.slides : [];
   const logs = Array.isArray(run.logs) ? run.logs : [];
+  const agentMessages = Array.isArray(run.agentMessages) ? run.agentMessages : [];
   const criticEvents = Array.isArray(run.criticEvents) ? run.criticEvents : [];
   return {
     uploadSession: run.uploadSession,
@@ -390,6 +462,7 @@ function applyRunToCurrent(run?: RunSnapshot) {
     job: run.job,
     slides,
     logs,
+    agentMessages,
     criticEvents,
     enrichmentStats: run.enrichmentStats,
     selectedSlide: run.selectedSlide,
@@ -421,6 +494,7 @@ function serializeRunsForStorage(runs: Record<string, RunSnapshot>) {
         uploadSession: run.uploadSession,
         job: run.job,
         logs: run.logs.slice(-PERSISTED_LOG_LIMIT),
+        agentMessages: run.agentMessages.slice(-PERSISTED_LOG_LIMIT),
         // Critic details and SVG previews can be large. They are recoverable
         // from backend files/endpoints, so localStorage keeps only run metadata.
         criticEvents: [],
@@ -439,6 +513,9 @@ function normalizeStoredRun(jobId: string, run?: Partial<RunSnapshot>): RunSnaps
     slides: [],
     logs: Array.isArray(run?.logs)
       ? run.logs.filter((log): log is string => typeof log === "string").slice(-PERSISTED_LOG_LIMIT)
+      : [],
+    agentMessages: Array.isArray(run?.agentMessages)
+      ? run.agentMessages.filter(isGenerationAgentMessage).slice(-PERSISTED_LOG_LIMIT)
       : [],
     criticEvents: [],
     selectedSlide: undefined,
@@ -480,6 +557,7 @@ function normalizePersistedGenerationFields(persistedState: unknown): Partial<Ge
     currentRunConfig: state.currentRunConfig,
     slides: currentRun?.slides ?? [],
     logs: currentRun?.logs ?? [],
+    agentMessages: currentRun?.agentMessages ?? [],
     criticEvents: currentRun?.criticEvents ?? [],
     enrichmentStats: currentRun?.enrichmentStats,
     selectedSlide: currentRun?.selectedSlide,
@@ -517,6 +595,7 @@ export const useGeneration = create<GenerationState>()(
       providers: [],
       slides: [],
       logs: [],
+      agentMessages: [],
       criticEvents: [],
       connectionStatus: "disconnected",
       backendStatus: "connecting",
@@ -596,14 +675,24 @@ export const useGeneration = create<GenerationState>()(
             total_slides: 0,
           },
           logs: ["[parsing] Parsing paper..."],
+          agentMessages: [],
           currentRunConfig: {
-            provider: payload.model_config.provider,
-            model: payload.model_config.model,
-            baseUrl: payload.model_config.base_url,
+            provider:
+              payload.options.generation_backend === "agent"
+                ? `agent:${payload.options.agent_config?.runtime ?? "claude_code"}`
+                : payload.model_config?.provider ?? "unknown",
+            model:
+              payload.options.generation_backend === "agent"
+                ? payload.options.agent_config?.model || "agent-default"
+                : payload.model_config?.model ?? "unknown",
+            baseUrl: payload.model_config?.base_url,
             options: payload.options,
             parentJobId: null,
           },
-          enrichmentStats: buildEnrichmentPlaceholder(payload.options.research_config),
+          enrichmentStats:
+            payload.options.generation_backend === "agent"
+              ? undefined
+              : buildEnrichmentPlaceholder(payload.options.research_config),
           error: undefined,
           result: undefined,
           selectedSlide: undefined,
@@ -648,7 +737,10 @@ export const useGeneration = create<GenerationState>()(
             options: payload.options,
             parentJobId: payload.job_id,
           },
-          enrichmentStats: buildEnrichmentPlaceholder(payload.options.research_config),
+          enrichmentStats:
+            payload.options.generation_backend === "agent"
+              ? undefined
+              : buildEnrichmentPlaceholder(payload.options.research_config),
           error: undefined,
           result: undefined,
           selectedSlide: undefined,
@@ -706,6 +798,164 @@ export const useGeneration = create<GenerationState>()(
           });
         }
       },
+      async interruptCurrentAgent() {
+        const jobId = get().jobId;
+        if (!jobId) {
+          return;
+        }
+        const currentRun = get().runs[jobId] ?? createRunSnapshot(jobId);
+        const status = currentRun.job?.status;
+        if (status && FINAL_JOB_STATUSES.has(status)) {
+          return;
+        }
+
+        const nextJob: JobStatus = {
+          status: "paused",
+          progress: currentRun.job?.progress ?? 0,
+          message: "Pausing Agent...",
+          slides_completed: currentRun.job?.slides_completed ?? currentRun.slides.length,
+          total_slides: currentRun.job?.total_slides ?? currentRun.slides.length,
+          output_path: currentRun.job?.output_path,
+          error: undefined,
+          provider: currentRun.job?.provider,
+          model: currentRun.job?.model,
+          base_url: currentRun.job?.base_url,
+        };
+        const pausedRun: RunSnapshot = {
+          ...currentRun,
+          job: nextJob,
+          error: undefined,
+        };
+        set((state) => ({
+          ...applyRunToCurrent(pausedRun),
+          runs: {
+            ...state.runs,
+            [jobId]: pausedRun,
+          },
+        }));
+        get().syncHistory(jobId);
+
+        try {
+          const response = await interruptGenerationAgent(jobId);
+          if (response.status === "cancelled") {
+            const latestRun = get().runs[jobId] ?? pausedRun;
+            const cancelledJob: JobStatus = {
+              ...(latestRun.job ?? nextJob),
+              status: "cancelled",
+              message: "Agent job stopped before a live session was available.",
+              error: undefined,
+            };
+            const cancelledRun: RunSnapshot = {
+              ...latestRun,
+              job: cancelledJob,
+              error: undefined,
+            };
+            set((state) => ({
+              ...applyRunToCurrent(cancelledRun),
+              runs: {
+                ...state.runs,
+                [jobId]: cancelledRun,
+              },
+            }));
+            get().syncHistory(jobId);
+          }
+        } catch (error) {
+          set({
+            error: error instanceof Error ? error.message : "Failed to pause Agent",
+          });
+        }
+      },
+      async sendAgentFeedback(message, targetJobId) {
+        const text = message.trim();
+        const jobId = targetJobId ?? get().jobId;
+        if (!jobId || !text) {
+          return;
+        }
+        const now = Date.now();
+        const optimistic: GenerationAgentMessage = {
+          id: `${jobId}:user:${now}`,
+          role: "user",
+          content: text,
+          created_at: now,
+          kind: "message",
+        };
+        set((state) => {
+          const currentRun = state.runs[jobId] ?? createRunSnapshot(jobId);
+          const updatedRun = {
+            ...currentRun,
+            agentMessages: [...currentRun.agentMessages, optimistic].slice(-PERSISTED_LOG_LIMIT),
+          };
+          return {
+            ...(state.jobId === jobId ? applyRunToCurrent(updatedRun) : {}),
+            runs: {
+              ...state.runs,
+              [jobId]: updatedRun,
+            },
+          };
+        });
+        try {
+          const response = await sendGenerationAgentFeedback(jobId, text);
+          if (response.status === "injected") {
+            // Message was injected into a live running session.
+            // The agent's response will arrive via the existing WebSocket stream.
+            // No state change needed beyond the optimistic message already added.
+            return;
+          }
+          if (response.status === "queued") {
+            set((state) => {
+              const currentRun = state.runs[jobId] ?? createRunSnapshot(jobId);
+              const nextJob = currentRun.job
+                ? {
+                    ...currentRun.job,
+                    status: "pending",
+                    message: "Queued for Agent feedback revision",
+                    progress: Math.max(0.05, currentRun.job.progress ?? 0),
+                    error: null,
+                  }
+                : currentRun.job;
+              const updatedRun: RunSnapshot = {
+                ...currentRun,
+                job: nextJob,
+                connectionStatus: "connecting",
+                error: undefined,
+              };
+              return {
+                ...(state.jobId === jobId ? applyRunToCurrent(updatedRun) : {}),
+                activeJobId: jobId,
+                runs: {
+                  ...state.runs,
+                  [jobId]: updatedRun,
+                },
+              };
+            });
+            get().syncHistory(jobId);
+          }
+        } catch (error) {
+          set((state) => {
+            const currentRun = state.runs[jobId] ?? createRunSnapshot(jobId);
+            const failed: GenerationAgentMessage = {
+              id: `${jobId}:system:${Date.now()}`,
+              role: "system",
+              content: error instanceof Error ? error.message : "Failed to send guidance.",
+              created_at: Date.now(),
+              kind: "status",
+            };
+            const updatedRun = {
+              ...currentRun,
+              agentMessages: [...currentRun.agentMessages, failed].slice(-PERSISTED_LOG_LIMIT),
+              error: failed.content,
+            };
+            return {
+              ...(state.jobId === jobId ? applyRunToCurrent(updatedRun) : {}),
+              runs: {
+                ...state.runs,
+                [jobId]: updatedRun,
+              },
+            };
+          });
+          throw error;
+        }
+      },
       connect(jobId) {
         const existingSocket = get().socketsByJob[jobId];
         const existingRun = get().runs[jobId];
@@ -756,14 +1006,21 @@ export const useGeneration = create<GenerationState>()(
               const currentRun = state.runs[jobId] ?? createRunSnapshot(jobId);
               const isSnapshot = typeof seq !== "number" && typeof event.last_seq === "number";
               const logLine = formatLog(event);
+              const isAgentConsoleEvent =
+                event.stage === "agent" && currentRun.currentRunConfig?.provider?.startsWith("agent:");
               let logs =
-                !isSnapshot && event.message && !currentRun.logs.includes(logLine)
+                !isSnapshot && !isAgentConsoleEvent && event.message && !currentRun.logs.includes(logLine)
                   ? [...currentRun.logs, logLine]
                   : currentRun.logs;
-              for (const extra of buildExtraLogs(event)) {
+              for (const extra of isAgentConsoleEvent ? [] : buildExtraLogs(event)) {
                 if (!isSnapshot && !logs.includes(extra)) {
                   logs = [...logs, extra];
                 }
+              }
+              let agentMessages = currentRun.agentMessages;
+              const agentMessage = !isSnapshot ? agentMessageFromEvent(event) : null;
+              if (agentMessage && !agentMessages.some((item) => item.id === agentMessage.id)) {
+                agentMessages = [...agentMessages, agentMessage].slice(-PERSISTED_LOG_LIMIT);
               }
 
               const completedFromData =
@@ -771,8 +1028,12 @@ export const useGeneration = create<GenerationState>()(
               const rawSlidesCompleted = Math.max(event.slides_completed, completedFromData ?? 0);
               const slidesCompleted =
                 event.total_slides > 0 ? Math.min(rawSlidesCompleted, event.total_slides) : rawSlidesCompleted;
+              const displayStage =
+                event.stage === "agent" && currentRun.currentRunConfig?.provider?.startsWith("agent:")
+                  ? "generation"
+                  : event.stage;
               const nextJob: JobStatus = {
-                status: event.type === "complete" ? "complete" : event.type === "error" ? "error" : event.stage,
+                status: event.type === "complete" ? "complete" : event.type === "error" ? "error" : displayStage,
                 progress: event.progress,
                 message: event.message,
                 slides_completed: slidesCompleted,
@@ -829,6 +1090,7 @@ export const useGeneration = create<GenerationState>()(
                     ? pickLiveSelectedSlide(currentRun.slides, slides, currentRun.selectedSlide)
                     : pickSelectedSlide(slides, currentRun.selectedSlide),
                 logs,
+                agentMessages,
                 error: event.type === "error" ? event.message : undefined,
                 connectionStatus: FINAL_JOB_STATUSES.has(nextJob.status) ? "disconnected" : currentRun.connectionStatus,
                 lastSeq: typeof seq === "number" && seq > 0 ? Math.max(currentRun.lastSeq ?? 0, seq) : currentRun.lastSeq,
@@ -1210,6 +1472,7 @@ export const useGeneration = create<GenerationState>()(
                   job: undefined,
                   slides: [],
                   logs: [],
+                  agentMessages: [],
                   criticEvents: [],
                   selectedSlide: undefined,
                   connectionStatus: "disconnected" as const,
@@ -1253,6 +1516,7 @@ export const useGeneration = create<GenerationState>()(
             job: undefined,
             slides: [],
             logs: [],
+            agentMessages: [],
             criticEvents: [],
             selectedSlide: undefined,
             connectionStatus: "disconnected",
