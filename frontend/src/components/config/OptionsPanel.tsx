@@ -9,6 +9,7 @@ import { Switch } from "../ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
 
 interface OptionsPanelProps {
+  agentMode?: boolean;
   canvasFormat: string;
   languageMode: "zh" | "en" | "custom";
   customLanguage: string;
@@ -181,6 +182,7 @@ export function OptionsPanel(props: OptionsPanelProps) {
             placeholder={t("options.timeoutPlaceholder")}
           />
         </label>
+        {!props.agentMode ? (
         <label className="form-field">
           <span>
             {t("options.maxCriticAttempts")}
@@ -194,6 +196,7 @@ export function OptionsPanel(props: OptionsPanelProps) {
             onChange={(event) => props.onMaxCriticAttemptsChange(event.target.value)}
           />
         </label>
+        ) : null}
         <label className="visual-qa-field visual-qa-field-wide">
           <span
             className={`visual-qa-control ${
@@ -204,13 +207,13 @@ export function OptionsPanel(props: OptionsPanelProps) {
               <Eye size={16} />
             </span>
             <span className="visual-qa-copy">
-              <span className="visual-qa-name">{t("options.visualCritic")}</span>
-            </span>
-            <ConfigHelp text={t("options.visualCriticTooltip")} />
+                  <span className="visual-qa-name">{props.agentMode ? t("options.agentReview") : t("options.visualCritic")}</span>
+                </span>
+            <ConfigHelp text={props.agentMode ? t("options.agentReviewTooltip") : t("options.visualCriticTooltip")} />
             <Switch checked={props.enableVisualCritic} onCheckedChange={props.onEnableVisualCriticChange} />
           </span>
         </label>
-        {props.enableVisualCritic ? (
+        {props.enableVisualCritic && !props.agentMode ? (
           <div className="options-icon-sub visual-qa-attempts-sub">
             <label className="visual-qa-field visual-qa-child-field visual-qa-attempts-field">
               <span className="visual-qa-control visual-qa-number-control">
@@ -254,6 +257,7 @@ export function OptionsPanel(props: OptionsPanelProps) {
         </label>
       </div>
 
+      {!props.agentMode ? (
       <div className="options-icon-section">
         <label className="visual-qa-field visual-qa-field-wide">
           <span
@@ -313,8 +317,10 @@ export function OptionsPanel(props: OptionsPanelProps) {
           </div>
         ) : null}
       </div>
+      ) : null}
 
       {/* Icon section */}
+      {!props.agentMode ? (
       <div className="options-icon-section">
         <label className="visual-qa-field visual-qa-field-wide">
           <span
@@ -387,6 +393,7 @@ export function OptionsPanel(props: OptionsPanelProps) {
           </div>
         ) : null}
       </div>
+      ) : null}
 
       {/* Research Enrichment section */}
       <div className="options-icon-section research-enrichment-section">

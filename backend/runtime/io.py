@@ -10,6 +10,9 @@ half-written ``manuscript.md`` or state JSON.
 from __future__ import annotations
 
 import os
+import stat
+import time
+import uuid
 from pathlib import Path
 from typing import Union
 
@@ -25,9 +28,15 @@ def _read_text(path: PathLike, encoding: str, errors: str) -> str:
 def _write_text_atomic(path: PathLike, data: str, encoding: str) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(data, encoding=encoding)
-    os.replace(tmp, p)
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(data, encoding=encoding)
+        _replace_with_windows_retry(tmp, p)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _read_bytes(path: PathLike) -> bytes:
@@ -37,9 +46,33 @@ def _read_bytes(path: PathLike) -> bytes:
 def _write_bytes_atomic(path: PathLike, data: bytes) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, p)
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_bytes(data)
+        _replace_with_windows_retry(tmp, p)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _replace_with_windows_retry(tmp: Path, target: Path) -> None:
+    """Replace ``target`` with a short Windows-friendly retry window."""
+    delays = (0.02, 0.05, 0.1, 0.2, 0.4)
+    for attempt, delay in enumerate((*delays, 0.0)):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError:
+            if os.name == "nt" and target.exists():
+                try:
+                    target.chmod(stat.S_IWRITE | stat.S_IREAD)
+                except OSError:
+                    pass
+            if attempt == len(delays):
+                raise
+            time.sleep(delay)
 
 
 def _ensure_dir(path: PathLike) -> None:

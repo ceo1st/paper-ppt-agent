@@ -423,6 +423,11 @@ class LLMClient:
             "For `design_spec_md`, adapt the design_spec_reference to this imported template pack: "
             "describe canvas, visual theme, typography, the selected page types, placeholder/content "
             "guidance, image/assets, speaker notes, and technical constraints.\n\n"
+            "For placeholder decisions, first read the visible source text and page role, then choose "
+            "only a clearly matching standard placeholder: TITLE, SUBTITLE, AUTHOR, DATE, PAGE_TITLE, "
+            "CONTENT_AREA, TOC_ITEM_1 through TOC_ITEM_5, CHAPTER_TITLE, CHAPTER_NUMBER, ENDING_TITLE, "
+            "or ENDING_MESSAGE. Do not invent any other placeholder names. If the text meaning is "
+            "ambiguous, keep reusable chrome text or remove one-off content instead of replacing it.\n\n"
             f"Evidence:\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
         )
         messages: list[dict[str, str]] = [

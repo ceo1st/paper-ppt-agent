@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of recent events kept on disk per job, used for replay
 # when a websocket reconnects after a transient drop.
-EVENT_RING_SIZE = 256
+EVENT_RING_SIZE = 1000
 
 
 @dataclass
@@ -85,6 +85,8 @@ class Job:
     # everything after its last seen seq.
     events: list[dict] = field(default_factory=list)
     last_seq: int = 0
+    # Persisted Agent SDK session id for post-completion feedback resume.
+    agent_session_id: str | None = None
 
 
 class SessionManager:
@@ -396,7 +398,7 @@ class SessionManager:
         jobs as ``error`` so the UI stops polling for progress."""
         terminal = {"complete", "error", "cancelled"}
         running_states = {"pending", "parsing", "research", "strategy",
-                          "generation", "postprocess", "export", "refine"}
+                          "generation", "paused", "postprocess", "export", "refine"}
         changed = False
         for job in self._jobs.values():
             if job.status in terminal:
@@ -557,6 +559,7 @@ class SessionManager:
                     instruction=raw_job.get("instruction"),
                     events=events[-EVENT_RING_SIZE:],
                     last_seq=last_seq,
+                    agent_session_id=raw_job.get("agent_session_id"),
                 )
             except (KeyError, TypeError, ValueError):
                 continue

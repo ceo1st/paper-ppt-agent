@@ -140,6 +140,8 @@ class GenerationRequest:
     template_id: str | None = None  # Template ID from assets/templates/layouts/
     research_config: ResearchConfig | None = None  # Optional external research enrichment
     job_id: str | None = None
+    generation_backend: Literal["provider", "agent"] = "provider"
+    agent_config: dict | None = None
 
 
 def _effective_deep_research(request: GenerationRequest) -> bool:
@@ -154,6 +156,19 @@ async def run_pipeline(
 
     Yields ProgressEvent at each stage transition.
     """
+    if getattr(request, "generation_backend", "provider") == "agent":
+        from .agent_pipeline import run_agent_pipeline
+
+        async for event in run_agent_pipeline(request):
+            yield ProgressEvent(
+                event.stage,
+                event.status,
+                event.message,
+                event.progress,
+                event.data,
+            )
+        return
+
     # Initialize LLM provider
     from backend.generator.project_manager import get_notes, get_svg_files, init_project
     from backend.generator.svg_finalize import finalize_project

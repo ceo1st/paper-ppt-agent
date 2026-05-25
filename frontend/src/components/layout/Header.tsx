@@ -7,6 +7,7 @@ import {
   Languages,
   LayoutDashboard,
   Library,
+  Monitor,
   Moon,
   Plus,
   Sun,
@@ -18,7 +19,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/
 
 export function Header() {
   const { t, locale, toggleLocale } = useLocale();
-  const { theme, toggleTheme } = useTheme();
+  const { preference, cycleTheme } = useTheme();
   const { backendStatus, checkBackendStatus } = useGeneration();
   const location = useLocation();
   const isWorkspace = location.pathname === "/" || location.pathname === "/generate" || location.pathname === "/result";
@@ -30,6 +31,12 @@ export function Header() {
       : backendStatus === "connecting"
         ? t("status.connecting")
         : t("status.disconnected");
+  const themeActionLabel =
+    preference === "system"
+      ? t("theme.toLight")
+      : preference === "light"
+        ? t("theme.toDark")
+        : t("theme.toSystem");
 
   useEffect(() => {
     void checkBackendStatus();
@@ -91,11 +98,11 @@ export function Header() {
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="ghost" size="icon" type="button" onClick={toggleTheme}>
-                {theme === "light" ? <Moon size={18} /> : <Sun size={18} />}
+              <Button variant="ghost" size="icon" type="button" aria-label={themeActionLabel} onClick={cycleTheme}>
+                {preference === "system" ? <Monitor size={18} /> : preference === "light" ? <Sun size={18} /> : <Moon size={18} />}
               </Button>
             </TooltipTrigger>
-            <TooltipContent>{theme === "light" ? t("theme.dark") : t("theme.light")}</TooltipContent>
+            <TooltipContent>{themeActionLabel}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
         <Button className="h-10 rounded-md bg-primary px-4 text-primary-foreground shadow-sm" asChild>

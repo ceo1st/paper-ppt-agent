@@ -151,17 +151,15 @@ Templates use `{{PLACEHOLDER}}` format to mark replaceable content:
 |-------------|---------|-----------------|
 | `{{TITLE}}` | Main title | Cover |
 | `{{SUBTITLE}}` | Subtitle | Cover |
-| `{{DATE}}` | Date | Cover, Ending |
-| `{{AUTHOR}}` | Author / Organization (Chinese) | Cover |
-| `{{AUTHOR_EN}}` | Author / Organization (English) | Cover |
+| `{{AUTHOR}}` | Author / organization | Cover |
+| `{{DATE}}` | Date | Cover |
 
 ### Chapter-Related
 
 | Placeholder | Purpose | Applicable Pages |
 |-------------|---------|-----------------|
-| `{{CHAPTER_NUM}}` | Chapter number | Chapter, Content |
+| `{{CHAPTER_NUM}}` / `{{CHAPTER_NUMBER}}` | Chapter number | Chapter |
 | `{{CHAPTER_TITLE}}` | Chapter title | Chapter |
-| `{{CHAPTER_TITLE_EN}}` | Chapter English subtitle | Chapter |
 
 ### Content Page
 
@@ -169,25 +167,20 @@ Templates use `{{PLACEHOLDER}}` format to mark replaceable content:
 |-------------|---------|-----------------|
 | `{{PAGE_TITLE}}` | Page title | Content |
 | `{{CONTENT_AREA}}` | Content area placeholder | Content |
-| `{{PAGE_NUM}}` | Page number | Content, Ending |
-| `{{SOURCE}}` | Data source | Content footer |
 
 ### Table of Contents
 
 | Placeholder | Purpose |
 |-------------|---------|
-| `{{TOC_ITEM_1_TITLE}}` ~ `{{TOC_ITEM_N_TITLE}}` | TOC item titles |
-| `{{TOC_ITEM_1_DESC}}` ~ `{{TOC_ITEM_N_DESC}}` | Optional TOC item descriptions |
-| `{{TOC_ITEM_1}}` ~ `{{TOC_ITEM_N}}` | Legacy simple TOC items; do not use for new templates unless no description field is needed |
+| `{{TOC_ITEM_1}}` ~ `{{TOC_ITEM_5}}` | TOC item labels |
+| `{{TOC_LIST}}` | Full TOC list area |
 
 ### Ending Page
 
 | Placeholder | Purpose |
 |-------------|---------|
-| `{{THANK_YOU}}` | Thank-you message |
-| `{{ENDING_SUBTITLE}}` | Ending page subtitle |
-| `{{CLOSING_MESSAGE}}` | Closing message |
-| `{{CONTACT_INFO}}` | Contact information |
+| `{{ENDING_TITLE}}` | Ending page title |
+| `{{ENDING_MESSAGE}}` | Ending message |
 
 ---
 

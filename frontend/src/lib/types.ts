@@ -90,6 +90,8 @@ export interface ResearchEnrichmentStats {
 }
 
 export interface GenerationOptions {
+  generation_backend?: "provider" | "agent";
+  agent_config?: AgentGenerationConfig;
   canvas_format: string;
   style: string;
   num_pages?: number;
@@ -108,6 +110,18 @@ export interface GenerationOptions {
   gemini_api_key?: string;
   template_id?: string;
   research_config?: ResearchConfig;
+}
+
+export interface AgentGenerationConfig {
+  runtime: "claude_code" | "codex";
+  model?: string;
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh";
+  max_turns?: number;
+  load_project_settings?: boolean;
+  allow_external_research?: boolean;
+  allow_deep_research?: boolean;
+  enable_visual_qa?: boolean;
+  reply_language?: "zh" | "en";
 }
 
 export interface ImportStartResponse {
@@ -334,7 +348,7 @@ export interface OpenAISettings {
 export interface GenerateRequestPayload {
   session_id: string;
   instruction: string;
-  model_config: {
+  model_config?: {
     provider: string;
     model: string;
     api_key: string;
@@ -343,6 +357,25 @@ export interface GenerateRequestPayload {
     openai_settings?: OpenAISettings;
   };
   options: GenerationOptions;
+}
+
+export interface GenerationAgentFeedbackResponse {
+  job_id: string;
+  status: string;
+  path?: string | null;
+}
+
+export interface GenerationAgentMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at: number;
+  kind?: "message" | "tool" | "status" | "usage";
+  status?: string;
+  tool?: string;
+  toolUseId?: string;
+  subagentId?: string;
+  data?: Record<string, unknown>;
 }
 
 export type TemplateImportModelConfig = GenerateRequestPayload["model_config"];
@@ -456,6 +489,9 @@ export interface JobStatus {
   total_slides: number;
   output_path?: string | null;
   error?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  base_url?: string | null;
 }
 
 export interface CancelJobResponse {

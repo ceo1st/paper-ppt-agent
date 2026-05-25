@@ -15,7 +15,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 PLACEHOLDER_WHITELIST: frozenset[str] = frozenset({
-    "TITLE", "PAGE_TITLE", "SUBTITLE", "AUTHOR", "DATE", "GROUP",
+    "TITLE", "PAGE_TITLE", "SUBTITLE", "AUTHOR", "DATE",
     "CHAPTER_NUM", "CHAPTER_NUMBER", "CHAPTER_TITLE",
     "TOC_LIST", "TOC_ITEM_1", "TOC_ITEM_2", "TOC_ITEM_3", "TOC_ITEM_4", "TOC_ITEM_5",
     "CONTENT_AREA",
@@ -24,7 +24,7 @@ PLACEHOLDER_WHITELIST: frozenset[str] = frozenset({
 })
 
 PAGE_TYPE_ALLOWLIST: dict[str, frozenset[str]] = {
-    "cover":   frozenset({"TITLE", "PAGE_TITLE", "SUBTITLE", "AUTHOR", "DATE", "GROUP", "LOGO_HEADER", "LOGO_FOOTER"}),
+    "cover":   frozenset({"TITLE", "PAGE_TITLE", "SUBTITLE", "AUTHOR", "DATE", "LOGO_HEADER", "LOGO_FOOTER"}),
     "toc":     frozenset({"PAGE_TITLE", "TOC_LIST", "TOC_ITEM_1", "TOC_ITEM_2", "TOC_ITEM_3", "TOC_ITEM_4", "TOC_ITEM_5", "LOGO_HEADER", "LOGO_FOOTER"}),
     "chapter": frozenset({"CHAPTER_NUM", "CHAPTER_NUMBER", "CHAPTER_TITLE", "LOGO_HEADER", "LOGO_FOOTER"}),
     "content": frozenset({"PAGE_TITLE", "CONTENT_AREA", "LOGO_HEADER", "LOGO_FOOTER"}),

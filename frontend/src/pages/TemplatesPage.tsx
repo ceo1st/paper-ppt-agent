@@ -24,6 +24,7 @@ import {
   Trash2,
   UploadCloud,
   Wand2,
+  X,
 } from "lucide-react";
 
 import { Layout } from "../components/layout/Layout";
@@ -85,9 +86,18 @@ interface RoutingProfile {
 type RoutingProfileMap = Record<string, RoutingProfile>;
 
 const PAGE_TYPES: TemplatePageType[] = ["cover", "toc", "chapter", "content", "ending"];
+const DIRECT_PLACEHOLDER_RULES: Record<TemplatePageType, string[]> = {
+  cover: ["{{TITLE}} / {{PAGE_TITLE}}", "{{SUBTITLE}}", "{{AUTHOR}} / {{DATE}}", "{{LOGO_HEADER}} / {{LOGO_FOOTER}}"],
+  toc: ["{{PAGE_TITLE}}", "{{TOC_LIST}} / {{TOC_ITEM_1}} - {{TOC_ITEM_5}}", "{{LOGO_HEADER}} / {{LOGO_FOOTER}}"],
+  chapter: ["{{CHAPTER_NUM}} / {{CHAPTER_NUMBER}}", "{{CHAPTER_TITLE}}", "{{LOGO_HEADER}} / {{LOGO_FOOTER}}"],
+  content: ["{{PAGE_TITLE}}", "{{CONTENT_AREA}}", "{{LOGO_HEADER}} / {{LOGO_FOOTER}}"],
+  ending: ["{{ENDING_TITLE}}", "{{ENDING_MESSAGE}}", "{{LOGO_HEADER}} / {{LOGO_FOOTER}}"],
+};
 
 type LibraryFilter = "all" | "builtin" | "user";
 type CollabMode = "agent" | "direct";
+type UploadGuideDismissals = Partial<Record<CollabMode, boolean>>;
+let uploadGuideDismissalsThisSession: UploadGuideDismissals = {};
 
 function readModelConfig(): TemplateImportModelConfig | undefined {
   try {
@@ -164,6 +174,15 @@ function writeTemplateUploadMode(mode: CollabMode): void {
   }
 }
 
+function readTemplateUploadGuideDismissals(): UploadGuideDismissals {
+  return uploadGuideDismissalsThisSession;
+}
+
+function writeTemplateUploadGuideDismissal(mode: CollabMode, dismissed: boolean): UploadGuideDismissals {
+  uploadGuideDismissalsThisSession = { ...uploadGuideDismissalsThisSession, [mode]: dismissed };
+  return uploadGuideDismissalsThisSession;
+}
+
 function writeActiveTemplateImportId(importId: string | undefined): void {
   try {
     if (importId) {
@@ -197,6 +216,28 @@ function pickPreviewSvg(preview: TemplatePreview, pt: TemplatePageType): string 
     case "ending":
       return preview.ending_svg;
   }
+}
+
+function directImportReviewSignature(
+  draft: {
+    page_selections?: Partial<Record<TemplatePageType, number | null>>;
+    assets?: unknown;
+    preserve_texts?: unknown;
+    placeholder_hints?: unknown;
+    element_actions?: unknown;
+    annotations?: unknown;
+  },
+  pptistVersion?: string | null,
+): string {
+  return JSON.stringify({
+    pptist_version: pptistVersion ?? "",
+    page_selections: draft.page_selections ?? {},
+    assets: draft.assets ?? {},
+    preserve_texts: draft.preserve_texts ?? [],
+    placeholder_hints: draft.placeholder_hints ?? {},
+    element_actions: draft.element_actions ?? [],
+    annotations: draft.annotations ?? [],
+  });
 }
 
 export function TemplatesPage() {
@@ -239,6 +280,8 @@ export function TemplatesPage() {
   const [collabMode, setCollabMode] = useState<CollabMode>(readTemplateUploadMode);
   const [directConversation, setDirectConversation] = useState<Array<{ role: string; content: string; created_at?: number; meta?: Record<string, unknown> }>>([]);
   const [directDesignSpec, setDirectDesignSpec] = useState<string>("");
+  const [showDirectDesignSpecConfirm, setShowDirectDesignSpecConfirm] = useState(false);
+  const directDesignSpecSignatureRef = useRef<string | null>(null);
   const [agentConfig, setAgentConfig] = useState<TemplateAgentConfig>(readTemplateAgentConfig);
 
   const handleMissingImport = useCallback(
@@ -272,6 +315,11 @@ export function TemplatesPage() {
     retryStep,
   } = useTemplateImport(importId, { modelConfig, onMissingImport: handleMissingImport, t });
 
+  const currentDirectImportSignature = useMemo(
+    () => directImportReviewSignature(draft, review?.pptist_version),
+    [draft, review?.pptist_version],
+  );
+
   const modelConfigured = Boolean(modelConfig?.api_key && modelConfig?.model);
   const agentConfigured = true;
 
@@ -286,7 +334,17 @@ export function TemplatesPage() {
   useEffect(() => {
     writeActiveTemplateImportId(importId);
     setDirectDesignSpec("");
+    setShowDirectDesignSpecConfirm(false);
+    directDesignSpecSignatureRef.current = null;
   }, [importId]);
+
+  useEffect(() => {
+    if (collabMode !== "direct" || !directDesignSpec) return;
+    if (directDesignSpecSignatureRef.current === currentDirectImportSignature) return;
+    directDesignSpecSignatureRef.current = null;
+    setDirectDesignSpec("");
+    setDirectConversation([]);
+  }, [collabMode, currentDirectImportSignature, directDesignSpec]);
 
   useEffect(() => {
     if (importError) reportGlobalError(importError);
@@ -452,48 +510,71 @@ export function TemplatesPage() {
     [setTemplateError, upload, uploadMode, t],
   );
 
-  const handleConfirm = useCallback(async () => {
+  const handleGenerateDirectDesignSpec = useCallback(async () => {
+    setShowDirectDesignSpecConfirm(false);
     setConfirmingFlag(true);
     try {
-      if (collabMode === "direct") {
-        if (!modelConfig) {
-          setTemplateError(t("template.error.modelConfigRequired"));
-          return;
-        }
-        const currentSlideCount = review?.slide_count ?? review?.slides?.length ?? 0;
-        if (currentSlideCount !== 5) {
-          setTemplateError(t("template.directFiveSlidesRequired"));
-          return;
-        }
-        const next = await generateDirectDesignSpec();
-        const spec = next?.draft?.design_spec?.trim() || "";
-        setDirectDesignSpec(spec);
-        if (spec) {
-          setDirectConversation([
-            {
-              role: "assistant",
-              content: spec,
-              created_at: Date.now() / 1000,
-              meta: { mode: "direct", design_spec_preview: true },
-            },
-          ]);
-        }
+      const next = await generateDirectDesignSpec();
+      const spec = next?.draft?.design_spec?.trim() || "";
+      const nextDraft = next?.draft ?? draft;
+      directDesignSpecSignatureRef.current = directImportReviewSignature(nextDraft, next?.pptist_version ?? review?.pptist_version);
+      setDirectDesignSpec(spec);
+      if (spec) {
+        setDirectConversation([
+          {
+            role: "assistant",
+            content: spec,
+            created_at: Date.now() / 1000,
+            meta: { mode: "direct", design_spec_preview: true },
+          },
+        ]);
+      }
+    } finally {
+      setConfirmingFlag(false);
+    }
+  }, [draft, generateDirectDesignSpec, review]);
+
+  const handleConfirm = useCallback(async () => {
+    if (collabMode === "direct") {
+      if (!modelConfig) {
+        setTemplateError(t("template.error.modelConfigRequired"));
         return;
       }
-      await confirm();
-    } finally {
-      setConfirmingFlag(false);
+      const currentSlideCount = review?.slide_count ?? review?.slides?.length ?? 0;
+      if (currentSlideCount !== 5) {
+        setTemplateError(t("template.directFiveSlidesRequired"));
+        return;
+      }
+      setShowDirectDesignSpecConfirm(true);
+      return;
     }
-  }, [collabMode, confirm, generateDirectDesignSpec, modelConfig, review, setTemplateError, t]);
-
-  const handleConfirmDirectImport = useCallback(async () => {
     setConfirmingFlag(true);
     try {
       await confirm();
     } finally {
       setConfirmingFlag(false);
     }
-  }, [confirm]);
+  }, [collabMode, confirm, modelConfig, review, setTemplateError, t]);
+
+  const handleConfirmDirectImport = useCallback(async () => {
+    if (
+      collabMode === "direct" &&
+      directDesignSpec &&
+      directDesignSpecSignatureRef.current !== currentDirectImportSignature
+    ) {
+      directDesignSpecSignatureRef.current = null;
+      setDirectDesignSpec("");
+      setDirectConversation([]);
+      setTemplateError(t("template.directReviewStale"));
+      return;
+    }
+    setConfirmingFlag(true);
+    try {
+      await confirm();
+    } finally {
+      setConfirmingFlag(false);
+    }
+  }, [collabMode, confirm, currentDirectImportSignature, directDesignSpec, setTemplateError, t]);
 
   const handleEditDirectImport = useCallback(() => {
     setDirectDesignSpec("");
@@ -509,6 +590,7 @@ export function TemplatesPage() {
     setPendingAgentSelectionChanges([]);
     setDirectDesignSpec("");
     setDirectConversation([]);
+    setShowDirectDesignSpecConfirm(false);
     autoInspectionRef.current = null;
     setAnnotationMode(false);
     setAnnotationDraft(null);
@@ -714,30 +796,42 @@ export function TemplatesPage() {
     ],
   );
 
-  const handleStartTemplateization = useCallback(async () => {
-    if (collabMode !== "agent") return;
-    const latestReview = await refreshReview();
-    if (!latestReview?.pptist_version) {
-      setTemplateError(t("template.agentSaveRequired"));
-      return;
-    }
-    const selectionNote = formatPageSelectionChanges(pendingAgentSelectionChanges, t);
-    await runAgent(
-      [t("template.agentGuide.startPrompt"), selectionNote].filter(Boolean).join("\n\n"),
-      { ...agentConfig, reply_language: locale },
-      { planning: true, preview: true },
-    );
-    if (selectionNote) setPendingAgentSelectionChanges([]);
-  }, [
-    agentConfig,
-    collabMode,
-    locale,
-    pendingAgentSelectionChanges,
-    refreshReview,
-    runAgent,
-    setTemplateError,
-    t,
-  ]);
+  const runTemplateizationFromConversation = useCallback(
+    async (text: string) => {
+      if (collabMode !== "agent") return;
+      const latestReview = await refreshReview();
+      if (!latestReview?.pptist_version) {
+        setTemplateError(t("template.agentSaveRequired"));
+        return;
+      }
+      const selectionNote = formatPageSelectionChanges(pendingAgentSelectionChanges, t);
+      const userText = text.trim();
+      const prompt = agentTemplateized
+        ? [userText || t("template.agentGuide.startPrompt"), selectionNote]
+        : [
+            t("template.agentGuide.startPrompt"),
+            userText ? `User request:\n${userText}` : "",
+            selectionNote,
+          ];
+      await runAgent(
+        prompt.filter(Boolean).join("\n\n"),
+        { ...agentConfig, reply_language: locale },
+        { planning: true, preview: true },
+      );
+      if (selectionNote) setPendingAgentSelectionChanges([]);
+    },
+    [
+      agentConfig,
+      agentTemplateized,
+      collabMode,
+      locale,
+      pendingAgentSelectionChanges,
+      refreshReview,
+      runAgent,
+      setTemplateError,
+      t,
+    ],
+  );
 
   useEffect(() => {
     if (!isReviewing || collabMode !== "agent" || !importId || !review?.pptist_version) return;
@@ -1174,17 +1268,7 @@ export function TemplatesPage() {
                 agentStatus={agentStatus}
                 onSendFeedback={async (text) => {
                   if (collabMode === "agent") {
-                    if (agentTemplateized) {
-                      const selectionNote = formatPageSelectionChanges(pendingAgentSelectionChanges, t);
-                      await runAgent(
-                        [text || t("template.agentGuide.startPrompt"), selectionNote].filter(Boolean).join("\n\n"),
-                        { ...agentConfig, reply_language: locale },
-                        { planning: true, preview: true },
-                      );
-                      if (selectionNote) setPendingAgentSelectionChanges([]);
-                    } else {
-                      await runReadOnlyInspection({ reason: text || t("template.agentGuide.recheckPrompt") });
-                    }
+                    await runTemplateizationFromConversation(text);
                   } else if (collabMode === "direct") {
                     if (!selectedTemplateId || !modelConfig) return;
                     const now = Date.now() / 1000;
@@ -1203,7 +1287,6 @@ export function TemplatesPage() {
                   }
                 }}
                 onStopAgent={cancelAgent}
-                onStartTemplateization={handleStartTemplateization}
                 importId={importId}
                 contextAttachments={pendingAgentSelectionChanges.map((change) => {
                   const label = t(`templates.preview.tilelabel.${change.pageType}`);
@@ -1234,6 +1317,16 @@ export function TemplatesPage() {
           </div>
         </aside>
       </section>
+      {showDirectDesignSpecConfirm
+        ? createPortal(
+            <DirectDesignSpecGenerationConfirm
+              busy={confirmingFlag}
+              onClose={() => setShowDirectDesignSpecConfirm(false)}
+              onConfirm={() => void handleGenerateDirectDesignSpec()}
+            />,
+            document.body,
+          )
+        : null}
     </Layout>
   );
 }
@@ -1420,6 +1513,10 @@ function UploadCard({
   const { t } = useLocale();
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const [guideMode, setGuideMode] = useState<CollabMode | null>(null);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [dismissedGuides, setDismissedGuides] = useState<UploadGuideDismissals>(readTemplateUploadGuideDismissals);
+  const [skipGuideNextTime, setSkipGuideNextTime] = useState(false);
   const ready = mode === "agent" ? agentConfigured : true;
 
   const handleFile = async (file: File) => {
@@ -1431,6 +1528,37 @@ function UploadCard({
     await onUpload(file);
   };
 
+  useEffect(() => {
+    setGuideMode(null);
+    setPendingFile(null);
+    setSkipGuideNextTime(false);
+  }, [mode]);
+
+  const requestFileSelection = () => {
+    if (dismissedGuides[mode]) {
+      inputRef.current?.click();
+      return;
+    }
+    setPendingFile(null);
+    setSkipGuideNextTime(false);
+    setGuideMode(mode);
+  };
+
+  const continueUpload = () => {
+    if (guideMode && skipGuideNextTime) {
+      setDismissedGuides(writeTemplateUploadGuideDismissal(guideMode, true));
+    }
+    setGuideMode(null);
+    setSkipGuideNextTime(false);
+    if (pendingFile) {
+      const file = pendingFile;
+      setPendingFile(null);
+      void handleFile(file);
+      return;
+    }
+    inputRef.current?.click();
+  };
+
   const onDragOver = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(true);
@@ -1440,7 +1568,14 @@ function UploadCard({
     event.preventDefault();
     setDragging(false);
     const file = event.dataTransfer.files?.[0];
-    if (file) void handleFile(file);
+    if (!file) return;
+    if (dismissedGuides[mode]) {
+      void handleFile(file);
+      return;
+    }
+    setPendingFile(file);
+    setSkipGuideNextTime(false);
+    setGuideMode(mode);
   };
 
   return (
@@ -1479,11 +1614,11 @@ function UploadCard({
         role="button"
         tabIndex={0}
         aria-busy={uploading}
-        onClick={() => !uploading && inputRef.current?.click()}
+        onClick={() => !uploading && requestFileSelection()}
         onKeyDown={(e) => {
           if ((e.key === "Enter" || e.key === " ") && !uploading) {
             e.preventDefault();
-            inputRef.current?.click();
+            requestFileSelection();
           }
         }}
         onDragOver={onDragOver}
@@ -1527,6 +1662,285 @@ function UploadCard({
           </span>
         </div>
       ) : null}
+      {guideMode === "direct"
+        ? createPortal(
+            <DirectImportUploadGuide
+              onClose={() => {
+                setGuideMode(null);
+                setPendingFile(null);
+                setSkipGuideNextTime(false);
+              }}
+              onContinue={continueUpload}
+              dontShowAgain={skipGuideNextTime}
+              onDontShowAgainChange={setSkipGuideNextTime}
+            />,
+            document.body,
+          )
+        : null}
+      {guideMode === "agent"
+        ? createPortal(
+            <AgentImportUploadGuide
+              onClose={() => {
+                setGuideMode(null);
+                setPendingFile(null);
+                setSkipGuideNextTime(false);
+              }}
+              onContinue={continueUpload}
+              dontShowAgain={skipGuideNextTime}
+              onDontShowAgainChange={setSkipGuideNextTime}
+            />,
+            document.body,
+          )
+        : null}
+    </div>
+  );
+}
+
+function AgentImportUploadGuide({
+  onClose,
+  onContinue,
+  dontShowAgain,
+  onDontShowAgainChange,
+}: {
+  onClose: () => void;
+  onContinue: () => void;
+  dontShowAgain: boolean;
+  onDontShowAgainChange: (checked: boolean) => void;
+}) {
+  const { t } = useLocale();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="ti-direct-guide-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="ti-agent-upload-guide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agent-import-guide-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="ti-direct-guide-header">
+          <div>
+            <p className="ti-direct-guide-kicker">Agent</p>
+            <h2 id="agent-import-guide-title">{t("template.agentGuide.uploadTitle")}</h2>
+            <p>{t("template.agentGuide.uploadDescription")}</p>
+          </div>
+          <button
+            type="button"
+            className="ti-focusable ti-direct-guide-close"
+            onClick={onClose}
+            aria-label={t("template.agentGuide.uploadClose")}
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <div className="ti-agent-upload-requirement">
+          <Bot size={18} />
+          <div>
+            <strong>{t("template.agentGuide.uploadRequirement")}</strong>
+            <p>{t("template.agentGuide.uploadRequirementDetail")}</p>
+          </div>
+        </div>
+        <footer className="ti-agent-upload-actions">
+          <UploadGuideOptOut checked={dontShowAgain} onChange={onDontShowAgainChange} />
+          <div className="ti-upload-guide-buttons">
+            <button type="button" className="ti-focusable ti-direct-guide-secondary" onClick={onClose}>
+              {t("template.directGuide.cancel")}
+            </button>
+            <button type="button" className="ti-focusable ti-direct-guide-primary" onClick={onContinue}>
+              <UploadCloud size={15} />
+              {t("template.agentGuide.uploadContinue")}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function DirectImportUploadGuide({
+  onClose,
+  onContinue,
+  dontShowAgain,
+  onDontShowAgainChange,
+}: {
+  onClose: () => void;
+  onContinue: () => void;
+  dontShowAgain: boolean;
+  onDontShowAgainChange: (checked: boolean) => void;
+}) {
+  const { t } = useLocale();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="ti-direct-guide-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="ti-direct-guide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="direct-import-guide-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="ti-direct-guide-header">
+          <div>
+            <p className="ti-direct-guide-kicker">{t("templates.upload.mode.direct")}</p>
+            <h2 id="direct-import-guide-title">{t("template.directGuide.title")}</h2>
+            <p>{t("template.directGuide.description")}</p>
+          </div>
+          <button
+            type="button"
+            className="ti-focusable ti-direct-guide-close"
+            onClick={onClose}
+            aria-label={t("template.directGuide.close")}
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <div className="ti-direct-guide-notice">
+          <FileCheck2 size={16} />
+          <span>{t("template.directGuide.format")}</span>
+        </div>
+        <div className="ti-direct-guide-grid" aria-label={t("template.directGuide.orderTitle")}>
+          {PAGE_TYPES.map((pageType, index) => (
+            <div className="ti-direct-guide-page" key={pageType}>
+              <div className="ti-direct-guide-page-title">
+                <b>{String(index + 1).padStart(2, "0")}</b>
+                <strong>{t(`template.page.${pageType}`)}</strong>
+              </div>
+              <p>{DIRECT_PLACEHOLDER_RULES[pageType].join("  ")}</p>
+            </div>
+          ))}
+        </div>
+        <div className="ti-direct-guide-rules">
+          <h3>{t("template.directGuide.placeholderTitle")}</h3>
+          <ul>
+            <li>{t("template.directGuide.placeholderRuleSyntax")}</li>
+            <li>{t("template.directGuide.placeholderRuleUnique")}</li>
+            <li>{t("template.directGuide.placeholderRuleFixed")}</li>
+            <li>{t("template.directGuide.placeholderRuleModel")}</li>
+          </ul>
+        </div>
+        <footer className="ti-direct-guide-actions">
+          <UploadGuideOptOut checked={dontShowAgain} onChange={onDontShowAgainChange} />
+          <div className="ti-upload-guide-buttons">
+            <button type="button" className="ti-focusable ti-direct-guide-secondary" onClick={onClose}>
+              {t("template.directGuide.cancel")}
+            </button>
+            <button type="button" className="ti-focusable ti-direct-guide-primary" onClick={onContinue}>
+              <UploadCloud size={15} />
+              {t("template.directGuide.continue")}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function UploadGuideOptOut({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  const { t } = useLocale();
+  return (
+    <label className="ti-upload-guide-optout">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+      <span>{t("template.uploadGuide.dontShowAgain")}</span>
+    </label>
+  );
+}
+
+function DirectDesignSpecGenerationConfirm({
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useLocale();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
+
+  return (
+    <div
+      className="ti-direct-guide-backdrop"
+      role="presentation"
+      onMouseDown={() => {
+        if (!busy) onClose();
+      }}
+    >
+      <section
+        className="ti-agent-upload-guide ti-direct-spec-confirm"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="direct-spec-confirm-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="ti-direct-guide-header">
+          <div>
+            <p className="ti-direct-guide-kicker">{t("templates.upload.mode.direct")}</p>
+            <h2 id="direct-spec-confirm-title">{t("template.directSpecConfirm.title")}</h2>
+            <p>{t("template.directSpecConfirm.description")}</p>
+          </div>
+          <button
+            type="button"
+            className="ti-focusable ti-direct-guide-close"
+            onClick={onClose}
+            disabled={busy}
+            aria-label={t("template.directSpecConfirm.close")}
+          >
+            <X size={16} />
+          </button>
+        </header>
+        <div className="ti-direct-spec-info">
+          <FileCheck2 size={18} />
+          <div>
+            <p>{t("template.directSpecConfirm.whatItDoes")}</p>
+            <p>{t("template.directSpecConfirm.secondStep")}</p>
+          </div>
+        </div>
+        <p className="ti-direct-spec-cost">{t("template.directSpecConfirm.cost")}</p>
+        <footer className="ti-agent-upload-actions ti-direct-spec-actions">
+          <div className="ti-upload-guide-buttons">
+            <button type="button" className="ti-focusable ti-direct-guide-secondary" onClick={onClose} disabled={busy}>
+              {t("template.directSpecConfirm.cancel")}
+            </button>
+            <button type="button" className="ti-focusable ti-direct-guide-primary" onClick={onConfirm} disabled={busy}>
+              {busy ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+              {t("template.directSpecConfirm.confirm")}
+            </button>
+          </div>
+        </footer>
+      </section>
     </div>
   );
 }

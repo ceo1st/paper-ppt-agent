@@ -58,6 +58,7 @@ frontend/.cache/
 .pytest_cache/
 .pytest_tmp/
 .test-runtime/
+.playwright-mcp/
 pytest-cache-files-*/
 htmlcov/
 .coverage

@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 
-from backend.api.schemas import GenerateRequest, GenerateResponse
+from backend.api.schemas import AgentFeedbackRequest, AgentFeedbackResponse, GenerateRequest, GenerateResponse
 from backend.runtime.scheduler import QueueFull, SchedulerDraining, get_scheduler
 from backend.session.manager import session_manager
 from backend.session.progress import describe_exception, payloads_from_progress_event
@@ -32,6 +34,35 @@ async def _iterate_pipeline(job_id: str, request: Any) -> None:
     set_usage_context(job_id=job_id)
 
     async for event in run_pipeline(request):
+        current_job = session_manager.get_job(job_id)
+        if current_job is None:
+            return
+        for payload, updates in payloads_from_progress_event(job_id, current_job, event):
+            session_manager.record_event(job_id, payload, **updates)
+
+
+async def _iterate_agent_feedback_pipeline(
+    job_id: str,
+    *,
+    project_dir: Path,
+    feedback: str,
+    runtime: str,
+    total_slides_hint: int,
+    session_id: str | None = None,
+) -> None:
+    from backend.orchestrator.agent_pipeline import run_agent_feedback_pipeline
+    from backend.usage.tracker import set_usage_context
+
+    set_usage_context(job_id=job_id)
+
+    async for event in run_agent_feedback_pipeline(
+        project_dir=project_dir,
+        feedback=feedback,
+        runtime=runtime,
+        total_slides_hint=total_slides_hint,
+        session_id=session_id,
+        job_id=job_id,
+    ):
         current_job = session_manager.get_job(job_id)
         if current_job is None:
             return
@@ -100,6 +131,61 @@ async def _run_generation_job(job_id: str, request: Any) -> None:
             _cleanup_partial_workspace(job_id)
 
 
+async def _run_agent_feedback_job(
+    job_id: str,
+    *,
+    project_dir: Path,
+    feedback: str,
+    runtime: str,
+    total_slides_hint: int,
+    session_id: str | None = None,
+) -> None:
+    from backend.orchestrator.pipeline import ProgressEvent
+
+    job = session_manager.get_job(job_id)
+    if job is None:
+        return
+
+    cleanup_needed = False
+    try:
+        await _iterate_agent_feedback_pipeline(
+            job_id,
+            project_dir=project_dir,
+            feedback=feedback,
+            runtime=runtime,
+            total_slides_hint=total_slides_hint,
+            session_id=session_id,
+        )
+    except asyncio.CancelledError:
+        session_manager.mark_job_cancelled(job_id, "Agent feedback task cancelled")
+        cleanup_needed = True
+        raise
+    except Exception as exc:
+        current_job = session_manager.get_job(job_id)
+        if current_job is None:
+            return
+        error_event = ProgressEvent(
+            "error",
+            "error",
+            describe_exception(exc, "Agent feedback failed"),
+            current_job.progress,
+        )
+        for payload, updates in payloads_from_progress_event(job_id, current_job, error_event):
+            session_manager.record_event(job_id, payload, **updates)
+        cleanup_needed = True
+    finally:
+        if cleanup_needed:
+            _cleanup_partial_workspace(job_id)
+
+
+def _agent_runtime_from_job(job: Any) -> str:
+    provider = str(getattr(job, "provider", "") or "")
+    if provider.startswith("agent:"):
+        runtime = provider.split(":", 1)[1].strip()
+        return runtime or "claude_code"
+    return "claude_code"
+
+
 @router.post("/generate", response_model=GenerateResponse)
 async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
     from backend.orchestrator.pipeline import GenerationRequest
@@ -111,14 +197,46 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
             detail="Session not found.",
         )
 
+    generation_backend = request.options.generation_backend
+    model_settings = request.model_settings
+    if generation_backend == "provider" and model_settings is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provider generation requires model_config.",
+        )
+    if generation_backend == "agent":
+        from backend.orchestrator.agent_pipeline import agent_runtime_status
+
+        runtime = (
+            request.options.agent_config.runtime
+            if request.options.agent_config
+            else "claude_code"
+        )
+        runtime_status = await agent_runtime_status(runtime)
+        if not runtime_status.get("available"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=runtime_status.get("message") or f"Agent runtime '{runtime}' is not ready.",
+            )
+
     job = session_manager.create_job(request.session_id)
+    provider_label = (
+        model_settings.provider
+        if model_settings is not None
+        else f"agent:{(request.options.agent_config.runtime if request.options.agent_config else 'claude_code')}"
+    )
+    model_label = (
+        model_settings.model
+        if model_settings is not None
+        else (request.options.agent_config.model if request.options.agent_config else None) or "agent-default"
+    )
     session_manager.update_job(
         job.id,
         status="pending",
         message="Queued for generation",
-        provider=request.model_settings.provider,
-        model_name=request.model_settings.model,
-        base_url=request.model_settings.base_url,
+        provider=provider_label,
+        model_name=model_label,
+        base_url=model_settings.base_url if model_settings is not None else None,
         canvas_format=request.options.canvas_format,
         style=request.options.style,
         language=request.options.language,
@@ -129,10 +247,10 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
     pipeline_request = GenerationRequest(
         file_path=session.file_path,
         source_type=session.source_type,  # type: ignore[arg-type]
-        provider=request.model_settings.provider,
-        model=request.model_settings.model,
-        api_key=request.model_settings.api_key,
-        base_url=request.model_settings.base_url,
+        provider=model_settings.provider if model_settings is not None else "",
+        model=model_settings.model if model_settings is not None else "",
+        api_key=model_settings.api_key if model_settings is not None else "",
+        base_url=model_settings.base_url if model_settings is not None else None,
         canvas_format=request.options.canvas_format,
         style=request.options.style,
         num_pages=request.options.num_pages,
@@ -151,15 +269,17 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         enable_deep_research=request.options.enable_deep_research,
         icon_library=request.options.icon_library,
         deepseek_settings=(
-            request.model_settings.deepseek_settings.model_dump()
-            if request.model_settings.provider == "deepseek"
-            and request.model_settings.deepseek_settings
+            model_settings.deepseek_settings.model_dump()
+            if model_settings is not None
+            and model_settings.provider == "deepseek"
+            and model_settings.deepseek_settings
             else None
         ),
         openai_settings=(
-            request.model_settings.openai_settings.model_dump()
-            if request.model_settings.provider == "openai"
-            and request.model_settings.openai_settings
+            model_settings.openai_settings.model_dump()
+            if model_settings is not None
+            and model_settings.provider == "openai"
+            and model_settings.openai_settings
             else None
         ),
         enable_visual_critic=request.options.enable_visual_critic,
@@ -170,6 +290,12 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         template_id=request.options.template_id,
         research_config=request.options.research_config,
         job_id=job.id,
+        generation_backend=generation_backend,
+        agent_config=(
+            request.options.agent_config.model_dump(exclude_none=True)
+            if request.options.agent_config
+            else None
+        ),
     )
 
     scheduler = get_scheduler()
@@ -203,3 +329,176 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         ) from exc
 
     return GenerateResponse(job_id=job.id, status="queued")
+
+
+@router.post("/generate/{job_id}/agent-feedback", response_model=AgentFeedbackResponse)
+async def send_agent_generation_feedback(
+    job_id: str,
+    payload: AgentFeedbackRequest,
+) -> AgentFeedbackResponse:
+    job = session_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' not found.",
+        )
+    if not job.project_dir:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Agent workspace is not ready yet.",
+        )
+    if not str(job.provider or "").startswith("agent:"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Feedback is only supported for Agent generation jobs.",
+        )
+
+    text = payload.message.strip()
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Feedback message is required.",
+        )
+
+    from backend.runtime import aensure_dir, awrite_text
+
+    target_dir = Path(job.project_dir) / "agent_feedback"
+    await aensure_dir(target_dir)
+    filename = f"{int(time.time() * 1000)}.md"
+    target = target_dir / filename
+    await awrite_text(target, text + "\n", encoding="utf-8")
+    session_manager.record_event(
+        job_id,
+        {
+            "type": "progress",
+            "job_id": job_id,
+            "stage": "agent",
+            "status": "progress",
+            "message": "User guidance received.",
+            "progress": job.progress,
+            "slides_completed": job.slides_completed,
+            "total_slides": job.total_slides,
+            "data": {
+                "agent_feedback": {
+                    "path": str(target),
+                    "message": text,
+                }
+            },
+        },
+    )
+
+    # NEW: Route to live session if agent is actively running.
+    from backend.orchestrator.agent_session_registry import get as get_live_session
+    live_session = get_live_session(job_id)
+
+    if live_session is not None:
+        if job.status == "paused":
+            session_manager.update_job(
+                job_id,
+                status="generation",
+                message="Agent is applying guidance...",
+                error=None,
+            )
+        await live_session.send_message(text)
+        return AgentFeedbackResponse(job_id=job_id, status="injected", path=str(target))
+
+    if job.status == "complete":
+        scheduler = get_scheduler()
+        runtime = _agent_runtime_from_job(job)
+        project_dir = Path(job.project_dir)
+        # Load persisted session_id for context continuity.
+        from backend.orchestrator.agent_pipeline import _load_agent_session_id
+        prev_session_id = _load_agent_session_id(project_dir)
+        session_manager.update_job(
+            job_id,
+            status="pending",
+            message="Queued for Agent feedback revision",
+            progress=0.05,
+            error=None,
+        )
+
+        async def _runner() -> None:
+            await _run_agent_feedback_job(
+                job_id,
+                project_dir=project_dir,
+                feedback=text,
+                runtime=runtime,
+                total_slides_hint=job.total_slides,
+                session_id=prev_session_id,
+            )
+
+        try:
+            await scheduler.submit(job_id, _runner, priority=5)
+            return AgentFeedbackResponse(job_id=job_id, status="queued", path=str(target))
+        except RuntimeError as exc:
+            session_manager.update_job(
+                job_id,
+                status="error",
+                message=str(exc),
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        except (QueueFull, SchedulerDraining) as exc:
+            session_manager.update_job(
+                job_id,
+                status="error",
+                message=str(exc),
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+
+    return AgentFeedbackResponse(job_id=job_id, status="received", path=str(target))
+
+
+@router.post("/generate/{job_id}/agent-interrupt", response_model=AgentFeedbackResponse)
+async def interrupt_agent_generation(job_id: str) -> AgentFeedbackResponse:
+    job = session_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' not found.",
+        )
+    if not str(job.provider or "").startswith("agent:"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Interrupt is only supported for Agent generation jobs.",
+        )
+    if job.status in {"complete", "error", "cancelled"}:
+        return AgentFeedbackResponse(job_id=job_id, status=job.status)
+
+    from backend.orchestrator.agent_session_registry import get as get_live_session
+
+    live_session = get_live_session(job_id)
+    if live_session is None:
+        session_manager.cancel_job(job_id)
+        session_manager.mark_job_cancelled(
+            job_id,
+            "Agent job stopped before a live session was available.",
+        )
+        return AgentFeedbackResponse(job_id=job_id, status="cancelled")
+
+    await live_session.interrupt()
+    session_manager.record_event(
+        job_id,
+        {
+            "type": "progress",
+            "job_id": job_id,
+            "stage": "agent",
+            "status": "progress",
+            "message": "Interrupt requested. Waiting for the Agent to pause...",
+            "progress": job.progress,
+            "slides_completed": job.slides_completed,
+            "total_slides": job.total_slides,
+            "data": {"agent_interrupt": True},
+        },
+        status="paused",
+        message="Agent pause requested. Send guidance to continue.",
+        error=None,
+    )
+    return AgentFeedbackResponse(job_id=job_id, status="interrupting")

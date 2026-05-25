@@ -17,7 +17,6 @@ import {
   Send,
   Square,
   User,
-  Wand2,
   X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -60,7 +59,6 @@ export interface CollabPanelProps {
   agentCancelPending?: boolean;
   onSendFeedback: (text: string) => Promise<void> | void;
   onStopAgent?: () => Promise<void> | void;
-  onStartTemplateization?: () => Promise<void> | void;
   importId?: string | null;
   contextAttachments?: Array<{ id: string; label: string; detail?: string }>;
   modelConfigured: boolean;
@@ -98,7 +96,6 @@ export function CollabPanel({
   agentCancelPending = false,
   onSendFeedback,
   onStopAgent,
-  onStartTemplateization,
   importId,
   contextAttachments = [],
   modelConfigured,
@@ -482,20 +479,6 @@ export function CollabPanel({
     </div>
   );
 
-  const agentGuideActions = mode === "agent" ? (
-    <div className="ti-agent-guide-actions">
-      <button
-        type="button"
-        className="ti-focusable ti-agent-guide-primary"
-        onClick={() => void onStartTemplateization?.()}
-        disabled={loading || !modelConfigured || !onStartTemplateization}
-      >
-        <Wand2 size={13} />
-        <span>{t("template.agentGuide.startTemplateization")}</span>
-      </button>
-    </div>
-  ) : null;
-
   return (
     <aside
       className={`ti-console-panel flex h-full flex-col ${className ?? ""}`}
@@ -530,7 +513,6 @@ export function CollabPanel({
           </div>
         ) : (
           <>
-          {agentGuideActions}
           <div
             ref={scrollerRef}
             className="ti-console-timeline"

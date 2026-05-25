@@ -1416,11 +1416,10 @@ def _placeholder_context(
             _placeholder_text(None, "DATE", fallback(float(title["x"]) + canvas_w * 0.16, canvas_h * 0.72, 14, "400", "#6B7280"))
         )
     elif page_type == "chapter":
-        num = take_hint("CHAPTER_NUM") or take(lambda c: re.fullmatch(r"\d+", c["text"].strip()) is not None, fallback(canvas_w * 0.18, canvas_h * 0.5, 64, "700", "#CBD5E1"))
+        num = take_hint("CHAPTER_NUMBER") or take_hint("CHAPTER_NUM") or take(lambda c: re.fullmatch(r"\d+", c["text"].strip()) is not None, fallback(canvas_w * 0.18, canvas_h * 0.5, 64, "700", "#CBD5E1"))
         title = take_hint("CHAPTER_TITLE") or take(lambda c: c is not num, fallback(canvas_w * 0.28, canvas_h * 0.5, 34))
-        placeholders.append(_placeholder_text(num, "CHAPTER_NUM", fallback(canvas_w * 0.18, canvas_h * 0.5, 64)))
+        placeholders.append(_placeholder_text(num, "CHAPTER_NUMBER", fallback(canvas_w * 0.18, canvas_h * 0.5, 64)))
         placeholders.append(_placeholder_text(title, "CHAPTER_TITLE", fallback(canvas_w * 0.28, canvas_h * 0.5, 34)))
-        placeholders.append(_placeholder_text(None, "CHAPTER_TITLE_EN", fallback(float(title["x"]), float(title["y"]) + 34, 16, "400", "#6B7280")))
     elif page_type == "toc":
         title = take_hint("PAGE_TITLE") or take(
             lambda c: bool(re.search(r"目录|contents|toc", c["text"], re.I)),
@@ -1429,14 +1428,14 @@ def _placeholder_context(
         placeholders.append(_placeholder_text(title, "PAGE_TITLE", fallback(canvas_w * 0.06, canvas_h * 0.16, 30)))
         items = [c for c in by_flow if id(c) not in used and c["y"] > canvas_h * 0.14]
         for index, candidate in enumerate(items[:5], 1):
-            token = f"TOC_ITEM_{index}_TITLE"
+            token = f"TOC_ITEM_{index}"
             placeholders.append(_placeholder_text(take_hint(token) or candidate, token, fallback(canvas_w * 0.12, canvas_h * (0.28 + index * 0.08), 20, "600")))
     elif page_type == "ending":
-        thanks = take_hint("THANK_YOU") or take(lambda c: canvas_h * 0.15 <= c["y"] <= canvas_h * 0.8, fallback(canvas_w * 0.5, canvas_h * 0.46, 44))
+        thanks = take_hint("ENDING_TITLE") or take(lambda c: canvas_h * 0.15 <= c["y"] <= canvas_h * 0.8, fallback(canvas_w * 0.5, canvas_h * 0.46, 44))
         if thanks:
             thanks["text_anchor"] = thanks.get("text_anchor") or "middle"
-        placeholders.append(_placeholder_text(thanks, "THANK_YOU", fallback(canvas_w * 0.5, canvas_h * 0.46, 44)))
-        placeholders.append(_placeholder_text(None, "CONTACT_INFO", fallback(canvas_w * 0.5, canvas_h * 0.56, 18, "400", "#4B5563") | {"text_anchor": "middle"}))
+        placeholders.append(_placeholder_text(thanks, "ENDING_TITLE", fallback(canvas_w * 0.5, canvas_h * 0.46, 44)))
+        placeholders.append(_placeholder_text(None, "ENDING_MESSAGE", fallback(canvas_w * 0.5, canvas_h * 0.56, 18, "400", "#4B5563") | {"text_anchor": "middle"}))
     else:
         title = take_hint("PAGE_TITLE") or take(lambda c: canvas_h * 0.08 <= c["y"] <= canvas_h * 0.28, fallback(canvas_w * 0.06, canvas_h * 0.14, 26))
         placeholders.append(_placeholder_text(title, "PAGE_TITLE", fallback(canvas_w * 0.06, canvas_h * 0.14, 26)))
@@ -1678,26 +1677,24 @@ def _inject_placeholders(
     elif page_type == "chapter":
         placeholders = f"""
   <g id="template-placeholders">
-    <text x="{margin_x}" y="{int(canvas_h * 0.38)}" fill="#1F2937" font-family="Arial, sans-serif" font-size="28" font-weight="700">{{{{CHAPTER_NUM}}}}</text>
+    <text x="{margin_x}" y="{int(canvas_h * 0.38)}" fill="#1F2937" font-family="Arial, sans-serif" font-size="28" font-weight="700">{{{{CHAPTER_NUMBER}}}}</text>
     <text x="{margin_x}" y="{int(canvas_h * 0.5)}" fill="#111827" font-family="Arial, sans-serif" font-size="42" font-weight="700">{{{{CHAPTER_TITLE}}}}</text>
-    <text x="{margin_x}" y="{int(canvas_h * 0.58)}" fill="#6B7280" font-family="Arial, sans-serif" font-size="20">{{{{CHAPTER_TITLE_EN}}}}</text>
   </g>
 """
     elif page_type == "toc":
         placeholders = f"""
   <g id="template-placeholders">
     <text x="{margin_x}" y="{top_y}" fill="#111827" font-family="Arial, sans-serif" font-size="30" font-weight="700">{{{{PAGE_TITLE}}}}</text>
-    <text x="{content_x}" y="{content_y}" fill="#374151" font-family="Arial, sans-serif" font-size="22">{{{{TOC_ITEM_1_TITLE}}}}</text>
-    <text x="{content_x}" y="{content_y + 64}" fill="#374151" font-family="Arial, sans-serif" font-size="22">{{{{TOC_ITEM_2_TITLE}}}}</text>
-    <text x="{content_x}" y="{content_y + 128}" fill="#374151" font-family="Arial, sans-serif" font-size="22">{{{{TOC_ITEM_3_TITLE}}}}</text>
-    <text x="{canvas_w - margin_x}" y="{footer_y}" text-anchor="end" fill="#6B7280" font-family="Arial, sans-serif" font-size="14">{{{{PAGE_NUM}}}}</text>
+    <text x="{content_x}" y="{content_y}" fill="#374151" font-family="Arial, sans-serif" font-size="22">{{{{TOC_ITEM_1}}}}</text>
+    <text x="{content_x}" y="{content_y + 64}" fill="#374151" font-family="Arial, sans-serif" font-size="22">{{{{TOC_ITEM_2}}}}</text>
+    <text x="{content_x}" y="{content_y + 128}" fill="#374151" font-family="Arial, sans-serif" font-size="22">{{{{TOC_ITEM_3}}}}</text>
   </g>
 """
     elif page_type == "ending":
         placeholders = f"""
   <g id="template-placeholders">
-    <text x="{int(canvas_w * 0.5)}" y="{int(canvas_h * 0.45)}" text-anchor="middle" fill="#111827" font-family="Arial, sans-serif" font-size="46" font-weight="700">{{{{THANK_YOU}}}}</text>
-    <text x="{int(canvas_w * 0.5)}" y="{int(canvas_h * 0.54)}" text-anchor="middle" fill="#4B5563" font-family="Arial, sans-serif" font-size="20">{{{{CONTACT_INFO}}}}</text>
+    <text x="{int(canvas_w * 0.5)}" y="{int(canvas_h * 0.45)}" text-anchor="middle" fill="#111827" font-family="Arial, sans-serif" font-size="46" font-weight="700">{{{{ENDING_TITLE}}}}</text>
+    <text x="{int(canvas_w * 0.5)}" y="{int(canvas_h * 0.54)}" text-anchor="middle" fill="#4B5563" font-family="Arial, sans-serif" font-size="20">{{{{ENDING_MESSAGE}}}}</text>
   </g>
 """
     else:
@@ -1708,8 +1705,6 @@ def _inject_placeholders(
       <rect x="{content_x}" y="{content_y}" width="{content_w}" height="{content_h}" fill="none" stroke="#CBD5E1" stroke-width="1" stroke-dasharray="8 5"/>
       <text x="{content_x + content_w / 2:.0f}" y="{content_y + content_h / 2:.0f}" text-anchor="middle" fill="#94A3B8" font-family="Arial, sans-serif" font-size="18">{{{{CONTENT_AREA}}}}</text>
     </g>
-    <text x="{margin_x}" y="{footer_y}" fill="#6B7280" font-family="Arial, sans-serif" font-size="12">Source: {{{{SOURCE}}}}</text>
-    <text x="{canvas_w - margin_x}" y="{footer_y}" text-anchor="end" fill="#6B7280" font-family="Arial, sans-serif" font-size="14">{{{{PAGE_NUM}}}}</text>
   </g>
 """
     if "</svg>" in svg_text:
@@ -1764,10 +1759,10 @@ def _generate_design_spec(manifest: dict[str, Any], review: dict[str, Any], temp
 
 ## Placeholder Contract
 - Cover: `{{{{TITLE}}}}`, `{{{{SUBTITLE}}}}`, `{{{{AUTHOR}}}}`, `{{{{DATE}}}}`
-- Content: `{{{{PAGE_TITLE}}}}`, `{{{{CONTENT_AREA}}}}`, `{{{{SOURCE}}}}`, `{{{{PAGE_NUM}}}}`
-- Chapter: `{{{{CHAPTER_NUM}}}}`, `{{{{CHAPTER_TITLE}}}}`, `{{{{CHAPTER_TITLE_EN}}}}`
-- TOC: `{{{{TOC_ITEM_1_TITLE}}}}`...
-- Ending: `{{{{THANK_YOU}}}}`, `{{{{CONTACT_INFO}}}}`
+- Content: `{{{{PAGE_TITLE}}}}`, `{{{{CONTENT_AREA}}}}`
+- Chapter: `{{{{CHAPTER_NUMBER}}}}`, `{{{{CHAPTER_TITLE}}}}`
+- TOC: `{{{{TOC_ITEM_1}}}}` through `{{{{TOC_ITEM_5}}}}`
+- Ending: `{{{{ENDING_TITLE}}}}`, `{{{{ENDING_MESSAGE}}}}`
 
 ## Notes
 - This template was imported from a PPTX file through the review-first V1 importer.
@@ -2125,11 +2120,12 @@ async def _call_template_import_llm(model_config: dict[str, Any], payload: dict[
         "}\n\n"
         "Rules:\n"
         "- element_actions are required and must use only element_id values from slides[].elements.\n"
-        "- Use replace_with_placeholder for title, subtitle, page title, chapter title, content-area image/shape/text slots, TOC item labels, page numbers, and similar reusable slots.\n"
+        "- Use replace_with_placeholder only after reading the visible source text or element context and confirming which reusable type it represents: title, subtitle, author, date, page title, chapter title/number, content area, TOC item, or ending text.\n"
+        "- Do not replace text merely because it is large or centered. If the text meaning is unclear, keep reusable chrome text or remove one-off content instead of inventing a placeholder.\n"
         "- Use keep for reusable visual framework elements and repeated navigation/header/footer/brand labels.\n"
         "- Use remove for source body content, one-off research images, charts, screenshots, and example data.\n"
         "- Most image assets should be content_image or ignore unless repeated placement and context strongly indicate logo/background/decoration.\n"
-        "- Placeholder names must be uppercase tokens without braces, such as TITLE, SUBTITLE, PAGE_TITLE, CONTENT_AREA, TOC_ITEM_1_TITLE, CHAPTER_TITLE, PAGE_NUM, THANK_YOU.\n"
+        "- Placeholder names must be uppercase tokens without braces from the standard set: TITLE, SUBTITLE, AUTHOR, DATE, PAGE_TITLE, CONTENT_AREA, TOC_ITEM_1 through TOC_ITEM_5, CHAPTER_TITLE, CHAPTER_NUMBER, ENDING_TITLE, ENDING_MESSAGE.\n"
         "- If user_feedback is present, it refers to current_template_preview when provided; revise element_actions, asset roles, page selections, preserve_texts, and placeholders to visibly change that preview.\n"
         "- user_annotations are high-priority visual feedback. Each annotation gives a slide index, normalized region, and user note; match it to nearby slide elements and change element_actions/page selections/assets so the preview visibly responds.\n"
         "- If user_feedback says an element/text/number/extra character should be removed, output remove actions for the corresponding elements instead of preserving them.\n"
@@ -3200,7 +3196,7 @@ def save_import_review(import_id: str, draft: dict[str, Any]) -> dict[str, Any]:
             hints[page_type] = {
                 str(key).strip(): str(value).strip()
                 for key, value in raw_mapping.items()
-                if str(key).strip() and str(value).strip()
+                if str(key).strip()
             }
         if hints or not current.get("placeholder_hints"):
             current["placeholder_hints"] = hints

@@ -18,7 +18,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.config import settings
 from backend.api.schemas import ModelConfig
@@ -236,6 +236,46 @@ class TemplateReviewDraftRequest(BaseModel):
     element_actions: list[dict[str, Any]] | None = None
     design_spec: str | None = None
     annotations: list[dict[str, Any]] | None = None
+
+    @field_validator("placeholder_hints", mode="before")
+    @classmethod
+    def _normalize_placeholder_hints(cls, value: Any) -> dict[str, dict[str, str]] | None:
+        return _normalize_placeholder_hints_payload(value)
+
+
+def _normalize_placeholder_hints_payload(value: Any) -> dict[str, dict[str, str]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, str]] = {}
+    for page_type, raw_mapping in value.items():
+        page_key = str(page_type)
+        if isinstance(raw_mapping, dict):
+            entries: dict[str, str] = {}
+            for key, raw_text in raw_mapping.items():
+                name = _normalize_placeholder_hint_name(key)
+                if not name:
+                    continue
+                entries[name] = "" if raw_text is None else str(raw_text)
+            normalized[page_key] = entries
+            continue
+        if isinstance(raw_mapping, list):
+            entries = {}
+            for item in raw_mapping:
+                name = _normalize_placeholder_hint_name(item)
+                if name:
+                    entries[name] = ""
+            normalized[page_key] = entries
+    return normalized
+
+
+def _normalize_placeholder_hint_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.fullmatch(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}", text)
+    return match.group(1) if match else text
 
 
 class TemplateReviewResponse(BaseModel):
@@ -885,6 +925,9 @@ def _review_response_payload(import_id: str, review: dict[str, Any]) -> dict[str
         draft["assets"] = payload.get("assets") or {}
     if "placeholder_hints" not in draft:
         draft["placeholder_hints"] = payload.get("placeholder_hints") or {}
+    draft["placeholder_hints"] = _normalize_placeholder_hints_payload(
+        draft.get("placeholder_hints")
+    ) or {}
     if "element_actions" not in draft:
         draft["element_actions"] = payload.get("element_actions") or []
     if "design_spec" not in draft and payload.get("design_spec_md") is not None:
@@ -986,6 +1029,11 @@ async def _save_review_draft(import_id: str, payload: dict[str, Any]) -> dict[st
     ``workspaces/template_imports/<id>/review.json`` file, so centralising this
     merge prevents feedback / preview calls from silently dropping visual notes.
     """
+    if "placeholder_hints" in payload:
+        payload = dict(payload)
+        payload["placeholder_hints"] = _normalize_placeholder_hints_payload(
+            payload.get("placeholder_hints")
+        ) or {}
     is_v2_import = _is_v2_import(import_id)
     if is_v2_import and await aoffload(template_import_v2.get_review, import_id):
         review = await aoffload(template_import_v2.update_review, import_id, payload)
@@ -2343,27 +2391,29 @@ async def preview_templateized_import(
 @router.post("/import/{import_id}/confirm", response_model=ConfirmImportResponse)
 async def confirm_template_import(import_id: str) -> ConfirmImportResponse:
     """Register a reviewed import as a user template."""
-    pptist_pptx = _template_pptist_current_pptx(import_id)
-    if pptist_pptx is not None:
-        await _patch_template_import_state(import_id, source_file=str(pptist_pptx))
-        await _refresh_template_import_render(import_id, pptist_pptx)
-    try:
-        if _is_v2_import(import_id) and await aoffload(template_import_v2.get_review, import_id):
-            result = await template_import_v2.confirm_import(import_id)
-        else:
-            result = await aoffload(confirm_import_template, import_id)
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Import review '{import_id}' not found.",
-        ) from None
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Template import failed: {exc}",
-        ) from None
+    lock = _preview_lock_for(import_id)
+    async with lock:
+        pptist_pptx = _template_pptist_current_pptx(import_id)
+        if pptist_pptx is not None:
+            await _patch_template_import_state(import_id, source_file=str(pptist_pptx))
+            await _refresh_template_import_render(import_id, pptist_pptx)
+        try:
+            if _is_v2_import(import_id) and await aoffload(template_import_v2.get_review, import_id):
+                result = await template_import_v2.confirm_import(import_id)
+            else:
+                result = await aoffload(confirm_import_template, import_id)
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Import review '{import_id}' not found.",
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Template import failed: {exc}",
+            ) from None
 
     _import_results[import_id] = result
     _preview_cache_drop(import_id)

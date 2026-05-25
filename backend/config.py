@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     templates_dir: Path = PROJECT_ROOT / "assets" / "templates"
     icons_dir: Path = PROJECT_ROOT / "assets" / "icons"
     references_dir: Path = PROJECT_ROOT / "assets" / "references"
+    codex_bin: Path | None = None
 
     # Limits
     # Historical compatibility knob. Job scheduling is now immediate and
