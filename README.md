@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/CRui5in/paper-ppt-agent/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="AGPL-3.0 License"></a>
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white" alt="FastAPI">
   <img src="https://img.shields.io/badge/React-18+-61DAFB?logo=react&logoColor=black" alt="React">
@@ -41,6 +41,7 @@
 | 功能 | 说明 |
 |:-----|:-----|
 | **多智能体流水线** | Strategist → Executor → Critic 三阶段协作，内容提炼与版式生成一体化 |
+| **Agent 生成模式** | 工作台支持 Claude Code / Codex 本机 Agent 运行时生成演示文稿 |
 | **静态 + 视觉 QA** | 自动检测文字溢出、元素重叠、低对比度等问题并触发修复 |
 | **图标语义匹配** | 基于 Gemini Embedding 的 RAG 语义搜索，自动匹配最合适的图标 |
 | **反馈迭代** | 指定单页或全量重生成，支持结构调整（增删插排），自动版本快照 |
@@ -67,7 +68,7 @@
 
 至少一种模型提供商的 API Key：OpenAI / Anthropic / Gemini / DeepSeek 或自定义 BaseURL 兼容接口。
 
-可选：使用模板导入的 Agent 模式时，需要后端环境可访问 Claude Code CLI 与 Agent SDK。
+可选：使用工作台的 Agent 生成模式前，需要在本机安装并配置好 Claude Code 或 Codex。模板导入的 Agent 模式当前使用 Claude Code，需要在本机安装并配置好 Claude Code。
 
 ## 🚀 快速开始
 
@@ -114,6 +115,7 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 - 🎯 **图标 RAG 语义搜索** — 基于 Gemini Embedding 从图标库中语义检索匹配候选，可独立开关
 - 🎨 **模板系统与自定义字体** — 预设行业风格模板，支持自定义标题/正文字体配置
 - 🧩 **模板导入** — 支持 PPTX 直接导入、五页模板映射，以及基于 Claude Code 的 Agent 模式自动分析和模板化
+- 🤖 **Agent 生成模式** — 工作台接入 Claude Code / Codex 生成演示文稿
 - 📝 **PPT 编辑器** — 在生成结果与模板导入流程中接入可视化 PPT 编辑器，支持页面编辑、备注、保存、重新导出
 - 🔬 **Deep Research 工作流** — 外部研究增强（arXiv / Semantic Scholar / Web）+ 相关性过滤
 - 🖼️ **在线搜图** — 利用 Tavily / SerpAPI Key 在线搜索配图，支持 AI 智能布局分析与插入、一键撤消、图片下载
@@ -131,8 +133,8 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 ## 🗺️ 开发计划
 
-- [ ] 🤖 Claude Code 生成 PPT 接入
-- [ ] 🧭 Codex 生成 PPT 接入
+- [x] 🤖 Claude Code 生成 PPT 接入
+- [x] 🧭 Codex 生成 PPT 接入
 - [ ] 🧠 本地大模型支持
 
 ---
@@ -145,7 +147,7 @@ cd frontend && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 ## 📄 许可证
 
-[MIT License](./LICENSE)
+本项目基于 [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE) 发布。
 
 ## 📬 联系方式
 
