@@ -35,6 +35,10 @@ Images:
 - Use local relative paths.
 - Prefer figures that directly support the slide's argument.
 - Avoid remote URLs.
+- For paper figures, read `source_assets/figures.json` or `source_assets/figures.md`.
+- Use the exact manifest `href` in `<image href="...">`; from `svg_output/` it normally starts with `../source_assets/images/`.
+- Preserve the listed natural aspect ratio. If you need a different visual box, letterbox or crop deliberately with SVG clipping; do not stretch the image.
+- Choose figures by caption, page number, section/context, and slide claim. Do not choose a figure only because the filename looks convenient.
 
 Consistency:
 

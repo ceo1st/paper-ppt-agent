@@ -23,6 +23,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { useLocale } from "../../i18n";
+import { HoverTooltip } from "../common/HoverTooltip";
 import { fetchTemplateImportFiles } from "../../lib/api";
 import type {
   ImportStatus,
@@ -365,23 +366,27 @@ export function CollabPanel({
       {mentions.length > 0 || contextAttachments.length > 0 ? (
         <div className="ti-console-mentions">
           {contextAttachments.map((item) => (
-            <span className="ti-console-mention-chip ti-console-context-chip" key={item.id} title={item.detail ?? item.label}>
-              <ArrowUpDown size={11} />
-              {item.label}
-            </span>
+            <HoverTooltip key={item.id} content={item.detail ?? item.label} className="ti-inline-tooltip-trigger">
+              <span className="ti-console-mention-chip ti-console-context-chip">
+                <ArrowUpDown size={11} />
+                {item.label}
+              </span>
+            </HoverTooltip>
           ))}
           {mentions.map((mention) => (
-            <span className="ti-console-mention-chip" key={mention.path} title={mention.path}>
-              <FileIcon size={11} />
-              {mention.label}
-              <button
-                type="button"
-                onClick={() => setMentions((prev) => prev.filter((item) => item.path !== mention.path))}
-                aria-label={t("template.collab.removeMention")}
-              >
-                <X size={10} />
-              </button>
-            </span>
+            <HoverTooltip key={mention.path} content={mention.path} className="ti-inline-tooltip-trigger">
+              <span className="ti-console-mention-chip">
+                <FileIcon size={11} />
+                {mention.label}
+                <button
+                  type="button"
+                  onClick={() => setMentions((prev) => prev.filter((item) => item.path !== mention.path))}
+                  aria-label={t("template.collab.removeMention")}
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            </HoverTooltip>
           ))}
         </div>
       ) : null}
@@ -402,21 +407,24 @@ export function CollabPanel({
       />
       <div className="ti-console-composer-footer">
         <div className="ti-console-composer-meta">
-          <span className="ti-console-meta-pill" title={t("template.collab.annotations")}>
-            <Bookmark size={10} />
-            <span>{annotationCount}</span>
-          </span>
+          <HoverTooltip content={t("template.collab.annotations")} className="ti-inline-tooltip-trigger">
+            <span className="ti-console-meta-pill">
+              <Bookmark size={10} />
+              <span>{annotationCount}</span>
+            </span>
+          </HoverTooltip>
           {mode === "agent" && importId ? (
             <div className="ti-console-mention-wrap">
-              <button
-                type="button"
-                className="ti-console-mention-button"
-                onClick={() => setMentionOpen((open) => !open)}
-                title={t("template.collab.attachFile")}
-                aria-expanded={mentionOpen}
-              >
-                <AtSign size={11} />
-              </button>
+              <HoverTooltip content={t("template.collab.attachFile")} className="ti-inline-tooltip-trigger">
+                <button
+                  type="button"
+                  className="ti-console-mention-button"
+                  onClick={() => setMentionOpen((open) => !open)}
+                  aria-expanded={mentionOpen}
+                >
+                  <AtSign size={11} />
+                </button>
+              </HoverTooltip>
               {mentionOpen ? (
                 <FileMentionPopover
                   importId={importId}
@@ -434,24 +442,22 @@ export function CollabPanel({
             </div>
           ) : null}
           {resolvedModelLabel ? (
-            <span
-              className="ti-console-meta-pill"
-              title={t("template.collab.model")}
-            >
-              <Bot size={10} />
-              <span className="ti-console-meta-text">{resolvedModelLabel}</span>
-            </span>
+            <HoverTooltip content={t("template.collab.model")} className="ti-inline-tooltip-trigger">
+              <span className="ti-console-meta-pill">
+                <Bot size={10} />
+                <span className="ti-console-meta-text">{resolvedModelLabel}</span>
+              </span>
+            </HoverTooltip>
           ) : null}
           {mode === "agent" ? (
-            <span
-              className="ti-console-meta-pill"
-              title={tokensTooltip(t, usage)}
-            >
-              <ArrowUpDown size={10} />
-              <span>
-                {formatTokens(usage?.input_tokens ?? 0)} / {formatTokens(usage?.output_tokens ?? 0)}
+            <HoverTooltip content={tokensTooltip(t, usage)} className="ti-inline-tooltip-trigger">
+              <span className="ti-console-meta-pill">
+                <ArrowUpDown size={10} />
+                <span>
+                  {formatTokens(usage?.input_tokens ?? 0)} / {formatTokens(usage?.output_tokens ?? 0)}
+                </span>
               </span>
-            </span>
+            </HoverTooltip>
           ) : null}
         </div>
         <button
@@ -744,9 +750,11 @@ function FileMentionPopover({
   }, [cwd, importId]);
 
   return (
-    <div className="ti-file-popover" role="dialog" aria-label={t("template.collab.fileBrowser")}>
-      <div className="ti-file-popover-head">
-        <span title={cwd || "."}>{cwd || "."}</span>
+      <div className="ti-file-popover" role="dialog" aria-label={t("template.collab.fileBrowser")}>
+        <div className="ti-file-popover-head">
+        <HoverTooltip content={cwd || "."} className="ti-file-head-tooltip-trigger">
+          <span>{cwd || "."}</span>
+        </HoverTooltip>
         {parent !== null ? (
           <button type="button" onClick={() => setCwd(parent)}>{t("template.collab.upDir")}</button>
         ) : null}
@@ -760,24 +768,24 @@ function FileMentionPopover({
           <div className="ti-file-empty">{t("template.collab.noFiles")}</div>
         ) : (
           items.map((item) => (
-            <button
-              type="button"
-              key={item.path}
-              className="ti-file-item"
-              onClick={() => {
-                if (item.type === "directory") setCwd(item.path);
-                else onSelect(item);
-              }}
-              onMouseEnter={() => setHoveredPreview(item.image && item.preview_url ? item : null)}
-              onFocus={() => setHoveredPreview(item.image && item.preview_url ? item : null)}
-              title={item.path}
-            >
-              {item.type === "directory" ? <Folder size={12} /> : <FileIcon size={12} />}
-              <span>{item.name}</span>
-              {item.type === "file" && item.size != null ? (
-                <em>{formatFileSize(item.size)}</em>
-              ) : null}
-            </button>
+            <HoverTooltip key={item.path} content={item.path} className="ti-file-item-tooltip-trigger">
+              <button
+                type="button"
+                className="ti-file-item"
+                onClick={() => {
+                  if (item.type === "directory") setCwd(item.path);
+                  else onSelect(item);
+                }}
+                onMouseEnter={() => setHoveredPreview(item.image && item.preview_url ? item : null)}
+                onFocus={() => setHoveredPreview(item.image && item.preview_url ? item : null)}
+              >
+                {item.type === "directory" ? <Folder size={12} /> : <FileIcon size={12} />}
+                <span>{item.name}</span>
+                {item.type === "file" && item.size != null ? (
+                  <em>{formatFileSize(item.size)}</em>
+                ) : null}
+              </button>
+            </HoverTooltip>
           ))
         )}
       </div>

@@ -38,6 +38,14 @@ Optional files:
       "skip_reason": null
     }
   ],
+  "paper_figures_used": [
+    {
+      "slide": 4,
+      "id": "pdf_fig_001_p3_abcd",
+      "href": "../source_assets/images/pdf_fig_001_p3_abcd.png",
+      "caption": "Figure 1. Method overview"
+    }
+  ],
   "visual_qa": "passed|skipped|failed",
   "notes": ["short summary"]
 }
@@ -50,6 +58,7 @@ SVG requirements:
 - Use filenames `slide_001.svg`, `slide_002.svg`, etc.
 - Use UTF-8 text.
 - Use local relative image/icon references only.
+- Paper figure references must use exact `href` values from `source_assets/figures.json` or `source_assets/figures.md`.
 - Keep all visible content inside the canvas.
 - Do not include script tags, event handlers, remote network URLs, or `foreignObject`.
 - Do not use letters, initials, ASCII/Unicode symbols, dingbats, stars, pictographs, or emoji as fake icons. Use existing local icon assets or omit the icon.

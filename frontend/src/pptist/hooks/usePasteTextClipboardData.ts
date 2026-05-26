@@ -76,7 +76,7 @@ export default () => {
         }
         // 尝试检查是否为超链接
         else if (isValidURL(clipboardData)) {
-          createTextElementFromClipboard(`<a href="${clipboardData}" title="${clipboardData}" target="_blank">${clipboardData}</a>`)
+          createTextElementFromClipboard(`<a href="${clipboardData}" target="_blank">${clipboardData}</a>`)
         }
         // 尝试检查是否为SVG代码
         else if (isSVGString(clipboardData)) {

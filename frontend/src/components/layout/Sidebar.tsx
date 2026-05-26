@@ -4,6 +4,7 @@ import { BarChart3, ChevronLeft, ChevronRight, Home, Layers3 } from "lucide-reac
 import { useGeneration } from "../../hooks/useGeneration";
 import { useLocale } from "../../i18n";
 import { translateStageStatus } from "../../lib/i18nStatus";
+import { HoverTooltip } from "../common/HoverTooltip";
 
 const RECENT_HISTORY_DISPLAY_LIMIT = 8;
 
@@ -93,29 +94,30 @@ export function Sidebar({ collapsed = false, onCollapsedChange }: SidebarProps) 
   return (
     <aside className={`sidebar ${collapsed ? "sidebar-collapsed-panel" : ""}`}>
       <div className="sidebar-section">
-        <button
-          type="button"
-          className="sidebar-toggle"
-          aria-label={collapsed ? t("sidebar.expand") : t("sidebar.collapse")}
-          title={collapsed ? t("sidebar.expand") : t("sidebar.collapse")}
-          onClick={() => onCollapsedChange?.(!collapsed)}
-        >
-          {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
-        </button>
+        <HoverTooltip content={collapsed ? t("sidebar.expand") : t("sidebar.collapse")}>
+          <button
+            type="button"
+            className="sidebar-toggle"
+            aria-label={collapsed ? t("sidebar.expand") : t("sidebar.collapse")}
+            onClick={() => onCollapsedChange?.(!collapsed)}
+          >
+            {collapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
+          </button>
+        </HoverTooltip>
         <p className="sidebar-label">{t("sidebar.navigation")}</p>
         {links.map((link) => {
           const Icon = link.icon;
           return (
-            <Link
-              key={link.to}
-              to={link.to}
-              className={`sidebar-link ${location.pathname === link.to ? "sidebar-link-active" : ""}`}
-              title={link.label}
-              aria-label={link.label}
-            >
-              <Icon size={17} strokeWidth={1.8} />
-              <span className="sidebar-link-label">{link.label}</span>
-            </Link>
+            <HoverTooltip key={link.to} content={link.label} className="sidebar-link-tooltip-trigger">
+              <Link
+                to={link.to}
+                className={`sidebar-link ${location.pathname === link.to ? "sidebar-link-active" : ""}`}
+                aria-label={link.label}
+              >
+                <Icon size={17} strokeWidth={1.8} />
+                <span className="sidebar-link-label">{link.label}</span>
+              </Link>
+            </HoverTooltip>
           );
         })}
       </div>
@@ -147,9 +149,9 @@ export function Sidebar({ collapsed = false, onCollapsedChange }: SidebarProps) 
                     aria-current={isActive ? "page" : undefined}
                   >
                     <div className="history-card-header">
-                      <strong className="history-name" title={entry.fileName}>
-                        {entry.fileName}
-                      </strong>
+                      <HoverTooltip content={entry.fileName} className="history-name-tooltip-trigger">
+                        <strong className="history-name">{entry.fileName}</strong>
+                      </HoverTooltip>
                       <span className="history-status">{translateStageStatus(entry.status, locale, "history")}</span>
                     </div>
                     <div className="history-card-meta">

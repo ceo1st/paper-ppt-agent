@@ -9,6 +9,7 @@ import { openUsageSocket } from "../lib/ws";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { HoverTooltip } from "../components/common/HoverTooltip";
 
 interface DailyRow {
   day: string;
@@ -597,8 +598,10 @@ export function LogsPage() {
                     <td>{r.provider}</td>
                     <td>{r.model}</td>
                     <td>{r.stage ? translateStageStatus(r.stage, locale, "logs") : "-"}</td>
-                    <td title={r.job_id ?? ""}>
-                      {r.job_id ? r.job_id.slice(0, 8) : "-"}
+                    <td>
+                      <HoverTooltip content={r.job_id ?? ""}>
+                        <span>{r.job_id ? r.job_id.slice(0, 8) : "-"}</span>
+                      </HoverTooltip>
                     </td>
                     <td>{r.page ?? "-"}</td>
                     <td>{r.attempt}</td>

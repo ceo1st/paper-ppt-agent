@@ -4,6 +4,7 @@ import { AlertTriangle, CheckCircle2, CircleDashed, Loader2, RotateCcw, SkipForw
 import { useLocale, type Locale } from "../../i18n";
 import { translateTemplateImportMessage } from "../../lib/i18nStatus";
 import type { ImportStatus } from "../../lib/types";
+import { HoverTooltip } from "../common/HoverTooltip";
 
 export interface ProgressViewProps {
   status: ImportStatus;
@@ -99,18 +100,19 @@ function StepChip({ step, t }: { step: StepLike; t: (key: string) => string }) {
   const translated = t(`template.step.${step.id}`);
   const label = translated !== `template.step.${step.id}` ? translated : step.label || step.id;
   return (
-    <span
-      className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium"
-      style={{
-        borderColor: tone.border,
-        background: tone.bg,
-        color: tone.fg,
-      }}
-      title={status}
-    >
-      <StepIcon status={status} />
-      <span>{label}</span>
-    </span>
+    <HoverTooltip content={status}>
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium"
+        style={{
+          borderColor: tone.border,
+          background: tone.bg,
+          color: tone.fg,
+        }}
+      >
+        <StepIcon status={status} />
+        <span>{label}</span>
+      </span>
+    </HoverTooltip>
   );
 }
 

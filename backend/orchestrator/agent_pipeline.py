@@ -18,6 +18,7 @@ import re
 import shutil
 import sys
 import threading
+import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +31,7 @@ from backend.generator.svg_finalize import finalize_project
 from backend.generator.svg_to_pptx import create_pptx
 from backend.generator.template_agent import _events_from_sdk_message
 from backend.orchestrator.manuscript import auto_slide_range, page_type_budget, page_type_budget_guidance
-from backend.runtime import aoffload, awrite_text
+from backend.runtime import aoffload, arun, awrite_text
 from backend.runtime.resource_gates import heavy_stage_slot
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,8 @@ async def agent_runtime_status(runtime: str) -> dict[str, Any]:
             "error": str(exc) or exc.__class__.__name__,
         }
 
+    _install_codex_jsonrpc_noise_filter()
+
     try:
         codex_config = AppServerConfig(
             cwd=str(PROJECT_ROOT),
@@ -133,6 +136,7 @@ async def agent_runtime_status(runtime: str) -> dict[str, Any]:
                 "available": True,
                 "sdk_available": True,
                 "authenticated": True,
+                **agent_runtime_defaults(runtime),
                 "requires_openai_auth": bool(getattr(account, "requires_openai_auth", False)),
                 "message": "Codex SDK is available and authenticated.",
             }
@@ -146,6 +150,20 @@ async def agent_runtime_status(runtime: str) -> dict[str, Any]:
             "error": str(exc) or exc.__class__.__name__,
             "supports_chatgpt_oauth": True,
         }
+
+
+def agent_runtime_defaults(runtime: str) -> dict[str, str]:
+    """Best-effort defaults used by the selected Agent runtime."""
+    if (runtime or _RUNTIME_DEFAULT) != "codex":
+        return {}
+    defaults: dict[str, str] = {}
+    model = _codex_default_model()
+    effort = _codex_default_reasoning_effort()
+    if model:
+        defaults["model"] = model
+    if effort:
+        defaults["reasoning_effort"] = effort
+    return defaults
 
 
 class PersistentAgentSession:
@@ -590,12 +608,18 @@ class PersistentAgentSession:
                     "Run `uv sync` after updating dependencies, then start the backend again."
                 ) from exc
 
-            effort_value = str(self._agent_config.get("reasoning_effort") or "high")
+            _install_codex_jsonrpc_noise_filter()
+
+            effort_value = str(
+                self._agent_config.get("reasoning_effort")
+                or _codex_default_reasoning_effort()
+                or "high"
+            )
             try:
                 effort = ReasoningEffort(effort_value)
             except ValueError:
                 effort = ReasoningEffort.high
-            model = self._agent_config.get("model") or None
+            model = self._agent_config.get("model") or _codex_default_model() or None
             self._usage_totals.model = model or "codex-default"
             self._emit(_agent_usage_progress_event(self._usage_totals))
             skill_path = str(
@@ -613,6 +637,7 @@ class PersistentAgentSession:
                 thread_kwargs = {
                     "approval_mode": ApprovalMode.auto_review,
                     "cwd": str(self._project_dir),
+                    "developer_instructions": _codex_developer_instructions(self._project_dir),
                     "model": model,
                     "sandbox": SandboxMode.danger_full_access,
                     "config": {"model_reasoning_effort": effort.value},
@@ -1262,8 +1287,77 @@ async def _prepare_agent_workspace(project_dir: Path, request: Any, agent_config
         json.dumps(task, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    await _prepare_agent_source_assets(project_dir)
     await _prefetch_agent_research(project_dir, source_target, request, agent_config)
     await awrite_text(project_dir / "AGENT_README.md", _agent_readme(), encoding="utf-8")
+
+
+async def _prepare_agent_source_assets(project_dir: Path) -> None:
+    """Pre-build the same paper asset pack the Agent skill can regenerate.
+
+    Agent mode remains model-runtime owned, but this gives every runtime a
+    deterministic figure manifest before the first prompt so non-multimodal
+    agents can reason about figures by caption/location instead of by a folder
+    full of anonymous image files.
+    """
+
+    script = project_dir / "skills" / _AGENT_SKILL_NAME / "scripts" / "extract_paper_assets.py"
+    assets_dir = project_dir / "source_assets"
+    if not script.exists():
+        return
+    try:
+        cp = await arun(
+            [
+                str(_agent_python_path()),
+                str(script),
+                "--task",
+                "agent_task.json",
+                "--out",
+                "source_assets",
+            ],
+            timeout=180.0,
+            cwd=project_dir,
+            env=_agent_runtime_env(project_dir),
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - extraction is advisory
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        await awrite_text(
+            assets_dir / "extraction_error.json",
+            json.dumps(
+                {
+                    "error": str(exc) or exc.__class__.__name__,
+                    "notes": [
+                        "Automatic source asset extraction failed before the Agent runtime.",
+                        "The Agent may rerun skills/paper-ppt-generate/scripts/extract_paper_assets.py after inspecting the source.",
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return
+
+    if cp.returncode != 0:
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        await awrite_text(
+            assets_dir / "extraction_error.json",
+            json.dumps(
+                {
+                    "returncode": cp.returncode,
+                    "stdout": cp.stdout[-4000:],
+                    "stderr": cp.stderr[-4000:],
+                    "notes": [
+                        "Automatic source asset extraction exited non-zero before the Agent runtime.",
+                        "The Agent should inspect this error and may rerun the script manually.",
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
 
 def _copy_template_reference_for_agent(template: Any, project_dir: Path) -> None:
@@ -1540,6 +1634,7 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "allow_deep_research": bool(agent_config.get("allow_deep_research")),
             "enable_visual_qa": bool(agent_config.get("enable_visual_qa", True)),
             "icon_policy": _agent_icon_policy(),
+            "source_asset_policy": _agent_source_asset_policy(),
             "subagent_policy": _agent_subagent_policy(request, agent_config, detail_profile),
             "research_policy": _agent_research_policy(research_payload),
         },
@@ -1551,6 +1646,12 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "icons": _rel(project_dir, settings.icons_dir),
             "templates": _rel(project_dir, project_dir / "templates"),
             "selected_template": f"templates/{request.template_id}" if request.template_id else None,
+            "source_assets": "source_assets",
+            "source_asset_extractor": f"skills/{_AGENT_SKILL_NAME}/scripts/extract_paper_assets.py",
+            "source_paper_markdown": "source_assets/paper.md",
+            "source_figures_json": "source_assets/figures.json",
+            "source_figures_markdown": "source_assets/figures.md",
+            "source_images": "source_assets/images",
             "feedback_dir": "agent_feedback",
             "prefetched_research_brief": "research/brief.md",
             "prefetched_research_sources": "research/sources.json",
@@ -1563,12 +1664,20 @@ def _agent_runtime_env(project_dir: Path) -> dict[str, str]:
     python_dir = str(python_path.parent)
     existing_path = os.environ.get("PATH") or os.environ.get("Path") or ""
     runtime_path = f"{python_dir}{os.pathsep}{existing_path}" if existing_path else python_dir
+    tmp_dir = project_dir / ".codex_tmp"
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        tmp_dir = Path(os.environ.get("TEMP") or os.environ.get("TMP") or str(project_dir))
     env = {
         "PAPER_PPT_AGENT_MODE": "1",
         "PAPER_PPT_WORKSPACE": str(project_dir),
         "PAPER_PPT_PYTHON": str(python_path),
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",
+        "TEMP": str(tmp_dir),
+        "TMP": str(tmp_dir),
+        "TMPDIR": str(tmp_dir),
         "PATH": runtime_path,
         "Path": runtime_path,
     }
@@ -1597,6 +1706,111 @@ def _agent_python_path() -> Path:
     if local_python.exists():
         return local_python.resolve()
     return Path(sys.executable).resolve()
+
+
+def _codex_config_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home) / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _codex_cli_config() -> dict[str, Any]:
+    try:
+        with _codex_config_path().open("rb") as handle:
+            parsed = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _codex_default_model() -> str | None:
+    model = _codex_cli_config().get("model")
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
+def _codex_default_reasoning_effort() -> str | None:
+    effort = _codex_cli_config().get("model_reasoning_effort")
+    if not isinstance(effort, str):
+        return None
+    effort = effort.strip()
+    return effort if effort in {"low", "medium", "high", "xhigh"} else None
+
+
+def _codex_developer_instructions(project_dir: Path) -> str:
+    return (
+        "You are running inside a Paper PPT Agent generation workspace. "
+        f"The workspace root is {project_dir}. Treat this directory as the only "
+        "authoring root for generated files. Read agent_task.json first, follow "
+        "the paper-ppt-generate skill, and write artifacts incrementally to "
+        "manuscript.md, design_spec.md, svg_output/, notes/, and agent_report.json. "
+        "Prefer the configured Python from PAPER_PPT_PYTHON for PDF/TeX/SVG checks. "
+        "Use source_assets/paper.md and source_assets/figures.json for paper text "
+        "and figure selection. When invoking shell commands on Windows, keep the "
+        "working directory in the workspace and avoid long-running interactive commands."
+    )
+
+
+_CODEX_NOISE_FILTER_INSTALLED = False
+
+
+def _install_codex_jsonrpc_noise_filter() -> None:
+    """Ignore known Windows process-kill chatter on Codex app-server stdout.
+
+    The Python SDK expects stdout from `codex app-server --listen stdio://` to
+    contain only JSON-RPC lines. On Windows, process-tree cleanup can leak
+    taskkill status lines such as "SUCCESS: The process with PID ... has been
+    terminated." into stdout, which otherwise kills the reader thread. This
+    compatibility shim is intentionally narrow and only skips those lines.
+    """
+
+    global _CODEX_NOISE_FILTER_INSTALLED
+    if _CODEX_NOISE_FILTER_INSTALLED:
+        return
+    try:
+        from openai_codex import client as codex_client
+        from openai_codex.errors import AppServerError, TransportClosedError
+    except Exception:
+        return
+
+    def _read_message(self) -> dict[str, Any]:
+        if self._proc is None or self._proc.stdout is None:
+            raise TransportClosedError("app-server is not running")
+
+        while True:
+            line = self._proc.stdout.readline()
+            if not line:
+                raise TransportClosedError(
+                    f"app-server closed stdout. stderr_tail={self._stderr_tail()[:2000]}"
+                )
+
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if _is_codex_ignorable_stdout_noise(line):
+                    try:
+                        self._stderr_lines.append(f"ignored stdout noise: {line.rstrip()}")
+                    except Exception:
+                        pass
+                    continue
+                raise AppServerError(f"Invalid JSON-RPC line: {line!r}") from exc
+
+            if not isinstance(message, dict):
+                raise AppServerError(f"Invalid JSON-RPC payload: {message!r}")
+            return message
+
+    codex_client.AppServerClient._read_message = _read_message
+    _CODEX_NOISE_FILTER_INSTALLED = True
+
+
+def _is_codex_ignorable_stdout_noise(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return True
+    return (
+        stripped.startswith("SUCCESS: The process with PID ")
+        and " has been terminated." in stripped
+    )
 
 
 def _codex_usage_progress_event(
@@ -2322,6 +2536,7 @@ def _build_runtime_prompt(project_dir: Path, request: Any, agent_config: dict[st
     review = "enabled" if agent_config.get("enable_visual_qa", True) else "disabled"
     detail_profile = _agent_detail_profile(getattr(request, "detail_level", "normal"), getattr(request, "num_pages", None))
     skill_path = str(project_dir / "skills" / _AGENT_SKILL_NAME / "SKILL.md")
+    extractor_path = f"skills/{_AGENT_SKILL_NAME}/scripts/extract_paper_assets.py"
     return f"""Use the `{_AGENT_SKILL_NAME}` skill to generate the full PowerPoint deck.
 
 Workspace contract:
@@ -2334,12 +2549,14 @@ Workspace contract:
 - Icon contract: before using an icon, search the local icon path from `agent_task.json.paths.icons` and use an existing file. Never use letters, initials, ASCII/Unicode symbols, emoji, dingbats, or decorative characters as icon substitutes; omit the icon or use a non-icon shape if no matching asset exists.
 - SubAgent contract: do not split work just to satisfy ordinary slide count or detail level. When deep research is enabled, launch focused research SubAgents if the Task tool is available; use separate readers for background/related work, method, experiments, and critique when the paper is complex. When Agent review is enabled, run one focused review SubAgent after the first full deck is drafted; it should review the whole deck for layout overflow, missing assets, icon-policy violations, and narrative gaps instead of checking pages one by one. If you skip a required deep-research or review SubAgent, write a concrete reason in `agent_report.json.subagents`; the main Agent must merge results and keep final narrative/design consistency.
 - External research contract: if external research is enabled, use `agent_task.json.research_config` plus any environment credentials named in `agent_task.json.agent_policy.research_policy.credential_env`. You may use other accessible search methods too. For web results, open/read relevant pages deeply enough to understand the source; do not cite titles/snippets alone.
+- Source asset contract: before writing `manuscript.md`, read `source_assets/paper.md` and `source_assets/figures.md`/`figures.json` if they exist. If they are missing or stale, run `{extractor_path}` with `agent_task.json.paths.python`. Pick paper figures by caption/page/context/dimensions and put them into SVG using the exact `href` values from the manifest, usually `../source_assets/images/<file>`.
 - If `research/brief.md` or `research/sources.json` exists, read them before drafting the manuscript. Treat `opened_url=true` or "Read depth: opened" as evidence that the backend fetched page body text; if a web item was not opened, do not use it as evidence unless you open and read it yourself.
 - When external research is enabled, your first user-visible progress reply after reading the paper seed and prefetched research must summarize what you actually learned: identify usable sources, give 2-4 slide-relevant findings when available, state failed/limited sources, and say how this changes the planned deck. Do not merely echo source counts or API status. Send this reply before writing `manuscript.md` or slide SVGs.
 - Reply language for status/reporting: {language}.
 - During generation, periodically check `agent_feedback/` for user guidance files. Treat newer guidance as higher priority unless it conflicts with the output contract.
 - Work in stages. After completing each major milestone (e.g. finishing a slide, completing the manuscript, or finishing a batch of slides), briefly note what you accomplished. The system will automatically pause and resume your work, allowing the user to provide guidance between stages. When you resume, do NOT repeat completed work — pick up exactly where you left off.
 - If the source is a PDF, do not use the Read tool directly on the PDF binary. Use `agent_task.json.paths.python` or `PAPER_PPT_PYTHON` to run Python/PyMuPDF (`fitz`) first, and only report password protection when `doc.needs_pass` is true.
+- For PDF figures, rely on `source_assets/figures.json`: it includes figure image hrefs, captions, page numbers, bounding boxes, and nearby text so non-multimodal runtimes can still select meaningful figures.
 
 Required final files:
 - `manuscript.md`
@@ -2366,6 +2583,7 @@ Workspace contract:
 - Preserve existing slide order and style unless the feedback asks to change them.
 - When a slide SVG is revised, write it immediately to `svg_output/` so the app can preview it live.
 - Keep following `agent_task.json.presentation.detail_profile`, `agent_task.json.agent_policy.icon_policy`, and `agent_task.json.agent_policy.subagent_policy`.
+- Keep following `agent_task.json.agent_policy.source_asset_policy`: when adding/replacing paper figures, use the exact `href` from `source_assets/figures.json` and preserve the figure's aspect ratio.
 - Continue to search local icons before icon use. Never use letters, symbols, emoji, or decorative glyphs as icon substitutes.
 - Use `agent_task.json.paths.python` or `PAPER_PPT_PYTHON` for Python/PyMuPDF commands instead of system Python.
 - Use SubAgents/Task for deep research or final whole-deck review when those modes are enabled and supported; otherwise use them only when genuinely useful.
@@ -2502,6 +2720,41 @@ def _agent_icon_policy() -> dict[str, Any]:
             ],
         "fallback_when_missing": "Omit the icon or use a neutral non-icon shape/card accent; do not replace it with letters, punctuation, symbols, arrows, dingbats, or emoji.",
         "reporting": "agent_report.json must mention whether local icons were searched and list any icon assets used.",
+    }
+
+
+def _agent_source_asset_policy() -> dict[str, Any]:
+    return {
+        "asset_pack": {
+            "paper_markdown": "agent_task.json.paths.source_paper_markdown",
+            "figures_json": "agent_task.json.paths.source_figures_json",
+            "figures_markdown": "agent_task.json.paths.source_figures_markdown",
+            "images_dir": "agent_task.json.paths.source_images",
+            "extractor_script": "agent_task.json.paths.source_asset_extractor",
+        },
+        "must_read_before_manuscript": [
+            "source_assets/paper.md",
+            "source_assets/figures.md or source_assets/figures.json",
+        ],
+        "figure_selection_rule": (
+            "Choose paper figures by caption, page/location, section/context, and dimensions; "
+            "never choose by filename alone."
+        ),
+        "svg_href_rule": (
+            "When adding a paper figure to svg_output/*.svg, use the exact `href` value "
+            "from source_assets/figures.json/figures.md, usually ../source_assets/images/<file>."
+        ),
+        "pdf_rule": (
+            "For PDF sources, use the asset pack instead of trying to visually inspect raw PDF images. "
+            "It contains rendered figures with caption, page number, bbox, and surrounding context."
+        ),
+        "latex_archive_rule": (
+            "For TeX archives, the extractor unpacks the source and indexes includegraphics entries. "
+            "Do not run PDF-style page screenshot extraction over archive images; use the referenced source graphics."
+        ),
+        "reporting": (
+            "agent_report.json should include paper_figures_used with ids/hrefs/captions and note if no suitable paper figure was available."
+        ),
     }
 
 

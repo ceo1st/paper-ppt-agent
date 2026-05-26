@@ -65,6 +65,7 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Progress } from "../components/ui/progress";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import { translateJobMessage, translateStageStatus } from "../lib/i18nStatus";
 
 const ROUTING_PROFILE_STORAGE_KEY = "paper-ppt-agent-routing-profiles-v1";
@@ -549,6 +550,14 @@ export function GeneratePage() {
       };
       writeRoutingProfiles(profiles);
     }
+    const agentReasoningEffort =
+      agentRuntime === "codex"
+        ? enableDeepResearch || detailLevel === "very_high"
+          ? "xhigh"
+          : detailLevel === "high"
+            ? "high"
+            : undefined
+        : undefined;
     const nextJobId = await startGeneration({
       session_id: uploadSession.session_id,
       instruction,
@@ -570,7 +579,7 @@ export function GeneratePage() {
               allow_external_research: Boolean(researchConfig.arxiv_search_enabled || researchConfig.semantic_scholar_enabled || researchConfig.web_search_enabled),
               allow_deep_research: enableDeepResearch,
               enable_visual_qa: enableVisualCritic,
-              reasoning_effort: enableDeepResearch || detailLevel === "very_high" ? "xhigh" : detailLevel === "high" ? "high" : "medium",
+              reasoning_effort: agentReasoningEffort,
               load_project_settings: true,
               reply_language: locale === "zh" ? "zh" : "en",
             }
@@ -701,7 +710,11 @@ export function GeneratePage() {
             onStop={async () => {
               setCancelLoading(true);
               try {
-                await interruptCurrentAgent();
+                if (job?.status === "paused") {
+                  await cancelCurrentRun();
+                } else {
+                  await interruptCurrentAgent();
+                }
               } finally {
                 setCancelLoading(false);
               }
@@ -1069,7 +1082,16 @@ export function GenerationAgentConsole({
     () => activityItems.some((item) => item.kind === "group" && item.state === "active"),
     [activityItems],
   );
-  const showThinking = Boolean(job && !terminal && job.status !== "idle" && !hasActiveToolGroup);
+  const isPaused = job?.status === "paused";
+  const stopLabel = isPaused ? t("generation.agent.cancel") : t("generation.agent.pause");
+  const showThinking = Boolean(
+    job &&
+    !terminal &&
+    job.status !== "idle" &&
+    job.status !== "paused" &&
+    job.status !== "cancelling" &&
+    !hasActiveToolGroup,
+  );
 
   useEffect(() => {
     const node = scrollerRef.current;
@@ -1116,15 +1138,15 @@ export function GenerationAgentConsole({
             {t("generation.agent.main")}
           </button>
           {subagents.map((subagent, index) => (
-            <button
-              type="button"
-              key={subagent.id}
-              className={activeChannel === subagent.id ? "active" : ""}
-              onClick={() => setActiveChannel(subagent.id)}
-              title={subagent.detail || undefined}
-            >
-              {t("generation.agent.subagent").replace("{n}", String(index + 1))}
-            </button>
+            <GenerationTooltip key={subagent.id} content={subagent.detail || ""}>
+              <button
+                type="button"
+                className={activeChannel === subagent.id ? "active" : ""}
+                onClick={() => setActiveChannel(subagent.id)}
+              >
+                {t("generation.agent.subagent").replace("{n}", String(index + 1))}
+              </button>
+            </GenerationTooltip>
           ))}
         </div>
       ) : null}
@@ -1148,37 +1170,47 @@ export function GenerationAgentConsole({
         />
         <div className="generation-agent-composer-footer">
           <div className="generation-agent-composer-meta">
-            <span title={t("template.collab.model")}>
-              <Bot size={10} />
-              <em>{usage.model || displayRuntime}</em>
-            </span>
-            <span title={generationTokensTooltip(t, usage)}>
-              {formatGenerationTokens(usage.total_tokens || generationUsageTotal(usage))}
-            </span>
+            <GenerationTooltip content={t("template.collab.model")}>
+              <span>
+                <Bot size={10} />
+                <em>{usage.model || displayRuntime}</em>
+              </span>
+            </GenerationTooltip>
+            <GenerationTooltip content={generationTokensTooltip(t, usage)}>
+              <span>
+                {formatGenerationTokens(usage.total_tokens || generationUsageTotal(usage))}
+              </span>
+            </GenerationTooltip>
           </div>
           <div className="generation-agent-actions">
             {canStop ? (
-              <button
-                type="button"
-                className="secondary-button danger-button generation-agent-icon-button"
-                disabled={stopPending}
-                onClick={() => void onStop()}
-                aria-label={t("generation.agent.pause")}
-                title={t("generation.agent.pause")}
-              >
-                {stopPending ? <LoaderCircle size={14} className="spin" /> : <Square size={13} fill="currentColor" />}
-              </button>
+              <GenerationTooltip content={stopLabel}>
+                <span className="generation-tooltip-trigger">
+                  <button
+                    type="button"
+                    className="secondary-button danger-button generation-agent-icon-button"
+                    disabled={stopPending}
+                    onClick={() => void onStop()}
+                    aria-label={stopLabel}
+                  >
+                    {stopPending ? <LoaderCircle size={14} className="spin" /> : <Square size={13} fill="currentColor" />}
+                  </button>
+                </span>
+              </GenerationTooltip>
             ) : null}
-            <button
-              type="button"
-              className="primary-button generation-agent-icon-button"
-              disabled={!canSend}
-              onClick={() => void submit()}
-              aria-label={t("template.collab.send")}
-              title={t("template.collab.send")}
-            >
-              {sending ? <LoaderCircle size={14} className="spin" /> : <Send size={14} />}
-            </button>
+            <GenerationTooltip content={t("template.collab.send")}>
+              <span className="generation-tooltip-trigger">
+                <button
+                  type="button"
+                  className="primary-button generation-agent-icon-button"
+                  disabled={!canSend}
+                  onClick={() => void submit()}
+                  aria-label={t("template.collab.send")}
+                >
+                  {sending ? <LoaderCircle size={14} className="spin" /> : <Send size={14} />}
+                </button>
+              </span>
+            </GenerationTooltip>
           </div>
         </div>
       </div>
@@ -1237,37 +1269,93 @@ function GenerationAgentActivityItem({ item }: { item: GenerationAgentActivity }
   );
 }
 
+function GenerationTooltip({ content, children }: { content: string; children: ReactNode }) {
+  if (!content) return <>{children}</>;
+  return (
+    <TooltipProvider delayDuration={120}>
+      <Tooltip>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent side="top" align="start" className="config-tooltip-content generation-agent-tooltip-content">
+          {content}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 function GenerationAgentToolGroup({ item }: { item: GenerationAgentActivity }) {
   const [open, setOpen] = useState(false);
   const state = item.state ?? "info";
+  const summaryTitle = generationToolGroupTitle(item);
   return (
     <div className="generation-agent-tool-group" data-state={state} data-open={open ? "true" : "false"}>
-      <button
-        type="button"
-        className="generation-agent-tool-summary"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-      >
-        <ChevronDown size={12} className="generation-agent-tool-chevron" />
-        <span className="generation-agent-tool-state-icon">
-          {state === "active" ? <LoaderCircle size={11} className="spin" /> : <CircleCheck size={11} />}
-        </span>
-        <strong>{item.label}</strong>
-        {item.detail ? <em>{item.detail}</em> : null}
-        {item.count ? <b>{item.count}</b> : null}
-      </button>
+      <GenerationTooltip content={summaryTitle}>
+        <button
+          type="button"
+          className="generation-agent-tool-summary"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+        >
+          <ChevronDown size={12} className="generation-agent-tool-chevron" />
+          <span className="generation-agent-tool-state-icon">
+            {state === "active" ? <LoaderCircle size={11} className="spin" /> : <CircleCheck size={11} />}
+          </span>
+          <strong>{item.label}</strong>
+          {item.detail ? <em>{item.detail}</em> : null}
+          {item.count ? <b>{item.count}</b> : null}
+        </button>
+      </GenerationTooltip>
       {open ? (
         <div className="generation-agent-tool-details">
           {(item.children ?? []).map((message) => (
-            <div key={message.id} className="generation-agent-tool-detail" data-state={message.status ?? "info"}>
-              <span>{message.status === "running" ? <LoaderCircle size={10} className="spin" /> : <CircleCheck size={10} />}</span>
-              <em>{describeGenerationTool(message)}</em>
-            </div>
+            <GenerationTooltip key={message.id} content={generationToolMessageTitle(message)}>
+              <div
+                className="generation-agent-tool-detail"
+                data-state={message.status ?? "info"}
+              >
+                <span>{message.status === "running" ? <LoaderCircle size={10} className="spin" /> : <CircleCheck size={10} />}</span>
+                <em>{describeGenerationTool(message)}</em>
+              </div>
+            </GenerationTooltip>
           ))}
         </div>
       ) : null}
     </div>
   );
+}
+
+function generationToolGroupTitle(item: GenerationAgentActivity): string {
+  const lines = [item.label, item.detail].filter(Boolean) as string[];
+  for (const child of item.children ?? []) {
+    const childTitle = generationToolMessageTitle(child);
+    if (childTitle) lines.push(childTitle);
+  }
+  return lines.join("\n\n");
+}
+
+function generationToolMessageTitle(message: GenerationAgentMessage): string {
+  const lines = [describeGenerationTool(message)];
+  const input = message.data?.input;
+  if (input && typeof input === "object") {
+    const obj = input as Record<string, unknown>;
+    const command = typeof obj.command === "string" ? obj.command : "";
+    const cwd = typeof obj.cwd === "string" ? obj.cwd : "";
+    const path = typeof obj.file_path === "string" ? obj.file_path : typeof obj.path === "string" ? obj.path : "";
+    const prompt = typeof obj.prompt === "string" ? obj.prompt : "";
+    if (cwd) lines.push(`cwd: ${cwd}`);
+    if (command) lines.push(`command: ${command}`);
+    if (path) lines.push(`path: ${path}`);
+    if (prompt) lines.push(`prompt: ${prompt}`);
+  }
+  const output = message.data?.output;
+  if (output && typeof output === "object") {
+    const obj = output as Record<string, unknown>;
+    const exitCode = obj.exit_code ?? obj.exitCode;
+    const aggregated = typeof obj.aggregated_output === "string" ? obj.aggregated_output : "";
+    if (exitCode !== undefined && exitCode !== null) lines.push(`exit: ${String(exitCode)}`);
+    if (aggregated) lines.push(`output: ${aggregated}`);
+  }
+  return lines.filter(Boolean).join("\n");
 }
 
 function latestGenerationAgentUsage(messages: GenerationAgentMessage[]) {
@@ -1751,7 +1839,7 @@ function DisabledPptistWorkbenchHeader() {
           href="https://github.com/pipipi-pikachu/PPTist"
           target="_blank"
           rel="noreferrer"
-          title="PPTist by pipipi-pikachu"
+          aria-label="PPTist by pipipi-pikachu"
         >
           <GitHubMark />
         </a>
@@ -1774,16 +1862,20 @@ function DisabledToolbarButton({
   className?: string;
 }) {
   return (
-    <button
-      type="button"
-      className={`generate-pptist-disabled-button ${compact ? "generate-pptist-disabled-button-compact" : ""} ${className ?? ""}`}
-      disabled
-      title={label}
-    >
-      {icon}
-      {!compact ? <span>{label}</span> : null}
-      {caret ? <ChevronDown size={13} /> : null}
-    </button>
+    <GenerationTooltip content={label}>
+      <span className="generation-tooltip-trigger">
+        <button
+          type="button"
+          className={`generate-pptist-disabled-button ${compact ? "generate-pptist-disabled-button-compact" : ""} ${className ?? ""}`}
+          disabled
+          aria-label={label}
+        >
+          {icon}
+          {!compact ? <span>{label}</span> : null}
+          {caret ? <ChevronDown size={13} /> : null}
+        </button>
+      </span>
+    </GenerationTooltip>
   );
 }
 
