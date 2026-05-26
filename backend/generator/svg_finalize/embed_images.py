@@ -91,6 +91,7 @@ def _resolve_image_path(
         svg_dir,
         svg_dir.parent,
         svg_dir.parent / "images",
+        svg_dir.parent / "source_assets" / "images",
         svg_dir.parent / "sources" / "images",
     ]
 
@@ -102,6 +103,12 @@ def _resolve_image_path(
     rel = (svg_dir / href).resolve()
     if _path_exists(rel):
         return rel
+
+    # Relative to project root. Agent tasks expose some paths relative to the
+    # workspace root, while SVG image hrefs normally resolve from svg_output/.
+    project_rel = (svg_dir.parent / href).resolve()
+    if _path_exists(project_rel):
+        return project_rel
 
     # Try fixed parent directories by full filename
     for parent in candidate_dirs[1:]:
@@ -207,7 +214,7 @@ def embed_images_in_svg(
         except Exception:
             return match.group(0)
 
-    pattern = re.compile(r'href="(?!data:)([^"]+\.(png|jpg|jpeg|gif|webp|pdf))"', re.IGNORECASE)
+    pattern = re.compile(r'href="(?!data:)([^"]+\.(png|jpg|jpeg|gif|webp|pdf|svg))"', re.IGNORECASE)
     content = pattern.sub(replace_href, content)
     svg_path.write_text(content, encoding="utf-8")
     return count
@@ -218,7 +225,14 @@ def _detect_mime(data: bytes, ext: str) -> str:
     for magic, mime in MIME_MAGIC.items():
         if data[:len(magic)] == magic:
             return mime
-    ext_map = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+    ext_map = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "svg": "image/svg+xml",
+    }
     return ext_map.get(ext, "image/png")
 
 

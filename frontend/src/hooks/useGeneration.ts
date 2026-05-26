@@ -819,7 +819,7 @@ export const useGeneration = create<GenerationState>()(
         }
 
         const nextJob: JobStatus = {
-          status: "paused",
+          status: "pausing",
           progress: currentRun.job?.progress ?? 0,
           message: "Pausing Agent...",
           slides_completed: currentRun.job?.slides_completed ?? currentRun.slides.length,
@@ -905,9 +905,29 @@ export const useGeneration = create<GenerationState>()(
         try {
           const response = await sendGenerationAgentFeedback(jobId, text);
           if (response.status === "injected") {
-            // Message was injected into a live running session.
-            // The agent's response will arrive via the existing WebSocket stream.
-            // No state change needed beyond the optimistic message already added.
+            set((state) => {
+              const currentRun = state.runs[jobId] ?? createRunSnapshot(jobId);
+              if (currentRun.job?.status !== "paused") {
+                return {};
+              }
+              const updatedRun: RunSnapshot = {
+                ...currentRun,
+                job: {
+                  ...currentRun.job,
+                  status: "generation",
+                  message: "Agent is applying guidance...",
+                  error: undefined,
+                },
+              };
+              return {
+                ...(state.jobId === jobId ? applyRunToCurrent(updatedRun) : {}),
+                runs: {
+                  ...state.runs,
+                  [jobId]: updatedRun,
+                },
+              };
+            });
+            get().syncHistory(jobId);
             return;
           }
           if (response.status === "queued") {
@@ -1039,10 +1059,25 @@ export const useGeneration = create<GenerationState>()(
                 event.total_slides > 0 ? Math.min(rawSlidesCompleted, event.total_slides) : rawSlidesCompleted;
               const displayStage =
                 event.stage === "agent" && currentRun.currentRunConfig?.provider?.startsWith("agent:")
-                  ? "generation"
+                  ? currentRun.job?.status === "paused" || currentRun.job?.status === "pausing"
+                    ? currentRun.job.status
+                    : "generation"
                   : event.stage;
+              const agentLifecycleStatus =
+                event.data.agent_paused === true
+                  ? "paused"
+                  : event.data.agent_resumed === true
+                    ? "generation"
+                    : event.data.agent_interrupt === true
+                      ? "pausing"
+                      : undefined;
               const nextJob: JobStatus = {
-                status: event.type === "complete" ? "complete" : event.type === "error" ? "error" : displayStage,
+                status:
+                  event.type === "complete"
+                    ? "complete"
+                    : event.type === "error"
+                      ? "error"
+                      : agentLifecycleStatus ?? displayStage,
                 progress: event.progress,
                 message: event.message,
                 slides_completed: slidesCompleted,

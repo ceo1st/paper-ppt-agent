@@ -316,7 +316,7 @@ async def delete_preview_slide(job_id: str, slide_index: int) -> PreviewResponse
     project_dir = _editable_project_dir(job)
     paths = _project_scene_paths(project_dir)
     source_pptx = _scene_source_pptx(project_dir, job.output_path if job else None, paths)
-    scene_indexes = _available_scene_slide_indexes(source_pptx, paths) if source_pptx is not None else set()
+    scene_indexes = await _available_scene_slide_indexes_async(source_pptx, paths) if source_pptx is not None else set()
     slide_files, _source = _editable_slide_files(project_dir)
     if source_pptx is not None and slide_index in scene_indexes:
         if len(scene_indexes) <= 1:
@@ -379,7 +379,7 @@ async def get_preview_deck_scene(job_id: str) -> dict[str, Any]:
     await aoffload(ensure_scene_cache, source_pptx, paths)
     version = scene_version(paths)
     scenes = []
-    for index in sorted(_available_scene_slide_indexes(source_pptx, paths)):
+    for index in sorted(await _available_scene_slide_indexes_async(source_pptx, paths)):
         scene = await aoffload(get_slide_scene, source_pptx, paths, index)
         scenes.append(
             decorate_scene_for_api(
@@ -623,7 +623,7 @@ async def _build_preview_response_locked(
         source = "final" if final_files else "output"
         scene_source = _scene_source_pptx(project_dir, output_path, _project_scene_paths(project_dir))
         scene_paths_for_project = _project_scene_paths(project_dir) if scene_source is not None else None
-        scene_slide_indexes = _available_scene_slide_indexes(scene_source, scene_paths_for_project) if scene_source is not None and scene_paths_for_project is not None else set()
+        scene_slide_indexes = await _available_scene_slide_indexes_async(scene_source, scene_paths_for_project) if scene_source is not None and scene_paths_for_project is not None else set()
         emitted_slide_indexes: set[int] = set()
         for fallback_index, svg_path in enumerate(slide_files, start=1):
             index = _slide_index_from_svg_path(svg_path, fallback_index)
@@ -924,6 +924,10 @@ def _available_scene_slide_indexes(source_pptx: Path | None, paths) -> set[int]:
         if slide_scene_path(paths, index).exists():
             indexes.add(index)
     return indexes
+
+
+async def _available_scene_slide_indexes_async(source_pptx: Path | None, paths) -> set[int]:
+    return await aoffload(_available_scene_slide_indexes, source_pptx, paths)
 
 
 async def _preview_scene_file(job_id: str, slide_index: int, kind: str) -> FileResponse:

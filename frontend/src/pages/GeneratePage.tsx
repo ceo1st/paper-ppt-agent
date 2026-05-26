@@ -706,7 +706,7 @@ export function GeneratePage() {
             runtime={selectedRunConfig?.provider?.replace(/^agent:/, "") || agentRuntime}
             messages={agentMessages}
             canStop={canCancelCurrentRun}
-            stopPending={cancelLoading || job?.status === "cancelling"}
+            stopPending={cancelLoading || job?.status === "cancelling" || job?.status === "pausing"}
             onStop={async () => {
               setCancelLoading(true);
               try {
@@ -1059,7 +1059,7 @@ export function GenerationAgentConsole({
   const [activeChannel, setActiveChannel] = useState("main");
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const terminal = Boolean(job && ["complete", "error", "cancelled"].includes(job.status));
-  const canSend = Boolean(jobId && draft.trim() && (!terminal || allowSendWhenTerminal) && !sending);
+  const canSend = Boolean(jobId && draft.trim() && job?.status !== "pausing" && (!terminal || allowSendWhenTerminal) && !sending);
   const displayRuntime = runtime === "claude_code" ? "Claude Code" : "Codex";
   const linkedMessages = useMemo(() => linkGenerationSubagentMessages(messages), [messages]);
   const usage = useMemo(() => latestGenerationAgentUsage(linkedMessages), [linkedMessages]);
@@ -1083,7 +1083,12 @@ export function GenerationAgentConsole({
     [activityItems],
   );
   const isPaused = job?.status === "paused";
-  const stopLabel = isPaused ? t("generation.agent.cancel") : t("generation.agent.pause");
+  const isPausing = job?.status === "pausing";
+  const stopLabel = isPaused
+    ? t("generation.agent.cancel")
+    : isPausing
+      ? t("generation.agent.pausing")
+      : t("generation.agent.pause");
   const showThinking = Boolean(
     job &&
     !terminal &&

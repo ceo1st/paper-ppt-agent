@@ -12,6 +12,7 @@ PIPELINE_STAGES = (
     "research",
     "strategy",
     "generation",
+    "pausing",
     "paused",
     "postprocess",
     "export",

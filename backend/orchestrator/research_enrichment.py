@@ -16,6 +16,7 @@ Design notes — see review in conversation history:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -23,11 +24,15 @@ from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any
 
 from backend.api.schemas import ResearchConfig
+from backend.runtime import aoffload
 
 if TYPE_CHECKING:
     from backend.orchestrator.research_agent import ResearchContext
 
 logger = logging.getLogger(__name__)
+
+_ACADEMIC_SOURCE_TIMEOUT_SECONDS = 15.0
+_WEB_SOURCE_TIMEOUT_SECONDS = 25.0
 
 
 @dataclass
@@ -122,13 +127,25 @@ async def enrich_context(
         return stats
 
     if config.arxiv_search_enabled and (paper_title or paper_abstract):
-        await _enrich_arxiv(ctx, stats, paper_title, paper_abstract, config.max_results_per_source)
+        await _run_source_with_timeout(
+            "arxiv",
+            _enrich_arxiv(ctx, stats, paper_title, paper_abstract, config.max_results_per_source),
+            stats,
+        )
 
     if config.semantic_scholar_enabled and paper_title:
-        await _enrich_semantic_scholar(ctx, stats, paper_title, config.max_results_per_source, config.semantic_scholar_api_key)
+        await _run_source_with_timeout(
+            "semantic_scholar",
+            _enrich_semantic_scholar(ctx, stats, paper_title, config.max_results_per_source, config.semantic_scholar_api_key),
+            stats,
+        )
 
     if config.web_search_enabled:
-        await _enrich_web_search(ctx, stats, paper_title, config)
+        await _run_source_with_timeout(
+            "web",
+            _enrich_web_search(ctx, stats, paper_title, config),
+            stats,
+        )
 
     # Dedupe + drop the paper itself.
     ctx.findings = _dedupe_findings(ctx.findings, paper_title)
@@ -139,6 +156,24 @@ async def enrich_context(
     stats.findings = list(ctx.findings)
 
     return stats
+
+
+async def _run_source_with_timeout(
+    source: str,
+    awaitable: Any,
+    stats: EnrichmentStats,
+) -> None:
+    timeout = _WEB_SOURCE_TIMEOUT_SECONDS if source == "web" else _ACADEMIC_SOURCE_TIMEOUT_SECONDS
+    try:
+        await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError:
+        if source == "arxiv":
+            stats.arxiv_error = "timeout"
+        elif source == "semantic_scholar":
+            stats.scholar_error = "timeout"
+        else:
+            stats.web_error = "timeout"
+        logger.warning("%s enrichment timed out after %.0fs", source, timeout)
 
 
 # ── arxiv ─────────────────────────────────────────────────────────────────────
@@ -164,22 +199,9 @@ async def _enrich_arxiv(
     try:
         import arxiv  # type: ignore[import-not-found]
 
-        client = arxiv.Client(page_size=max_results)
-        search = arxiv.Search(query=query, max_results=max_results)
-
-        added = 0
-        for result in client.results(search):
-            ctx.findings.append(
-                ResearchFinding(
-                    source="arxiv",
-                    title=str(result.title),
-                    abstract=str(result.summary or "").strip(),
-                    authors=[a.name for a in result.authors][:5],
-                    year=result.published.year if result.published else None,
-                    url=str(result.pdf_url or result.entry_id or ""),
-                )
-            )
-            added += 1
+        findings = await aoffload(_search_arxiv_sync, arxiv, query, max_results)
+        ctx.findings.extend(findings)
+        added = len(findings)
 
         stats.arxiv_found = added
         logger.info("arxiv enrichment: %d papers for query '%s'", added, query[:60])
@@ -206,7 +228,7 @@ async def _enrich_semantic_scholar(
     try:
         from semanticscholar import AsyncSemanticScholar  # type: ignore[import-not-found]
 
-        sch = AsyncSemanticScholar(api_key=api_key or None, timeout=60)
+        sch = AsyncSemanticScholar(api_key=api_key or None, timeout=10)
         results = await sch.search_paper(
             paper_title,
             limit=max_results,
@@ -243,6 +265,24 @@ async def _enrich_semantic_scholar(
     except Exception as e:  # noqa: BLE001
         stats.scholar_error = _classify_external_error(e)
         logger.warning("Semantic Scholar enrichment failed: %s: %s", type(e).__name__, e)
+
+
+def _search_arxiv_sync(arxiv_mod: Any, query: str, max_results: int) -> list[ResearchFinding]:
+    client = arxiv_mod.Client(page_size=max_results)
+    search = arxiv_mod.Search(query=query, max_results=max_results)
+    findings: list[ResearchFinding] = []
+    for result in client.results(search):
+        findings.append(
+            ResearchFinding(
+                source="arxiv",
+                title=str(result.title),
+                abstract=str(result.summary or "").strip(),
+                authors=[a.name for a in result.authors][:5],
+                year=result.published.year if result.published else None,
+                url=str(result.pdf_url or result.entry_id or ""),
+            )
+        )
+    return findings
 
 
 # ── Web search ────────────────────────────────────────────────────────────────

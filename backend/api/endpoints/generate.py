@@ -360,6 +360,16 @@ async def send_agent_generation_feedback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Feedback is only supported for Agent generation jobs.",
         )
+    if job.status in {"error", "cancelled"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Feedback cannot resume a failed or cancelled Agent job.",
+        )
+    if job.status == "pausing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Wait for the Agent to finish pausing before sending guidance.",
+        )
 
     text = payload.message.strip()
     if not text:
@@ -400,18 +410,30 @@ async def send_agent_generation_feedback(
     live_session = get_live_session(job_id)
 
     if live_session is not None:
-        if job.status == "paused":
-            session_manager.update_job(
+        was_paused = job.status == "paused"
+        runtime = _agent_runtime_from_job(job)
+        await live_session.send_message(
+            text,
+            interrupt_current=not was_paused and runtime == "claude_code",
+        )
+        if was_paused:
+            session_manager.record_event(
                 job_id,
+                {
+                    "type": "progress",
+                    "job_id": job_id,
+                    "stage": "agent",
+                    "status": "progress",
+                    "message": "Agent is applying guidance...",
+                    "progress": job.progress,
+                    "slides_completed": job.slides_completed,
+                    "total_slides": job.total_slides,
+                    "data": {"agent_resumed": True},
+                },
                 status="generation",
                 message="Agent is applying guidance...",
                 error=None,
             )
-        runtime = _agent_runtime_from_job(job)
-        await live_session.send_message(
-            text,
-            interrupt_current=job.status != "paused" and runtime == "claude_code",
-        )
         return AgentFeedbackResponse(job_id=job_id, status="injected", path=str(target))
 
     if job.status == "complete":
@@ -483,6 +505,8 @@ async def interrupt_agent_generation(job_id: str) -> AgentFeedbackResponse:
         )
     if job.status in {"complete", "error", "cancelled"}:
         return AgentFeedbackResponse(job_id=job_id, status=job.status)
+    if job.status == "pausing":
+        return AgentFeedbackResponse(job_id=job_id, status="interrupting")
 
     from backend.orchestrator.agent_session_registry import get as get_live_session
 
@@ -493,6 +517,13 @@ async def interrupt_agent_generation(job_id: str) -> AgentFeedbackResponse:
             job_id,
             "Agent job stopped before a live session was available.",
         )
+        return AgentFeedbackResponse(job_id=job_id, status="cancelled")
+
+    if job.status == "paused":
+        cancelled = session_manager.cancel_job(job_id)
+        if not cancelled:
+            await live_session.close()
+        session_manager.mark_job_cancelled(job_id, "Agent task cancelled.")
         return AgentFeedbackResponse(job_id=job_id, status="cancelled")
 
     await live_session.interrupt()
@@ -509,8 +540,8 @@ async def interrupt_agent_generation(job_id: str) -> AgentFeedbackResponse:
             "total_slides": job.total_slides,
             "data": {"agent_interrupt": True},
         },
-        status="paused",
-        message="Agent pause requested. Send guidance to continue.",
+        status="pausing",
+        message="Pausing Agent...",
         error=None,
     )
     return AgentFeedbackResponse(job_id=job_id, status="interrupting")
