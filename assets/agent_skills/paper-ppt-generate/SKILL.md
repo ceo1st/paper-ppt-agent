@@ -30,6 +30,11 @@ validates SVGs, finalizes them, and exports PPTX.
    protected. Use the Python interpreter from `agent_task.json.paths.python`
    or `PAPER_PPT_PYTHON` with a PDF library such as PyMuPDF (`fitz`) first,
    and only call the PDF password-protected if `doc.needs_pass` is true.
+   Before drafting content, read `source_assets/paper.md` and
+   `source_assets/figures.md`/`figures.json` if present. If they are missing,
+   stale, or `source_assets/extraction_error.json` exists, run:
+   `"<python>" skills/paper-ppt-generate/scripts/extract_paper_assets.py --task agent_task.json --out source_assets`
+   using `agent_task.json.paths.python` or `PAPER_PPT_PYTHON`.
    During long work, periodically check `agent_feedback/` for user guidance.
 5. Write `manuscript.md` as slide-structured content.
 6. Write `design_spec.md` with deck-level visual rules and per-slide intent.
@@ -57,6 +62,9 @@ validates SVGs, finalizes them, and exports PPTX.
 - If deep research is enabled, split work across focused readers/SubAgents and merge into the manuscript.
 - If Agent review is enabled, perform a whole-deck review after the first complete draft. Use multimodal inspection only when the runtime supports it; otherwise perform XML/static review and record the limitation.
 - For any Python command, prefer `agent_task.json.paths.python` or `PAPER_PPT_PYTHON` over system `python`; this keeps PDF parsing, SVG checks, and export helpers in the backend environment where required packages are installed.
+- Treat `source_assets/figures.json` as the paper-figure contract. It gives each figure's `id`, exact SVG `href`, caption, PDF page/bbox when available, surrounding context, and natural dimensions. Select figures by caption/page/context, not by filename alone.
+- Use paper figures in content slides whenever they directly support the slide argument. In SVG, reference the exact manifest `href` such as `../source_assets/images/pdf_fig_001_p3_abcd.png`; preserve the listed aspect ratio.
+- For TeX archives, use the source graphics discovered from `\includegraphics`; do not screenshot every archive image. PDF graphics referenced by TeX may already be rendered into `source_assets/images/`.
 
 ## Live Preview
 
@@ -74,3 +82,4 @@ preview.
 - Preserve template chrome when a template is provided.
 - Prefer clear academic storytelling over dense paper transcription.
 - End only when all slides are present and `agent_report.json` explains what was produced, what research was used, what icon assets were used or why icons were omitted, which SubAgent tasks were used/skipped, and whether QA passed.
+- Include `paper_figures_used` in `agent_report.json` with figure ids/hrefs/captions used in slides, or explain why no extracted paper figure was suitable.

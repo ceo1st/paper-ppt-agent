@@ -665,27 +665,33 @@ export const useGeneration = create<GenerationState>()(
       },
       async startGeneration(payload) {
         const response = await generatePresentation(payload);
+        const initialJob = await fetchJobStatus(response.job_id).catch(() => undefined);
         const run = createRunSnapshot(response.job_id, {
           uploadSession: get().uploadSession,
           job: {
-            status: "parsing",
-            progress: 0,
-            message: "Parsing paper...",
-            slides_completed: 0,
-            total_slides: 0,
+            status: initialJob?.status ?? "parsing",
+            progress: initialJob?.progress ?? 0,
+            message: initialJob?.message ?? "Parsing paper...",
+            slides_completed: initialJob?.slides_completed ?? 0,
+            total_slides: initialJob?.total_slides ?? 0,
+            output_path: initialJob?.output_path,
+            error: initialJob?.error,
+            provider: initialJob?.provider,
+            model: initialJob?.model,
+            base_url: initialJob?.base_url,
           },
           logs: ["[parsing] Parsing paper..."],
           agentMessages: [],
           currentRunConfig: {
             provider:
               payload.options.generation_backend === "agent"
-                ? `agent:${payload.options.agent_config?.runtime ?? "claude_code"}`
+                ? initialJob?.provider ?? `agent:${payload.options.agent_config?.runtime ?? "claude_code"}`
                 : payload.model_config?.provider ?? "unknown",
             model:
               payload.options.generation_backend === "agent"
-                ? payload.options.agent_config?.model || "agent-default"
+                ? (initialJob?.model ?? payload.options.agent_config?.model ?? "agent-default")
                 : payload.model_config?.model ?? "unknown",
-            baseUrl: payload.model_config?.base_url,
+            baseUrl: initialJob?.base_url ?? payload.model_config?.base_url,
             options: payload.options,
             parentJobId: null,
           },
@@ -775,6 +781,9 @@ export const useGeneration = create<GenerationState>()(
           total_slides: currentRun.job?.total_slides ?? currentRun.slides.length,
           output_path: currentRun.job?.output_path,
           error: undefined,
+          provider: currentRun.job?.provider,
+          model: currentRun.job?.model,
+          base_url: currentRun.job?.base_url,
         };
         const cancellingRun: RunSnapshot = {
           ...currentRun,
@@ -1041,6 +1050,9 @@ export const useGeneration = create<GenerationState>()(
                 output_path:
                   typeof event.data.output_path === "string" ? event.data.output_path : currentRun.job?.output_path,
                 error: event.type === "error" ? event.message : undefined,
+                provider: currentRun.job?.provider,
+                model: currentRun.job?.model,
+                base_url: currentRun.job?.base_url,
               };
 
               let slides = currentRun.slides;

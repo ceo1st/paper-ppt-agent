@@ -631,7 +631,11 @@ export function ResultPage() {
             onStop={async () => {
               setCancelLoading(true);
               try {
-                await interruptCurrentAgent();
+                if (resultRunStatus === "paused") {
+                  await cancelCurrentRun();
+                } else {
+                  await interruptCurrentAgent();
+                }
               } finally {
                 setCancelLoading(false);
               }

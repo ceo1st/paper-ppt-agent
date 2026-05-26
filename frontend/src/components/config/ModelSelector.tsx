@@ -6,6 +6,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
+import { HoverTooltip } from "../common/HoverTooltip";
 
 interface ModelSelectorProps {
   providers: ProviderListItem[];
@@ -286,15 +287,19 @@ function getProviderIcon(name?: string, displayName?: string): ProviderIconKind 
 function ProviderIcon({ icon, label }: { icon: ProviderIconKind; label?: string }) {
   if (icon === "default") {
     return (
-      <span className="provider-icon provider-icon-fallback" aria-hidden="true" title={label}>
-        <Cpu size={14} />
-      </span>
+      <HoverTooltip content={label ?? ""}>
+        <span className="provider-icon provider-icon-fallback" aria-hidden="true">
+          <Cpu size={14} />
+        </span>
+      </HoverTooltip>
     );
   }
   return (
-    <span className="provider-icon" aria-hidden="true" title={label}>
-      <img src={PROVIDER_ICON_SRC[icon]} alt="" />
-    </span>
+    <HoverTooltip content={label ?? ""}>
+      <span className="provider-icon" aria-hidden="true">
+        <img src={PROVIDER_ICON_SRC[icon]} alt="" />
+      </span>
+    </HoverTooltip>
   );
 }
 

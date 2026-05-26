@@ -5077,6 +5077,27 @@ body::before {
   line-height: 1.5;
 }
 
+.generation-agent-tooltip-content {
+  max-width: min(680px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 96px));
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.generation-tooltip-trigger {
+  display: inline-flex;
+}
+
+.sidebar-link-tooltip-trigger,
+.thumbnail-tooltip-trigger {
+  display: contents;
+}
+
+.history-name-tooltip-trigger {
+  min-width: 0;
+}
+
 .visual-qa-switch {
   position: relative;
   width: 32px;

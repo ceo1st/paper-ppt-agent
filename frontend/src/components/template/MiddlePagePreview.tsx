@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { useLocale } from "../../i18n";
 import type { TemplatePageType } from "../../lib/types";
+import { HoverTooltip } from "../common/HoverTooltip";
 import { useContainedSlideFrame } from "./useContainedSlideFrame";
 
 function sanitizeSvg(svg: string): string {
@@ -178,7 +179,7 @@ function DisabledTemplateWorkbenchHeader() {
           href="https://github.com/pipipi-pikachu/PPTist"
           target="_blank"
           rel="noreferrer"
-          title="PPTist by pipipi-pikachu"
+          aria-label="PPTist by pipipi-pikachu"
         >
           <GitHubMark />
         </a>
@@ -201,16 +202,20 @@ function DisabledToolbarButton({
   className?: string;
 }) {
   return (
-    <button
-      type="button"
-      className={`generate-pptist-disabled-button ${compact ? "generate-pptist-disabled-button-compact" : ""} ${className ?? ""}`}
-      disabled
-      title={label}
-    >
-      {icon}
-      {!compact ? <span>{label}</span> : null}
-      {caret ? <ChevronDown size={13} /> : null}
-    </button>
+    <HoverTooltip content={label}>
+      <span className="generation-tooltip-trigger">
+        <button
+          type="button"
+          className={`generate-pptist-disabled-button ${compact ? "generate-pptist-disabled-button-compact" : ""} ${className ?? ""}`}
+          disabled
+          aria-label={label}
+        >
+          {icon}
+          {!compact ? <span>{label}</span> : null}
+          {caret ? <ChevronDown size={13} /> : null}
+        </button>
+      </span>
+    </HoverTooltip>
   );
 }
 

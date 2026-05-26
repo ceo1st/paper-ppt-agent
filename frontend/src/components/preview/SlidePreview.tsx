@@ -1,5 +1,6 @@
 import type { PreviewSlide } from "../../lib/types";
 import { useLocale } from "../../i18n";
+import { HoverTooltip } from "../common/HoverTooltip";
 import { SlideVisual } from "./SlideVisual";
 
 interface SlidePreviewProps {
@@ -23,19 +24,19 @@ export function SlidePreview({ slides, selectedSlide, onSelect }: SlidePreviewPr
       </div>
       <div className="thumbnail-grid">
         {slides.map((slide) => (
-          <button
-            key={slide.index}
-            type="button"
-            className={`thumbnail-card ${selectedSlide?.index === slide.index ? "thumbnail-card-active" : ""}`}
-            onClick={() => onSelect(slide)}
-            title={`PPT ${slide.index}`}
-          >
-            <SlideVisual slide={slide} className="thumbnail-svg" />
-            <div className="thumbnail-caption">
-              <strong>{`PPT ${slide.index}`}</strong>
-              <span>{slide.name}</span>
-            </div>
-          </button>
+          <HoverTooltip key={slide.index} content={`PPT ${slide.index}`} className="thumbnail-tooltip-trigger">
+            <button
+              type="button"
+              className={`thumbnail-card ${selectedSlide?.index === slide.index ? "thumbnail-card-active" : ""}`}
+              onClick={() => onSelect(slide)}
+            >
+              <SlideVisual slide={slide} className="thumbnail-svg" />
+              <div className="thumbnail-caption">
+                <strong>{`PPT ${slide.index}`}</strong>
+                <span>{slide.name}</span>
+              </div>
+            </button>
+          </HoverTooltip>
         ))}
       </div>
     </section>

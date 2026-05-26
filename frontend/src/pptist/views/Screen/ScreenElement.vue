@@ -9,7 +9,7 @@
       fontFamily: theme.fontName,
       visibility: needWaitAnimation ? 'hidden' : 'visible',
     }"
-    :title="elementInfo.link?.target || ''"
+    v-tooltip="elementInfo.link?.target || ''"
     @click="$event => openLink($event)"
   >
     <component
