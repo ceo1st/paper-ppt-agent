@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertOctagon, Copy, Check, X, ChevronDown, ChevronUp } from "lucide-react";
 import { useGeneration } from "../../hooks/useGeneration";
 import { useLocale } from "../../i18n";
+import { HoverTooltip } from "../common/HoverTooltip";
 
 /**
  * Floating, full-width error banner.
@@ -62,36 +63,39 @@ export function ErrorBanner() {
         </div>
         <div className="error-banner-actions">
           {isMultiline ? (
+            <HoverTooltip content={expanded ? t("error.collapse") : t("error.expand")}>
+              <button
+                type="button"
+                className="error-banner-action"
+                onClick={() => setExpanded((v) => !v)}
+                aria-label={expanded ? t("error.collapse") : t("error.expand")}
+              >
+                {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                <span>{expanded ? t("error.collapse") : t("error.expand")}</span>
+              </button>
+            </HoverTooltip>
+          ) : null}
+          <HoverTooltip content={t("error.copy")}>
             <button
               type="button"
               className="error-banner-action"
-              onClick={() => setExpanded((v) => !v)}
-              aria-label={expanded ? t("error.collapse") : t("error.expand")}
-              title={expanded ? t("error.collapse") : t("error.expand")}
+              onClick={handleCopy}
+              aria-label={t("error.copy")}
             >
-              {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              <span>{expanded ? t("error.collapse") : t("error.expand")}</span>
+              {copied ? <Check size={16} /> : <Copy size={16} />}
+              <span>{copied ? t("error.copied") : t("error.copy")}</span>
             </button>
-          ) : null}
-          <button
-            type="button"
-            className="error-banner-action"
-            onClick={handleCopy}
-            aria-label={t("error.copy")}
-            title={t("error.copy")}
-          >
-            {copied ? <Check size={16} /> : <Copy size={16} />}
-            <span>{copied ? t("error.copied") : t("error.copy")}</span>
-          </button>
-          <button
-            type="button"
-            className="error-banner-close"
-            onClick={dismissError}
-            aria-label={t("error.dismiss")}
-            title={t("error.dismiss")}
-          >
-            <X size={18} />
-          </button>
+          </HoverTooltip>
+          <HoverTooltip content={t("error.dismiss")}>
+            <button
+              type="button"
+              className="error-banner-close"
+              onClick={dismissError}
+              aria-label={t("error.dismiss")}
+            >
+              <X size={18} />
+            </button>
+          </HoverTooltip>
         </div>
       </div>
     </div>

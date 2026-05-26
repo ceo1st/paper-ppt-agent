@@ -205,7 +205,7 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
             detail="Provider generation requires model_config.",
         )
     if generation_backend == "agent":
-        from backend.orchestrator.agent_pipeline import agent_runtime_status
+        from backend.orchestrator.agent_pipeline import agent_runtime_defaults, agent_runtime_status
 
         runtime = (
             request.options.agent_config.runtime
@@ -218,6 +218,9 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=runtime_status.get("message") or f"Agent runtime '{runtime}' is not ready.",
             )
+        agent_defaults = agent_runtime_defaults(runtime)
+    else:
+        agent_defaults = {}
 
     job = session_manager.create_job(request.session_id)
     provider_label = (
@@ -228,7 +231,12 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
     model_label = (
         model_settings.model
         if model_settings is not None
-        else (request.options.agent_config.model if request.options.agent_config else None) or "agent-default"
+        else (
+            request.options.agent_config.model
+            if request.options.agent_config and request.options.agent_config.model
+            else agent_defaults.get("model")
+        )
+        or "agent-default"
     )
     session_manager.update_job(
         job.id,

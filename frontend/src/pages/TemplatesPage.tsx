@@ -1099,27 +1099,28 @@ export function TemplatesPage() {
                   onCancelImport={handleCancelImport}
                 />
                 {annotationMode ? (
-                  <div
-                    className="ti-annotation-overlay"
-                    onPointerDown={handleAnnotationPointerDown}
-                    onPointerMove={handleAnnotationPointerMove}
-                    onPointerUp={handleAnnotationPointerUp}
-                    title={t("template.annotations.dragHint")}
-                  >
-                    {annotationDraft ? (
-                      <div
-                        className="ti-annotation-draft-box"
-                        style={{
-                          left: `${annotationDraft.x * 100}%`,
-                          top: `${annotationDraft.y * 100}%`,
-                          width: `${annotationDraft.width * 100}%`,
-                          height: `${annotationDraft.height * 100}%`,
-                        }}
-                      />
-                    ) : (
-                      <span>{t("template.annotations.dragHint")}</span>
-                    )}
-                  </div>
+                  <HoverTooltip content={t("template.annotations.dragHint")} className="ti-annotation-tooltip-trigger">
+                    <div
+                      className="ti-annotation-overlay"
+                      onPointerDown={handleAnnotationPointerDown}
+                      onPointerMove={handleAnnotationPointerMove}
+                      onPointerUp={handleAnnotationPointerUp}
+                    >
+                      {annotationDraft ? (
+                        <div
+                          className="ti-annotation-draft-box"
+                          style={{
+                            left: `${annotationDraft.x * 100}%`,
+                            top: `${annotationDraft.y * 100}%`,
+                            width: `${annotationDraft.width * 100}%`,
+                            height: `${annotationDraft.height * 100}%`,
+                          }}
+                        />
+                      ) : (
+                        <span>{t("template.annotations.dragHint")}</span>
+                      )}
+                    </div>
+                  </HoverTooltip>
                 ) : null}
               </div>
               {review ? (
@@ -2264,26 +2265,27 @@ function BottomRail({
                   <div dangerouslySetInnerHTML={{ __html: sanitizeSvg(svg) }} />
                 ) : null}
                 {slides.length > 0 ? (
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    className="templates-bottom-edit"
-                    title={t("templates.chip.chooseReference")}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openSelectionMenu(pt, event);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter" && event.key !== " ") return;
-                      event.preventDefault();
-                      event.stopPropagation();
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      setSelectionMenu((current) => (current === pt ? null : pt));
-                      setSelectionMenuPos(menuPositionFromRect(rect));
-                    }}
-                  >
-                    <Pencil size={12} />
-                  </span>
+                  <HoverTooltip content={t("templates.chip.chooseReference")} className="templates-bottom-edit-tooltip-trigger">
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      className="templates-bottom-edit"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        openSelectionMenu(pt, event);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setSelectionMenu((current) => (current === pt ? null : pt));
+                        setSelectionMenuPos(menuPositionFromRect(rect));
+                      }}
+                    >
+                      <Pencil size={12} />
+                    </span>
+                  </HoverTooltip>
                 ) : null}
                 {selectionMenu === pt && selectionMenuPos ? createPortal(
                   <div

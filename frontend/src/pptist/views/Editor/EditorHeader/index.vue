@@ -12,7 +12,7 @@
         <div
           class="title-text"
           @click="startEditTitle()"
-          :title="title"
+          v-tooltip="title"
           v-else
         >{{ title }}</div>
       </div>
@@ -52,7 +52,7 @@
             type="button"
             class="result-export-main"
             :disabled="confirmImportDisabled || confirmingImport"
-            :title="confirmImportHint"
+            v-tooltip="confirmImportHint"
             @click="confirmImportFromPaperHost()"
           >
             <i-icon-park-outline:upload class="icon" />

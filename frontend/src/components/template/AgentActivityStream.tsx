@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import type { AgentActivity } from "./agentActivity";
+import { HoverTooltip } from "../common/HoverTooltip";
 
 export interface AgentActivityStreamProps {
   events: AgentActivity[];
@@ -71,22 +72,23 @@ export function AgentActivityStream({
               className="ti-activity-row"
               data-state={event.state}
               data-kind={event.kind}
-              title={event.detail ? `${event.label} — ${event.detail}` : event.label}
             >
-              <span className="ti-activity-bar" aria-hidden="true" />
-              <span className="ti-activity-icon" aria-hidden="true">
-                <ActivityIcon event={event} />
-              </span>
-              <span className="ti-activity-label">{event.label}</span>
-              {event.detail ? (
-                <span className="ti-activity-detail">{event.detail}</span>
-              ) : null}
-              {event.state === "active" ? (
-                <Loader2
-                  size={11}
-                  className="ti-activity-spinner animate-spin"
-                />
-              ) : null}
+              <HoverTooltip content={event.detail ? `${event.label} - ${event.detail}` : event.label} className="ti-activity-tooltip-trigger">
+                <span className="ti-activity-bar" aria-hidden="true" />
+                <span className="ti-activity-icon" aria-hidden="true">
+                  <ActivityIcon event={event} />
+                </span>
+                <span className="ti-activity-label">{event.label}</span>
+                {event.detail ? (
+                  <span className="ti-activity-detail">{event.detail}</span>
+                ) : null}
+                {event.state === "active" ? (
+                  <Loader2
+                    size={11}
+                    className="ti-activity-spinner animate-spin"
+                  />
+                ) : null}
+              </HoverTooltip>
             </li>
           ))}
         </ol>

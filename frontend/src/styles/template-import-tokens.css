@@ -404,6 +404,19 @@
   animation: ti-activity-slide-in 220ms ease-out both;
 }
 
+.ti-activity-tooltip-trigger,
+.ti-annotation-tooltip-trigger,
+.ti-file-item-tooltip-trigger,
+.templates-bottom-edit-tooltip-trigger {
+  display: contents;
+}
+
+.ti-inline-tooltip-trigger,
+.ti-file-head-tooltip-trigger {
+  display: inline-flex;
+  min-width: 0;
+}
+
 @keyframes ti-activity-slide-in {
   from {
     opacity: 0;
