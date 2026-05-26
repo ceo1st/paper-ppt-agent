@@ -32,6 +32,7 @@ const STAGE_LABELS: Record<string, { zh: string; en: string }> = {
   error: { zh: "失败", en: "Error" },
   cancelled: { zh: "已取消", en: "Cancelled" },
   cancelling: { zh: "取消中", en: "Cancelling" },
+  pausing: { zh: "暂停中", en: "Pausing" },
   paused: { zh: "已暂停", en: "Paused" },
   unknown: { zh: "未知", en: "Unknown" },
   "(unknown)": { zh: "未知", en: "Unknown" },
@@ -54,6 +55,7 @@ const HISTORY_LABELS: Record<string, { zh: string; en: string }> = {
   error: { zh: "失败", en: "Error" },
   cancelled: { zh: "已取消", en: "Cancelled" },
   cancelling: { zh: "取消中", en: "Cancelling" },
+  pausing: { zh: "暂停中", en: "Pausing" },
   paused: { zh: "已暂停", en: "Paused" },
 };
 

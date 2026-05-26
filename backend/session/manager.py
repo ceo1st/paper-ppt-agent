@@ -398,7 +398,7 @@ class SessionManager:
         jobs as ``error`` so the UI stops polling for progress."""
         terminal = {"complete", "error", "cancelled"}
         running_states = {"pending", "parsing", "research", "strategy",
-                          "generation", "paused", "postprocess", "export", "refine"}
+                          "generation", "pausing", "paused", "postprocess", "export", "refine"}
         changed = False
         for job in self._jobs.values():
             if job.status in terminal:

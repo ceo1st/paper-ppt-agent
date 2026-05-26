@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paper PPT Deep Research"
+  short_description: "Deep-read papers for slide decks"
+  default_prompt: "Use paper-ppt-deep-research to split paper analysis into focused passes and synthesize slide-ready findings."

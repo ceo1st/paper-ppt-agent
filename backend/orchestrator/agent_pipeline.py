@@ -74,6 +74,8 @@ class _ClaudeResponseOutcome:
 
 _RUNTIME_DEFAULT = "claude_code"
 _AGENT_SKILL_NAME = "paper-ppt-generate"
+_RESEARCH_SKILL_NAME = "paper-ppt-research"
+_DEEP_RESEARCH_SKILL_NAME = "paper-ppt-deep-research"
 _SVG_SCAN_SECONDS = 1.0
 _AGENT_IDLE_NOTICE_SECONDS = 60.0
 _AGENT_INTERRUPT_POLL_SECONDS = 0.1
@@ -84,6 +86,10 @@ _AGENT_IDLE_MESSAGE = (
 
 # Sentinel marking end of the persistent session message stream.
 _SESSION_DONE = object()
+
+
+class _TransientSvgPreviewError(RuntimeError):
+    """Raised when an Agent SVG looks like an in-progress file write."""
 
 
 async def agent_runtime_status(runtime: str) -> dict[str, Any]:
@@ -230,7 +236,16 @@ class PersistentAgentSession:
             daemon=True,
         )
         self._worker_thread.start()
-        self._ready.wait(timeout=30)
+        ready = await asyncio.to_thread(
+            self._ready.wait,
+            max(1, int(settings.agent_runtime_ready_timeout or 30)),
+        )
+        if not ready:
+            self._cancel_event.set()
+            raise TimeoutError(
+                f"Agent runtime '{self._runtime}' did not become ready within "
+                f"{settings.agent_runtime_ready_timeout}s"
+            )
         if self._usage_totals.model:
             self._emit(_agent_usage_progress_event(self._usage_totals))
         await self.send_message(initial_prompt)
@@ -275,7 +290,7 @@ class PersistentAgentSession:
         self._cancel_event.set()
         self._prompt_queue.put(None)  # unblock the worker
         if self._worker_thread and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=10)
+            await asyncio.to_thread(self._worker_thread.join, 10)
 
     def set_bridge_mode(self) -> None:
         """Route messages to the bridge queue (for pipeline generator)."""
@@ -662,7 +677,7 @@ class PersistentAgentSession:
             )
             codex_config = AppServerConfig(
                 cwd=str(self._project_dir),
-                env=_agent_runtime_env(self._project_dir),
+                env=_agent_runtime_env(self._project_dir, self._agent_config.get("_research_env")),
                 codex_bin=str(settings.codex_bin) if settings.codex_bin else None,
             )
             sandbox_policy = SandboxPolicy(
@@ -784,8 +799,9 @@ class PersistentAgentSession:
                 else ["user"]
             ),
             model=agent_config.get("model") or None,
-            skills=[_AGENT_SKILL_NAME],
-            env=_agent_runtime_env(self._project_dir),
+            skills=[_AGENT_SKILL_NAME, _RESEARCH_SKILL_NAME, _DEEP_RESEARCH_SKILL_NAME],
+            env=_agent_runtime_env(self._project_dir, agent_config.get("_research_env")),
+            hooks=_agent_research_gate_hooks(self._project_dir),
             **session_opts,
         )
 
@@ -924,6 +940,9 @@ async def run_agent_pipeline(request: Any):
     )
 
     agent_config = dict(getattr(request, "agent_config", None) or {})
+    agent_config["_research_env"] = _agent_research_env_from_config(
+        getattr(request, "research_config", None)
+    )
     runtime = str(agent_config.get("runtime") or _RUNTIME_DEFAULT)
     project_dir = init_project(
         name="paper_ppt_agent",
@@ -943,8 +962,8 @@ async def run_agent_pipeline(request: Any):
     if getattr(request, "template_id", None):
         tmpl = load_template(request.template_id)
         if tmpl:
-            _copy_template_reference_for_agent(tmpl, project_dir)
-            copy_template_assets_for_project(tmpl, project_dir)
+            await aoffload(_copy_template_reference_for_agent, tmpl, project_dir)
+            await aoffload(copy_template_assets_for_project, tmpl, project_dir)
             yield AgentProgressEvent(
                 "agent",
                 "progress",
@@ -1339,19 +1358,19 @@ async def run_agent_feedback_pipeline(
 
 async def _prepare_agent_workspace(project_dir: Path, request: Any, agent_config: dict[str, Any]) -> None:
     sources_dir = project_dir / "sources"
-    (project_dir / "agent_feedback").mkdir(parents=True, exist_ok=True)
+    await aoffload(sources_dir.mkdir, parents=True, exist_ok=True)
+    await aoffload((project_dir / "agent_feedback").mkdir, parents=True, exist_ok=True)
     source_target = sources_dir / ("paper.pdf" if request.source_type == "pdf" else "latex_source")
     input_path = Path(request.file_path)
-    if input_path.is_dir():
-        if source_target.exists():
-            shutil.rmtree(source_target)
-        shutil.copytree(input_path, source_target)
-    else:
-        if request.source_type == "latex":
-            source_target = sources_dir / input_path.name
-        shutil.copy2(input_path, source_target)
+    source_target = await aoffload(
+        _copy_agent_source_input,
+        input_path,
+        source_target,
+        sources_dir,
+        str(request.source_type),
+    )
 
-    _copy_agent_skill(project_dir)
+    await aoffload(_copy_agent_skill, project_dir)
     task = _build_agent_task(project_dir, source_target, request, agent_config)
     await awrite_text(
         project_dir / "agent_task.json",
@@ -1359,8 +1378,24 @@ async def _prepare_agent_workspace(project_dir: Path, request: Any, agent_config
         encoding="utf-8",
     )
     await _prepare_agent_source_assets(project_dir)
-    await _prefetch_agent_research(project_dir, source_target, request, agent_config)
     await awrite_text(project_dir / "AGENT_README.md", _agent_readme(), encoding="utf-8")
+
+
+def _copy_agent_source_input(
+    input_path: Path,
+    source_target: Path,
+    sources_dir: Path,
+    source_type: str,
+) -> Path:
+    if input_path.is_dir():
+        if source_target.exists():
+            shutil.rmtree(source_target)
+        shutil.copytree(input_path, source_target)
+        return source_target
+    if source_type == "latex":
+        source_target = sources_dir / input_path.name
+    shutil.copy2(input_path, source_target)
+    return source_target
 
 
 async def _prepare_agent_source_assets(project_dir: Path) -> None:
@@ -1474,200 +1509,11 @@ def _copy_template_reference_for_agent(template: Any, project_dir: Path) -> None
     )
 
 
-async def _prefetch_agent_research(
-    project_dir: Path,
-    source_target: Path,
-    request: Any,
-    agent_config: dict[str, Any],
-) -> None:
-    if not bool(agent_config.get("allow_external_research")):
-        return
-    research_cfg = getattr(request, "research_config", None)
-    if research_cfg is None or not (
-        getattr(research_cfg, "arxiv_search_enabled", False)
-        or getattr(research_cfg, "semantic_scholar_enabled", False)
-        or getattr(research_cfg, "web_search_enabled", False)
-    ):
-        return
-
-    try:
-        from backend.orchestrator.research_agent import ResearchContext
-        from backend.orchestrator.research_enrichment import enrich_context
-
-        title, abstract = await aoffload(
-            _extract_agent_research_seed,
-            source_target,
-            str(getattr(request, "source_type", "")),
-        )
-        if not title:
-            title = Path(getattr(request, "file_path", "") or source_target).stem
-        ctx = ResearchContext()
-        stats = await enrich_context(
-            ctx,
-            paper_title=title,
-            paper_abstract=abstract,
-            config=research_cfg,
-        )
-        research_dir = project_dir / "research"
-        research_dir.mkdir(parents=True, exist_ok=True)
-        sources = [finding.to_dict() for finding in ctx.findings]
-        (research_dir / "sources.json").write_text(
-            json.dumps(
-                {
-                    "query_title": title,
-                    "stats": stats.to_dict(),
-                    "sources": sources,
-                    "notes": [
-                        "Web sources include opened_url=true only when the backend fetched and read page body text.",
-                        "Agent must inspect this file and research/brief.md before using external research in slides.",
-                    ],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        (research_dir / "brief.md").write_text(
-            _format_agent_research_brief(title, ctx, stats),
-            encoding="utf-8",
-        )
-    except Exception as exc:  # noqa: BLE001 - research is optional, record limitation
-        research_dir = project_dir / "research"
-        research_dir.mkdir(parents=True, exist_ok=True)
-        (research_dir / "sources.json").write_text(
-            json.dumps(
-                {
-                    "sources": [],
-                    "error": str(exc) or exc.__class__.__name__,
-                    "notes": ["External research prefetch failed before Agent runtime."],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        (research_dir / "brief.md").write_text(
-            f"# External Research Prefetch\n\nPrefetch failed: {exc}\n",
-            encoding="utf-8",
-        )
-
-
-def _extract_agent_research_seed(source_target: Path, source_type: str) -> tuple[str, str]:
-    if source_type == "pdf" and source_target.is_file():
-        try:
-            import fitz  # type: ignore[import-not-found]
-
-            doc = fitz.open(source_target)
-            if doc.needs_pass:
-                return source_target.stem, ""
-            first_pages = [
-                doc.load_page(i).get_text("text")
-                for i in range(min(len(doc), 2))
-            ]
-            text = "\n".join(first_pages)
-            title = _guess_title_from_text(text) or str(doc.metadata.get("title") or "").strip()
-            abstract = _guess_abstract_from_text(text)
-            doc.close()
-            return title, abstract
-        except Exception:
-            return source_target.stem, ""
-
-    if source_target.is_file():
-        try:
-            text = source_target.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            return source_target.stem, ""
-    elif source_target.is_dir():
-        texts: list[str] = []
-        for tex_path in sorted(source_target.rglob("*.tex"))[:5]:
-            try:
-                texts.append(tex_path.read_text(encoding="utf-8", errors="ignore")[:20000])
-            except OSError:
-                continue
-        text = "\n".join(texts)
-    else:
-        return source_target.stem, ""
-
-    title_match = re.search(r"\\title\{(.+?)\}", text, flags=re.DOTALL)
-    title = _clean_latex_text(title_match.group(1)) if title_match else source_target.stem
-    abstract_match = re.search(
-        r"\\begin\{abstract\}(.+?)\\end\{abstract\}",
-        text,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    abstract = _clean_latex_text(abstract_match.group(1)) if abstract_match else ""
-    return title, abstract
-
-
-def _guess_title_from_text(text: str) -> str:
-    lines = [
-        re.sub(r"\s+", " ", line).strip()
-        for line in text.splitlines()[:40]
-        if re.sub(r"\s+", " ", line).strip()
-    ]
-    for line in lines:
-        if 8 <= len(line) <= 180 and not line.lower().startswith(("abstract", "keywords")):
-            return line
-    return ""
-
-
-def _guess_abstract_from_text(text: str) -> str:
-    match = re.search(
-        r"\babstract\b[:\s]*(.+?)(?:\n\s*(?:keywords|introduction|1\s+introduction)\b)",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if not match:
-        return ""
-    return re.sub(r"\s+", " ", match.group(1)).strip()[:2000]
-
-
-def _clean_latex_text(text: str) -> str:
-    text = re.sub(r"%.*", "", text)
-    text = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?", "", text)
-    text = text.replace("{", "").replace("}", "")
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _format_agent_research_brief(title: str, ctx: Any, stats: Any) -> str:
-    lines = [
-        "# External Research Prefetch",
-        "",
-        f"Query title: {title}",
-        "",
-        "The backend opened web results when possible and stored body excerpts below. Use only claims that are relevant to the paper and cite sources in `agent_report.json`.",
-        "",
-        "## Stats",
-        "",
-        "```json",
-        json.dumps(stats.to_dict(), ensure_ascii=False, indent=2),
-        "```",
-        "",
-        "## Sources",
-        "",
-    ]
-    if not ctx.findings:
-        lines.append("No external sources were fetched.")
-        return "\n".join(lines) + "\n"
-    for index, finding in enumerate(ctx.findings, 1):
-        opened = "opened" if getattr(finding, "opened_url", False) else "not opened"
-        lines.append(f"### {index}. {finding.title or 'Untitled'}")
-        lines.append(f"- Source: {finding.source}")
-        if finding.url:
-            lines.append(f"- URL: {finding.url}")
-        lines.append(f"- Read depth: {opened}")
-        body = str(finding.abstract or "").strip()
-        if body:
-            lines.append("")
-            lines.append(body[:2500])
-        lines.append("")
-    return "\n".join(lines)
-
-
 def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agent_config: dict[str, Any]) -> dict[str, Any]:
     fmt = CANVAS_FORMATS.get(request.canvas_format, CANVAS_FORMATS["ppt169"])
     research_cfg = getattr(request, "research_config", None)
     research_payload = research_cfg.model_dump(exclude_none=True) if hasattr(research_cfg, "model_dump") else None
+    public_research_payload = _public_agent_research_config(research_payload)
     detail_profile = _agent_detail_profile(getattr(request, "detail_level", "normal"), getattr(request, "num_pages", None))
     return {
         "task": "Generate an academic presentation from the uploaded paper using Agent mode.",
@@ -1704,15 +1550,32 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "allow_external_research": bool(agent_config.get("allow_external_research")),
             "allow_deep_research": bool(agent_config.get("allow_deep_research")),
             "enable_visual_qa": bool(agent_config.get("enable_visual_qa", True)),
+            "external_research_skill": _RESEARCH_SKILL_NAME,
+            "deep_research_skill": "paper-ppt-deep-research",
             "icon_policy": _agent_icon_policy(),
             "source_asset_policy": _agent_source_asset_policy(),
             "subagent_policy": _agent_subagent_policy(request, agent_config, detail_profile),
             "research_policy": _agent_research_policy(research_payload),
+            "research_gate": {
+                "enforced": True,
+                "blocks_authoring_until_complete": True,
+                "external_required_outputs": [
+                    "research/raw_external_results.json",
+                    "research/sources.json",
+                    "research/brief.md",
+                ],
+                "deep_required_outputs": [
+                    "research/deep/notes_index.json",
+                    "research/deep/brief.md",
+                ],
+            },
         },
-        "research_config": research_payload,
+        "research_config": public_research_payload,
         "paths": {
             "workspace": str(project_dir),
             "skill": str(project_dir / "skills" / _AGENT_SKILL_NAME / "SKILL.md"),
+            "external_research_skill": str(project_dir / "skills" / _RESEARCH_SKILL_NAME / "SKILL.md"),
+            "deep_research_skill": str(project_dir / "skills" / "paper-ppt-deep-research" / "SKILL.md"),
             "python": str(_agent_python_path()),
             "icons": _rel(project_dir, settings.icons_dir),
             "templates": _rel(project_dir, project_dir / "templates"),
@@ -1724,13 +1587,20 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "source_figures_markdown": "source_assets/figures.md",
             "source_images": "source_assets/images",
             "feedback_dir": "agent_feedback",
-            "prefetched_research_brief": "research/brief.md",
-            "prefetched_research_sources": "research/sources.json",
+            "external_research_script": f"skills/{_RESEARCH_SKILL_NAME}/scripts/search_research.py",
+            "deep_research_notes_script": "skills/paper-ppt-deep-research/scripts/compile_deep_notes.py",
+            "research_brief": "research/brief.md",
+            "research_sources": "research/sources.json",
+            "external_research_summary": "research/external_search_summary.json",
+            "deep_research_brief": "research/deep/brief.md",
         },
     }
 
 
-def _agent_runtime_env(project_dir: Path) -> dict[str, str]:
+def _agent_runtime_env(
+    project_dir: Path,
+    research_env: dict[str, str] | None = None,
+) -> dict[str, str]:
     python_path = _agent_python_path()
     python_dir = str(python_path.parent)
     existing_path = os.environ.get("PATH") or os.environ.get("Path") or ""
@@ -1752,13 +1622,25 @@ def _agent_runtime_env(project_dir: Path) -> dict[str, str]:
         "PATH": runtime_path,
         "Path": runtime_path,
     }
-    env.update(_agent_research_env(project_dir))
+    if research_env:
+        env.update(
+            {
+                key: value
+                for key, value in research_env.items()
+                if isinstance(key, str) and isinstance(value, str) and value.strip()
+            }
+        )
     return env
 
 
-def _agent_research_env(project_dir: Path) -> dict[str, str]:
-    task = _read_agent_task(project_dir)
-    research = task.get("research_config") if isinstance(task.get("research_config"), dict) else {}
+def _agent_research_env_from_config(research_config: Any) -> dict[str, str]:
+    research = (
+        research_config.model_dump(exclude_none=True)
+        if hasattr(research_config, "model_dump")
+        else research_config
+        if isinstance(research_config, dict)
+        else {}
+    )
     env: dict[str, str] = {}
     key_map = {
         "semantic_scholar_api_key": "SEMANTIC_SCHOLAR_API_KEY",
@@ -1770,6 +1652,21 @@ def _agent_research_env(project_dir: Path) -> dict[str, str]:
         if isinstance(value, str) and value.strip():
             env[env_key] = value.strip()
     return env
+
+
+def _public_agent_research_config(research_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not research_payload:
+        return None
+    secret_fields = {
+        "semantic_scholar_api_key",
+        "tavily_api_key",
+        "serpapi_key",
+    }
+    return {
+        key: value
+        for key, value in research_payload.items()
+        if key not in secret_fields
+    }
 
 
 def _agent_python_path() -> Path:
@@ -2268,17 +2165,15 @@ async def _scan_svg_updates(
     svg_files = get_svg_files(project_dir, source="output")
     for ordinal, svg_path in enumerate(svg_files, 1):
         try:
-            content = svg_path.read_text(encoding="utf-8")
+            digest, preview = await aoffload(_prepare_agent_svg_preview, svg_path, project_dir)
         except OSError:
             continue
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        if seen_hashes.get(svg_path) == digest:
+        except _TransientSvgPreviewError:
             continue
-        try:
-            _validate_single_svg(svg_path, content)
-            preview = _embed_svg_preview(content, project_dir)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping invalid Agent SVG preview %s: %s", svg_path, exc)
+            continue
+        if seen_hashes.get(svg_path) == digest:
             continue
         seen_hashes[svg_path] = digest
         page = _slide_number(svg_path, ordinal)
@@ -2302,7 +2197,25 @@ async def _scan_svg_updates(
         )
 
 
+def _prepare_agent_svg_preview(svg_path: Path, project_dir: Path) -> tuple[str, str]:
+    """Read, repair, validate, and embed one live Agent SVG preview.
+
+    Agents often write files directly into ``svg_output``. If the scanner sees
+    a file mid-write, skip this tick quietly and retry on the next scan.
+    """
+    before = svg_path.stat()
+    content = svg_path.read_text(encoding="utf-8")
+    after = svg_path.stat()
+    if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+        raise _TransientSvgPreviewError(f"{svg_path.name} changed while reading")
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    preview = _embed_svg_preview(content, project_dir)
+    _validate_single_svg(svg_path, preview)
+    return digest, preview
+
+
 def _validate_agent_artifacts(project_dir: Path, svg_files: list[Path], total_slides_hint: int) -> None:
+    _validate_agent_research_gate(project_dir)
     if not svg_files:
         raise RuntimeError(_empty_agent_output_message(project_dir))
     if total_slides_hint and len(svg_files) < total_slides_hint:
@@ -2335,6 +2248,248 @@ def _validate_agent_artifacts(project_dir: Path, svg_files: list[Path], total_sl
     _validate_agent_report(project_dir, report_path)
 
 
+def _agent_research_gate_requirements(project_dir: Path) -> list[Path]:
+    task = _read_agent_task(project_dir)
+    policy = task.get("agent_policy") if isinstance(task.get("agent_policy"), dict) else {}
+    gate = policy.get("research_gate") if isinstance(policy.get("research_gate"), dict) else {}
+    if not gate.get("enforced"):
+        return []
+    required: list[str] = []
+    if policy.get("allow_external_research"):
+        required.extend(gate.get("external_required_outputs") or [])
+    if policy.get("allow_deep_research"):
+        required.extend(gate.get("deep_required_outputs") or [])
+    return [project_dir / str(path) for path in required if str(path).strip()]
+
+
+def _agent_research_gate_requirements_by_phase(project_dir: Path) -> dict[str, list[Path]]:
+    task = _read_agent_task(project_dir)
+    policy = task.get("agent_policy") if isinstance(task.get("agent_policy"), dict) else {}
+    gate = policy.get("research_gate") if isinstance(policy.get("research_gate"), dict) else {}
+    if not gate.get("enforced"):
+        return {}
+    phases: dict[str, list[Path]] = {}
+    if policy.get("allow_external_research"):
+        phases["external"] = [
+            project_dir / str(path)
+            for path in gate.get("external_required_outputs") or []
+            if str(path).strip()
+        ]
+    if policy.get("allow_deep_research"):
+        phases["deep"] = [
+            project_dir / str(path)
+            for path in gate.get("deep_required_outputs") or []
+            if str(path).strip()
+        ]
+    return phases
+
+
+def _agent_payload_has_recorded_limitation(payload: dict[str, Any]) -> bool:
+    for key in ("error", "limitations", "errors"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, list) and any(str(item).strip() for item in value):
+            return True
+        if isinstance(value, dict) and value:
+            return True
+    status = str(payload.get("status") or "").strip().lower()
+    return status in {"partial", "limited", "no_results", "no_relevant_results", "unavailable", "timeout"}
+
+
+def _agent_research_gate_missing(project_dir: Path) -> list[Path]:
+    missing: list[Path] = []
+    for path in _agent_research_gate_requirements(project_dir):
+        try:
+            if not path.exists() or path.stat().st_size <= 0:
+                missing.append(path)
+                continue
+            if path.suffix.lower() == ".json":
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    missing.append(path)
+                    continue
+                normalized = path.as_posix().lower()
+                if normalized.endswith("research/raw_external_results.json"):
+                    queries = payload.get("queries")
+                    if not isinstance(queries, list) or not any(str(query).strip() for query in queries):
+                        missing.append(path)
+                elif normalized.endswith("research/sources.json"):
+                    sources = payload.get("sources")
+                    if not isinstance(sources, list) or (
+                        not sources and not _agent_payload_has_recorded_limitation(payload)
+                    ):
+                        missing.append(path)
+                elif normalized.endswith("research/deep/notes_index.json"):
+                    if not isinstance(payload.get("notes"), list):
+                        missing.append(path)
+        except (OSError, json.JSONDecodeError):
+            missing.append(path)
+    return missing
+
+
+def _agent_research_gate_phase_summary(project_dir: Path) -> str:
+    phases = _agent_research_gate_requirements_by_phase(project_dir)
+    missing = set(_agent_research_gate_missing(project_dir))
+    parts: list[str] = []
+    for phase, paths in phases.items():
+        missing_in_phase = [path for path in paths if path in missing]
+        if phase == "external":
+            label = "External research"
+            complete_hint = (
+                "complete; do not repeat searches just to increase result counts. "
+                "Limited or zero relevant results are valid when documented in research/sources.json."
+            )
+            missing_hint = (
+                "missing; choose paper-informed queries, run paper-ppt-research, then write "
+                "research/sources.json and research/brief.md. If sources time out or results are sparse, "
+                "record the limitation and move on."
+            )
+        else:
+            label = "Deep research"
+            complete_hint = "complete; use its synthesis in the deck plan."
+            missing_hint = (
+                "missing; run paper-ppt-deep-research next and produce focused notes/index plus "
+                "research/deep/brief.md before authoring."
+            )
+        if missing_in_phase:
+            rel_missing = ", ".join(_rel(project_dir, path) for path in missing_in_phase)
+            parts.append(f"{label}: {missing_hint} Missing: {rel_missing}.")
+        else:
+            parts.append(f"{label}: {complete_hint}")
+    return " ".join(parts)
+
+
+def _agent_authored_output_paths(project_dir: Path) -> list[Path]:
+    outputs = [
+        project_dir / "manuscript.md",
+        project_dir / "design_spec.md",
+        project_dir / "agent_report.json",
+    ]
+    for directory, pattern in (
+        (project_dir / "svg_output", "*.svg"),
+        (project_dir / "notes", "*.md"),
+    ):
+        if directory.exists():
+            outputs.extend(directory.glob(pattern))
+    return [path for path in outputs if path.exists()]
+
+
+def _validate_agent_research_gate(project_dir: Path) -> None:
+    requirements = _agent_research_gate_requirements(project_dir)
+    if not requirements:
+        return
+    missing = _agent_research_gate_missing(project_dir)
+    if missing:
+        relative = ", ".join(_rel(project_dir, path) for path in missing)
+        raise RuntimeError(
+            "Agent research gate is incomplete. Run the required research skills "
+            f"before authoring slides: {relative}."
+        )
+    gate_time = max(path.stat().st_mtime_ns for path in requirements)
+    early_outputs = [
+        path for path in _agent_authored_output_paths(project_dir)
+        if path.stat().st_mtime_ns < gate_time
+    ]
+    if early_outputs:
+        relative = ", ".join(_rel(project_dir, path) for path in early_outputs)
+        raise RuntimeError(
+            "Agent authored presentation outputs before required research finished. "
+            f"Regenerate these files after research: {relative}."
+        )
+
+
+def _agent_research_gate_block_reason(
+    project_dir: Path,
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> str | None:
+    missing = _agent_research_gate_missing(project_dir)
+    if not missing:
+        return None
+    path_text = ""
+    if tool_name in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
+        path_text = str(
+            tool_input.get("file_path")
+            or tool_input.get("path")
+            or tool_input.get("notebook_path")
+            or ""
+        ).replace("\\", "/").lower()
+    elif tool_name == "Bash":
+        command = str(tool_input.get("command") or "").replace("\\", "/").lower()
+        protected_command = command.replace("research/deep/notes", "")
+        gated_tokens = (
+            "manuscript.md",
+            "design_spec.md",
+            "agent_report.json",
+        )
+        is_gated_command = (
+            any(token in protected_command for token in gated_tokens)
+            or "svg_output" in protected_command
+            or bool(re.search(r"(?:^|[\s\"'/])notes(?:[/\s\"']|$)", protected_command))
+        )
+        if is_gated_command:
+            path_text = "svg_output/"
+    if not path_text:
+        return None
+    is_slide_notes_output = (
+        bool(re.search(r"(?:^|/)notes/", path_text))
+        and "research/deep/notes/" not in path_text
+    )
+    is_authoring_output = (
+        path_text == "manuscript.md"
+        or path_text.endswith("/manuscript.md")
+        or path_text == "design_spec.md"
+        or path_text.endswith("/design_spec.md")
+        or path_text == "agent_report.json"
+        or path_text.endswith("/agent_report.json")
+        or "svg_output" in path_text
+        or is_slide_notes_output
+    )
+    if not is_authoring_output:
+        return None
+    required = ", ".join(_rel(project_dir, path) for path in missing)
+    phase_summary = _agent_research_gate_phase_summary(project_dir)
+    return (
+        "Research gate is active: do not write manuscript, design, notes, report, "
+        "or slide SVG files yet. Complete the remaining research phase(s) first. "
+        f"{phase_summary} Required missing files: {required}."
+    )
+
+
+def _agent_research_gate_hooks(project_dir: Path) -> dict[str, list[Any]]:
+    from claude_agent_sdk import HookMatcher
+
+    async def _deny_early_authoring(
+        input_data: dict[str, Any],
+        _tool_use_id: str | None,
+        _context: Any,
+    ) -> dict[str, Any]:
+        reason = _agent_research_gate_block_reason(
+            project_dir,
+            str(input_data.get("tool_name") or ""),
+            input_data.get("tool_input") if isinstance(input_data.get("tool_input"), dict) else {},
+        )
+        if not reason:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+
+    return {
+        "PreToolUse": [
+            HookMatcher(
+                matcher="Write|Edit|MultiEdit|NotebookEdit|Bash",
+                hooks=[_deny_early_authoring],
+            )
+        ]
+    }
+
+
 def _validate_agent_report(project_dir: Path, report_path: Path) -> None:
     task = _read_agent_task(project_dir)
     policy = task.get("agent_policy") if isinstance(task.get("agent_policy"), dict) else {}
@@ -2356,16 +2511,16 @@ def _validate_agent_report(project_dir: Path, report_path: Path) -> None:
                 sources_payload = json.loads(sources_path.read_text(encoding="utf-8"))
                 sources = sources_payload.get("sources")
                 has_sources = isinstance(sources, list) and bool(sources)
-                has_recorded_limitation = bool(sources_payload.get("error"))
+                has_recorded_limitation = _agent_payload_has_recorded_limitation(sources_payload)
             except json.JSONDecodeError:
                 has_recorded_limitation = True
         if has_sources and not external_used:
             raise RuntimeError(
-                "External research sources were prefetched, but agent_report.json does not mark external_research_used=true."
+                "External research sources exist, but agent_report.json does not mark external_research_used=true."
             )
         if not external_used and not has_sources and not has_recorded_limitation:
             raise RuntimeError(
-                "External research was enabled, but agent_report.json/research sources do not show used sources or a concrete limitation."
+                "External research was enabled, but paper-ppt-research did not produce research/sources.json with sources or a concrete limitation."
             )
 
     if policy.get("allow_deep_research"):
@@ -2599,16 +2754,21 @@ def _embed_svg_preview(svg_content: str, project_dir: Path) -> str:
 
 
 def _copy_agent_skill(project_dir: Path) -> None:
-    source = PROJECT_ROOT / "assets" / "agent_skills" / _AGENT_SKILL_NAME
-    if not source.exists():
-        raise FileNotFoundError(f"Agent skill not found: {source}")
-    for target in (
-        project_dir / "skills" / _AGENT_SKILL_NAME,
-        project_dir / ".claude" / "skills" / _AGENT_SKILL_NAME,
-    ):
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(source, target)
+    copied_sources: list[Path] = []
+    for skill_name in (_AGENT_SKILL_NAME, _RESEARCH_SKILL_NAME, "paper-ppt-deep-research"):
+        source = PROJECT_ROOT / "assets" / "agent_skills" / skill_name
+        if not source.exists():
+            raise FileNotFoundError(f"Agent skill not found: {source}")
+        copied_sources.append(source)
+        for target in (
+            project_dir / "skills" / skill_name,
+            project_dir / ".claude" / "skills" / skill_name,
+        ):
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(source, target)
+
+    source = copied_sources[0]
     references = source / "references"
     if references.exists():
         root_references = project_dir / "references"
@@ -2634,12 +2794,12 @@ Workspace contract:
 - Use subagents/parallel work when the runtime supports it. When deep research is enabled, SubAgents are required unless the Task/SubAgent tool is unavailable or fails.
 - External research: {external}. Deep research: {deep}. Agent post-generation review: {review}.
 - Detail contract: {detail_profile["label"]}; {detail_profile["slide_count_guidance"]} Content slides should carry {detail_profile["evidence_points_per_content_slide"]} concrete evidence point(s), {detail_profile["bullets_per_content_slide"]} bullets/claims, and {detail_profile["visuals_per_content_slide"]} visual argument(s) each when the paper supports it.
-- Icon contract: before using an icon, search the local icon path from `agent_task.json.paths.icons` and use an existing file. Never use letters, initials, ASCII/Unicode symbols, emoji, dingbats, or decorative characters as icon substitutes; omit the icon or use a non-icon shape if no matching asset exists.
+- Icon contract: icons are optional visual aids, not decoration. Use them only when they clarify repeated semantic labels, process steps, comparison dimensions, legends, or diagram nodes. Before using icons, define a small vocabulary in `design_spec.md` (concept -> existing local file -> size/style/color), search `agent_task.json.paths.icons`, reuse the same icon for the same concept, keep to one icon family/style, and color icons with the template/deck palette. Avoid scattering one-off icons or multi-color icon accents across unrelated slides. Never use letters, initials, ASCII/Unicode symbols, emoji, dingbats, or decorative characters as icon substitutes; omit the icon or use a non-icon shape if no matching asset exists.
 - SubAgent contract: do not split work just to satisfy ordinary slide count or detail level. When deep research is enabled, launch focused research SubAgents if the Task tool is available; use separate readers for background/related work, method, experiments, and critique when the paper is complex. When Agent review is enabled, run one focused review SubAgent after the first full deck is drafted; it should review the whole deck for layout overflow, missing assets, icon-policy violations, and narrative gaps instead of checking pages one by one. If you skip a required deep-research or review SubAgent, write a concrete reason in `agent_report.json.subagents`; the main Agent must merge results and keep final narrative/design consistency.
-- External research contract: if external research is enabled, use `agent_task.json.research_config` plus any environment credentials named in `agent_task.json.agent_policy.research_policy.credential_env`. You may use other accessible search methods too. For web results, open/read relevant pages deeply enough to understand the source; do not cite titles/snippets alone.
+- External research contract: if external research is enabled, use the `{_RESEARCH_SKILL_NAME}` skill after reading the paper. You, not the backend, must choose search queries from paper understanding before calling its script/API helpers. It is mandatory to produce `research/raw_external_results.json`, `research/sources.json`, and `research/brief.md` before writing any manuscript, design specification, notes, report, or slide SVG. Read `research/external_search_summary.json` before sampling raw results. Sparse or zero directly relevant external results are acceptable when `research/sources.json` records a concrete limitation; do not repeat searches merely to satisfy the gate or increase counts. For web results, open/read relevant pages deeply enough to understand the source; do not cite titles/snippets alone.
+- Deep research contract: if deep research is enabled, use the `{_DEEP_RESEARCH_SKILL_NAME}` skill for focused paper-reading passes, SubAgent/task decomposition, and slide-ready synthesis. It is mandatory to produce `research/deep/notes_index.json` and `research/deep/brief.md` before writing any manuscript, design specification, notes, report, or slide SVG.
 - Source asset contract: before writing `manuscript.md`, read `source_assets/paper.md` and `source_assets/figures.md`/`figures.json` if they exist. If they are missing or stale, run `{extractor_path}` with `agent_task.json.paths.python`. Pick paper figures by caption/page/context/dimensions and put them into SVG using the exact `href` values from the manifest, usually `../source_assets/images/<file>`.
-- If `research/brief.md` or `research/sources.json` exists, read them before drafting the manuscript. Treat `opened_url=true` or "Read depth: opened" as evidence that the backend fetched page body text; if a web item was not opened, do not use it as evidence unless you open and read it yourself.
-- When external research is enabled, your first user-visible progress reply after reading the paper seed and prefetched research must summarize what you actually learned: identify usable sources, give 2-4 slide-relevant findings when available, state failed/limited sources, and say how this changes the planned deck. Do not merely echo source counts or API status. Send this reply before writing `manuscript.md` or slide SVGs.
+- When external or deep research is enabled, a backend research gate rejects authoring writes until all required research artifacts above exist. Write those research artifacts first, then send a user-visible progress reply summarizing what you learned, source limitations, and how this changes the planned deck. Do not merely echo query/API counts.
 - Reply language for status/reporting: {language}.
 - During generation, periodically check `agent_feedback/` for user guidance files. Treat newer guidance as higher priority unless it conflicts with the output contract.
 - Work in stages. After completing each major milestone (e.g. finishing a slide, completing the manuscript, or finishing a batch of slides), briefly note what you accomplished. The system will automatically pause and resume your work, allowing the user to provide guidance between stages. When you resume, do NOT repeat completed work — pick up exactly where you left off.
@@ -2672,8 +2832,9 @@ Workspace contract:
 - When a slide SVG is revised, write it immediately to `svg_output/` so the app can preview it live.
 - Keep following `agent_task.json.presentation.detail_profile`, `agent_task.json.agent_policy.icon_policy`, and `agent_task.json.agent_policy.subagent_policy`.
 - Keep following `agent_task.json.agent_policy.source_asset_policy`: when adding/replacing paper figures, use the exact `href` from `source_assets/figures.json` and preserve the figure's aspect ratio.
-- Continue to search local icons before icon use. Never use letters, symbols, emoji, or decorative glyphs as icon substitutes.
+- Continue to follow the icon vocabulary in `design_spec.md`: use icons only where they clarify structure or repeated concepts, reuse the same local icon/style/color for the same concept, and omit icons that would be one-off decoration. Never use letters, symbols, emoji, or decorative glyphs as icon substitutes.
 - Use `agent_task.json.paths.python` or `PAPER_PPT_PYTHON` for Python/PyMuPDF commands instead of system Python.
+- If feedback requires new external research, use the `paper-ppt-research` skill and choose queries after reading the affected slide/paper context. If feedback requires renewed deep paper analysis, use the `paper-ppt-deep-research` skill.
 - Use SubAgents/Task for deep research or final whole-deck review when those modes are enabled and supported; otherwise use them only when genuinely useful.
 - Update `manuscript.md`, `design_spec.md`, notes, and `agent_report.json` to reflect the revision.
 
@@ -2786,28 +2947,49 @@ def _agent_detail_profile(detail_level: str | None, num_pages: int | None) -> di
 def _agent_icon_policy() -> dict[str, Any]:
     return {
         "must_search_local_icons_before_use": True,
+        "use_icons_only_when_they_clarify": True,
         "icon_search_paths": ["agent_task.json.paths.icons", "assets/icons if exposed by add_dirs"],
         "recommended_search_commands": [
             "rg --files <icons_path>",
             "rg -i \"semantic-keyword|tag|concept\" <icons_path>",
             "Get-ChildItem -Recurse <icons_path> -Filter *.svg",
         ],
+        "when_to_use": [
+            "Use icons for repeated semantic labels, process steps, comparison dimensions, legend keys, and compact section markers.",
+            "Do not add icons as filler decoration to ordinary bullet lists, paragraph cards, dense evidence slides, or places where a label alone is clearer.",
+            "Prefer one consistent icon system for a repeated pattern; if only one slide would use an icon, consider omitting it.",
+        ],
+        "density_limits": {
+            "default_icons_per_content_slide": "0-3",
+            "maximum_icons_per_slide_unless_diagram": 4,
+            "diagram_exception": "More icons are acceptable only when every icon is a node in a structured flow, taxonomy, or legend.",
+        },
+        "consistency_rules": [
+            "Build a small icon vocabulary in design_spec.md before drafting slides: semantic role, icon file, size, stroke/fill style, and color.",
+            "Reuse the same icon for the same concept across slides; do not mix filled and outline libraries in one visual system unless the template already does so.",
+            "Use a consistent size scale and alignment grid. Icons should support hierarchy, not create new focal points on every slide.",
+        ],
+        "color_rules": [
+            "Use template or deck palette tokens from design_spec.md; icons should usually use primary, muted foreground, or one accent color.",
+            "Avoid per-icon rainbow colors. Use different colors only when they encode a real category or status and the legend/pattern is repeated.",
+            "Keep icon contrast accessible against its background and avoid saturated accents on low-importance icons.",
+        ],
         "allowed": [
             "existing SVG/icon files found in the configured local icon path",
             "template-provided icons or vector assets that actually exist",
             "simple geometric shapes only when they are decorative shapes, not fake icons",
         ],
-            "forbidden_substitutes": [
-                "single letters or initials such as P, F, A, Q",
-                "ASCII punctuation or symbols such as !, ?, +, *, #, >, <, /",
-                "Unicode symbols, dingbats, stars, checkmarks, arrows, warning marks, and pictographs used as icons",
-                "emoji or colored emoji glyphs",
-                "text glyph arrows such as →, ←, ↑, ↓; use SVG line/path geometry instead",
-                "any single-character text used as a visual badge, status mark, icon, or connector",
-                "made-up icon filenames or remote icon URLs",
-            ],
-        "fallback_when_missing": "Omit the icon or use a neutral non-icon shape/card accent; do not replace it with letters, punctuation, symbols, arrows, dingbats, or emoji.",
-        "reporting": "agent_report.json must mention whether local icons were searched and list any icon assets used.",
+        "forbidden_substitutes": [
+            "single letters or initials such as P, F, A, Q",
+            "ASCII punctuation or symbols such as !, ?, +, *, #, >, <, /",
+            "Unicode symbols, dingbats, stars, checkmarks, arrows, warning marks, and pictographs used as icons",
+            "emoji or colored emoji glyphs",
+            "text glyph arrows such as ->, <-, up/down arrow glyphs; use SVG line/path geometry instead",
+            "any single-character text used as a visual badge, status mark, icon, or connector",
+            "made-up icon filenames or remote icon URLs",
+        ],
+        "fallback_when_missing": "Omit the icon or use a neutral non-icon shape/card accent; do not add an unrelated icon just to fill space.",
+        "reporting": "agent_report.json must mention whether local icons were searched, list any icon assets used, and explain the icon vocabulary or why icons were mostly omitted.",
     }
 
 
@@ -2923,6 +3105,8 @@ def _agent_research_policy(research_payload: dict[str, Any] | None) -> dict[str,
         "web_search_provider": web_provider,
         "max_results_per_source": int(payload.get("max_results_per_source") or 20),
         "relevance_filter": bool(payload.get("relevance_filter", True)),
+        "query_owner": "agent",
+        "query_rule": "Read the paper first, then choose search queries from paper-specific understanding; backend does not preselect Agent-mode keywords.",
         "credential_env": {
             "semantic_scholar": "SEMANTIC_SCHOLAR_API_KEY" if payload.get("semantic_scholar_api_key") else None,
             "tavily": "TAVILY_API_KEY" if payload.get("tavily_api_key") else None,

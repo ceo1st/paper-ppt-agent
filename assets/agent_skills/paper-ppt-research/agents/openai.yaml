@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paper PPT Research"
+  short_description: "Research papers from Agent mode"
+  default_prompt: "Use paper-ppt-research to choose queries from the paper and gather slide-relevant external sources."

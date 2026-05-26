@@ -10,8 +10,13 @@ Required files:
 Optional files:
 
 - `notes/slide_001.md`, ...: speaker notes matched by SVG stem.
-- `research/brief.md` and `research/sources.json`: research summary and sources.
 - `qa/*.md` or `qa/*.json`: review results.
+
+Conditionally required before authoring any deck output:
+
+- When external research is enabled: `research/raw_external_results.json`, `research/sources.json`, and `research/brief.md`. The search helper also writes `research/external_search_summary.json`; read that before sampling raw results.
+- When deep research is enabled: `research/deep/notes_index.json` and `research/deep/brief.md`.
+- The backend research gate rejects manuscript, design, notes, report, and slide SVG writes until the enabled research requirements are complete.
 
 `agent_report.json` should be valid JSON:
 
@@ -26,9 +31,11 @@ Optional files:
   "detail_profile_followed": true,
   "icon_policy": {
     "local_icons_searched": true,
+    "purposeful_usage": true,
+    "consistent_vocabulary": true,
     "assets_used": ["relative/path/icon.svg"],
     "substitutes_used": false,
-    "notes": "No letters/symbols/emoji were used as icon substitutes."
+    "notes": "Icons clarify repeated concepts and follow the deck palette."
   },
   "subagents": [
     {

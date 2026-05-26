@@ -120,6 +120,7 @@ class Settings(BaseSettings):
     cairosvg_timeout: int = 30
     # Number of parallel equation renders allowed in flight.
     equation_render_concurrency: int = 4
+    agent_runtime_ready_timeout: int = 30
 
     # ── WebSocket ────────────────────────────────────────────────────────
     ws_subscriber_queue_size: int = 1024
