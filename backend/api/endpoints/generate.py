@@ -407,7 +407,11 @@ async def send_agent_generation_feedback(
                 message="Agent is applying guidance...",
                 error=None,
             )
-        await live_session.send_message(text)
+        runtime = _agent_runtime_from_job(job)
+        await live_session.send_message(
+            text,
+            interrupt_current=job.status != "paused" and runtime == "claude_code",
+        )
         return AgentFeedbackResponse(job_id=job_id, status="injected", path=str(target))
 
     if job.status == "complete":

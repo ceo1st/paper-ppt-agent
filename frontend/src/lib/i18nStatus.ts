@@ -99,6 +99,7 @@ export function translateJobMessage(message: string | undefined, locale: Locale)
     "Agent paused. Send guidance to continue from the current workspace.": "Agent 已暂停。发送指导后将从当前工作区继续。",
     "Agent is applying guidance...": "Agent 正在根据指导继续...",
     "Interrupt requested. Waiting for the Agent to pause...": "已请求中断，正在等待 Agent 暂停...",
+    "Agent has not produced new activity for a while. You can pause it or send guidance to continue.": "Agent 暂时没有新活动。你可以暂停它，或发送指导让它继续。",
     "Parsing paper...": "正在解析论文...",
     "Analyzing paper content...": "正在分析论文内容...",
     "Deep reading: analyzing paper content...": "深度研读：分析论文内容...",

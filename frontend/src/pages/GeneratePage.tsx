@@ -1092,6 +1092,7 @@ export function GenerationAgentConsole({
     job.status !== "cancelling" &&
     !hasActiveToolGroup,
   );
+  const showSlowResponse = job?.message?.startsWith("Agent has not produced new activity for a while.") ?? false;
 
   useEffect(() => {
     const node = scrollerRef.current;
@@ -1152,7 +1153,7 @@ export function GenerationAgentConsole({
       ) : null}
       <div ref={scrollerRef} className="generation-agent-chat">
         {activityItems.map((item) => <GenerationAgentActivityItem key={item.id} item={item} />)}
-        {showThinking ? <GenerationAgentThinking /> : null}
+        {showThinking ? <GenerationAgentThinking slowResponse={showSlowResponse} /> : null}
       </div>
       <div className="generation-agent-composer">
         <textarea
@@ -1218,7 +1219,7 @@ export function GenerationAgentConsole({
   );
 }
 
-function GenerationAgentThinking() {
+function GenerationAgentThinking({ slowResponse = false }: { slowResponse?: boolean }) {
   const { t } = useLocale();
   return (
     <div className="generation-agent-bubble-row" data-role="assistant" data-kind="thinking">
@@ -1228,7 +1229,7 @@ function GenerationAgentThinking() {
           <strong>Agent</strong>
         </div>
         <p>
-          <span>{t("template.collab.thinking")}</span>
+          <span>{t(slowResponse ? "generation.agent.slowResponse" : "template.collab.thinking")}</span>
           <span className="generation-agent-thinking-dots" aria-hidden="true">
             <i />
             <i />
