@@ -75,6 +75,12 @@ class _ClaudeResponseOutcome:
 _RUNTIME_DEFAULT = "claude_code"
 _AGENT_SKILL_NAME = "paper-ppt-generate"
 _SVG_SCAN_SECONDS = 1.0
+_AGENT_IDLE_NOTICE_SECONDS = 60.0
+_AGENT_INTERRUPT_POLL_SECONDS = 0.1
+_AGENT_IDLE_MESSAGE = (
+    "Agent has not produced new activity for a while. "
+    "You can pause it or send guidance to continue."
+)
 
 # Sentinel marking end of the persistent session message stream.
 _SESSION_DONE = object()
@@ -229,10 +235,11 @@ class PersistentAgentSession:
             self._emit(_agent_usage_progress_event(self._usage_totals))
         await self.send_message(initial_prompt)
 
-    async def send_message(self, prompt: str) -> None:
-        """Inject a new prompt.  Safe to call from any async context."""
-        self._interrupt_event.clear()
+    async def send_message(self, prompt: str, *, interrupt_current: bool = False) -> None:
+        """Inject a prompt and optionally interrupt an in-flight response."""
         self._prompt_queue.put(prompt)
+        if interrupt_current:
+            self._interrupt_event.set()
 
     async def interrupt(self) -> None:
         """Request a soft interruption of the current agent turn.
@@ -500,49 +507,77 @@ class PersistentAgentSession:
         interrupt_sent = False
         hit_turn_limit = False
         soft_interrupted = False
-        async for message in client.receive_response():
-            if self._cancel_event.is_set():
-                return _ClaudeResponseOutcome(feedback=pending_feedback)
-
-            if self._interrupt_event.is_set() and not interrupt_sent:
+        async def _interrupt_when_requested() -> None:
+            nonlocal interrupt_sent, pending_feedback, soft_interrupted
+            while self._active or self._cancel_event.is_set():
+                if self._cancel_event.is_set():
+                    try:
+                        await client.interrupt()
+                    except Exception:
+                        logger.exception("Failed to cancel Claude session")
+                    return
+                if not self._interrupt_event.is_set():
+                    await asyncio.sleep(_AGENT_INTERRUPT_POLL_SECONDS)
+                    continue
+                self._interrupt_event.clear()
                 pending_feedback = self._drain_user_message() or pending_feedback
+                if interrupt_sent:
+                    return
+                interrupt_sent = True
                 try:
                     await client.interrupt()
-                    interrupt_sent = True
                     soft_interrupted = True
-                    self._interrupt_event.clear()
                 except Exception:
+                    interrupt_sent = False
                     logger.exception("Failed to interrupt Claude session")
+                return
 
-            self._capture_session_id(message)
+        interrupt_watcher = asyncio.create_task(_interrupt_when_requested())
+        try:
+            async for message in client.receive_response():
+                if self._cancel_event.is_set():
+                    return _ClaudeResponseOutcome(feedback=pending_feedback)
 
-            if pending_feedback is not None and _is_feedback_interrupt_result(message):
-                continue
+                self._capture_session_id(message)
 
-            self._emit(message)
-            if _is_claude_turn_limit_result(message):
-                hit_turn_limit = True
+                if (
+                    (soft_interrupted or self._cancel_event.is_set())
+                    and _is_feedback_interrupt_result(message)
+                ):
+                    continue
 
-            if not interrupt_on_feedback or pending_feedback is not None:
-                continue
+                self._emit(message)
+                if _is_claude_turn_limit_result(message):
+                    hit_turn_limit = True
 
-            if not _claude_message_allows_live_feedback_interrupt(message):
-                continue
+                if not interrupt_on_feedback or pending_feedback is not None:
+                    continue
 
-            queued_feedback = self._drain_user_message()
-            if queued_feedback is None:
-                continue
+                if not _claude_message_allows_live_feedback_interrupt(message):
+                    continue
 
-            pending_feedback = queued_feedback
-            if message.__class__.__name__ == "ResultMessage":
-                continue
-            if not interrupt_sent:
-                try:
-                    await client.interrupt()
+                queued_feedback = self._drain_user_message()
+                if queued_feedback is None:
+                    continue
+
+                pending_feedback = queued_feedback
+                if message.__class__.__name__ == "ResultMessage":
+                    continue
+                if not interrupt_sent:
                     interrupt_sent = True
-                    soft_interrupted = True
-                except Exception:
-                    logger.exception("Failed to interrupt Claude session for live feedback")
+                    try:
+                        await client.interrupt()
+                        soft_interrupted = True
+                    except Exception:
+                        interrupt_sent = False
+                        logger.exception("Failed to interrupt Claude session for live feedback")
+        finally:
+            if not interrupt_watcher.done():
+                interrupt_watcher.cancel()
+            await asyncio.gather(interrupt_watcher, return_exceptions=True)
+
+        if soft_interrupted and pending_feedback is None:
+            pending_feedback = self._drain_user_message()
 
         return _ClaudeResponseOutcome(
             feedback=pending_feedback,
@@ -648,7 +683,6 @@ class PersistentAgentSession:
                 else:
                     thread = await codex.thread_start(**thread_kwargs)
                 self._session_id = thread.id
-                turn_active = False
                 while self._active:
                     try:
                         prompt = self._prompt_queue.get(timeout=1.0)
@@ -658,10 +692,6 @@ class PersistentAgentSession:
                         break
                     if self._cancel_event.is_set():
                         break
-                    if turn_active:
-                        # Inject into running turn.
-                        await turn.steer(TextInput(prompt))
-                        continue
                     # Start a new turn.
                     turn = await thread.turn(
                         [SkillInput(name=_AGENT_SKILL_NAME, path=skill_path), TextInput(prompt)],
@@ -671,21 +701,42 @@ class PersistentAgentSession:
                         model=model,
                         sandbox_policy=sandbox_policy,
                     )
-                    turn_active = True
-                    async for event in turn.stream():
-                        if self._cancel_event.is_set():
-                            await turn.interrupt()
-                            break
-                        if self._interrupt_event.is_set():
+                    turn_interrupted = False
+                    async def _interrupt_codex_when_requested() -> None:
+                        nonlocal turn_interrupted
+                        while self._active or self._cancel_event.is_set():
+                            if self._cancel_event.is_set():
+                                await turn.interrupt()
+                                return
+                            if not self._interrupt_event.is_set():
+                                await asyncio.sleep(_AGENT_INTERRUPT_POLL_SECONDS)
+                                continue
                             self._interrupt_event.clear()
                             await turn.interrupt()
+                            turn_interrupted = True
                             self._emit(_agent_paused_event())
-                            continue
-                        self._emit(event)
-                        queued_feedback = self._drain_user_message()
-                        if queued_feedback is not None:
-                            await turn.steer(TextInput(queued_feedback))
-                    turn_active = False
+                            return
+
+                    interrupt_watcher = asyncio.create_task(_interrupt_codex_when_requested())
+                    try:
+                        async for event in turn.stream():
+                            if self._cancel_event.is_set():
+                                await turn.interrupt()
+                                break
+                            self._emit(event)
+                            queued_feedback = self._drain_user_message()
+                            if queued_feedback is not None:
+                                await turn.steer(TextInput(queued_feedback))
+                    finally:
+                        if not interrupt_watcher.done():
+                            interrupt_watcher.cancel()
+                        await asyncio.gather(interrupt_watcher, return_exceptions=True)
+                    if turn_interrupted:
+                        continue
+                    # A finished Codex turn completes generation. Feedback sent
+                    # after export resumes this saved thread in a new run.
+                    self._active = False
+                    break
         except BaseException as exc:
             self._emit(exc)
         finally:
@@ -1010,6 +1061,8 @@ async def run_agent_pipeline(request: Any):
     drainer_task = asyncio.create_task(_session_drainer(), name=f"agent-session-{runtime}")
 
     # Yield events from the drainer until it finishes the first response.
+    last_activity = asyncio.get_running_loop().time()
+    waiting_notified = False
     try:
         while True:
             if drainer_task.done() and queue.empty():
@@ -1017,7 +1070,15 @@ async def run_agent_pipeline(request: Any):
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
+                if (
+                    not waiting_notified
+                    and asyncio.get_running_loop().time() - last_activity >= _AGENT_IDLE_NOTICE_SECONDS
+                ):
+                    waiting_notified = True
+                    yield _agent_waiting_event()
                 continue
+            last_activity = asyncio.get_running_loop().time()
+            waiting_notified = False
             yield event
     except asyncio.CancelledError:
         await _cleanup_live_session()
@@ -1191,6 +1252,8 @@ async def run_agent_feedback_pipeline(
     scanner_task = asyncio.create_task(_scanner(), name="agent-feedback-svg-scanner")
     drainer_task = asyncio.create_task(_session_drainer(), name=f"agent-feedback-{runtime}")
 
+    last_activity = asyncio.get_running_loop().time()
+    waiting_notified = False
     try:
         while True:
             if drainer_task.done() and queue.empty():
@@ -1198,7 +1261,15 @@ async def run_agent_feedback_pipeline(
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=0.5)
             except asyncio.TimeoutError:
+                if (
+                    not waiting_notified
+                    and asyncio.get_running_loop().time() - last_activity >= _AGENT_IDLE_NOTICE_SECONDS
+                ):
+                    waiting_notified = True
+                    yield _agent_waiting_event()
                 continue
+            last_activity = asyncio.get_running_loop().time()
+            waiting_notified = False
             yield event
         await drainer_task
     except asyncio.CancelledError:
@@ -1915,6 +1986,23 @@ def _agent_paused_event() -> AgentProgressEvent:
                 "type": "status",
                 "status": "paused",
                 "data": {"agent_paused": True},
+            },
+        },
+    )
+
+
+def _agent_waiting_event() -> AgentProgressEvent:
+    return AgentProgressEvent(
+        "agent",
+        "progress",
+        _AGENT_IDLE_MESSAGE,
+        0.12,
+        data={
+            "agent_waiting": True,
+            "agent_event": {
+                "type": "status",
+                "status": "waiting",
+                "data": {"agent_waiting": True},
             },
         },
     )
