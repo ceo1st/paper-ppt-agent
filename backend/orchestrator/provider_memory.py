@@ -54,9 +54,13 @@ class FigureMemory:
     path: str
     caption: str
     page_number: int | None
+    bbox: tuple[float, float, float, float] | None
+    extraction_method: str
     natural_width: int
     natural_height: int
+    aspect_ratio: float
     quality_score: float
+    review_flags: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -310,9 +314,13 @@ def _figure_memory(fig: PaperFigure) -> FigureMemory:
         path=str(fig.path),
         caption=_trim(caption, 360),
         page_number=fig.page_number,
+        bbox=fig.bbox,
+        extraction_method=fig.extraction_method,
         natural_width=fig.natural_width,
         natural_height=fig.natural_height,
+        aspect_ratio=fig.aspect_ratio,
         quality_score=float(fig.quality_score or 0.0),
+        review_flags=tuple(fig.review_flags or []),
     )
 
 
@@ -340,7 +348,9 @@ def _build_compact_markdown(
         for fig in figures[:60]:
             size = f"{fig.natural_width}x{fig.natural_height}" if fig.natural_width and fig.natural_height else "unknown-size"
             page = f"p{fig.page_number}" if fig.page_number is not None else "page?"
-            parts.append(f"- `{fig.id}` ({page}, {size}, q={fig.quality_score:.2f}) {fig.caption}")
+            method = f", {fig.extraction_method}" if fig.extraction_method else ""
+            flags = f", flags={','.join(fig.review_flags)}" if fig.review_flags else ""
+            parts.append(f"- `{fig.id}` ({page}, {size}, q={fig.quality_score:.2f}{method}{flags}) {fig.caption}")
     compact = "\n".join(parts).strip()
     if len(compact) > MAX_COMPACT_PAPER_CHARS:
         compact = compact[:MAX_COMPACT_PAPER_CHARS].rstrip() + "\n\n[Compact paper memory truncated here.]"
@@ -365,7 +375,10 @@ def _slide_figure_hints(page_content: str, memory: ProviderMemory) -> list[str]:
     for fig_id in re.findall(r"\[\[FIG:([A-Za-z0-9_\-]+)\]\]", page_content):
         fig = figure_by_id.get(fig_id)
         if fig:
-            hints.append(f"- `{fig.id}` href={fig.path} caption={fig.caption}")
+            hints.append(
+                f"- `{fig.id}` href={fig.path} caption={fig.caption} "
+                f"source={fig.extraction_method or 'unknown'} quality={fig.quality_score:.2f}"
+            )
     return hints[:5]
 
 

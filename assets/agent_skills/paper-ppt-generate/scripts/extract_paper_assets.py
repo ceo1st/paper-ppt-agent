@@ -27,6 +27,7 @@ UNSUPPORTED_EXTENSIONS = {".eps", ".ps"}
 MIN_IMAGE_SIDE = 80
 PDF_REGION_DPI = 200
 PDF_IMAGE_DPI = 160
+PDF_CAPTION_MAX_GAP = 360
 
 CAPTION_RE = re.compile(
     r"^\s*((?:fig(?:ure)?|table)\s*\.?\s*\d+[a-z]?|[图表]\s*\d+[a-z]?)\b"
@@ -117,6 +118,10 @@ def extract_pdf(source_path: Path, out_dir: Path, images_dir: Path) -> dict[str,
         import fitz  # type: ignore[import-not-found]
     except Exception as exc:  # pragma: no cover - environment issue
         raise RuntimeError("PyMuPDF is required for PDF asset extraction") from exc
+    try:
+        import pymupdf.layout  # noqa: F401 - enables structured table detection when installed
+    except Exception:
+        pass
 
     doc = fitz.open(str(source_path))
     if doc.needs_pass:
@@ -180,12 +185,51 @@ def extract_pdf(source_path: Path, out_dir: Path, images_dir: Path) -> dict[str,
                 )
             )
 
+        for table_rect, table_caption in _pdf_table_regions(page, captions):
+            if _caption_key(table_caption) in {
+                _caption_key(fig.caption) for fig in figures if fig.page_number == page_no
+            }:
+                continue
+            try:
+                mat = fitz.Matrix(PDF_REGION_DPI / 72, PDF_REGION_DPI / 72)
+                pix = page.get_pixmap(matrix=mat, clip=table_rect, alpha=False)
+                if pix.width < MIN_IMAGE_SIDE or pix.height < MIN_IMAGE_SIDE:
+                    continue
+                img_bytes = pix.tobytes("png")
+            except Exception:
+                continue
+            digest = hashlib.md5(img_bytes).hexdigest()[:12]
+            if digest in seen_hashes:
+                continue
+            seen_hashes.add(digest)
+            name = f"pdf_fig_{len(figures) + 1:03d}_p{page_no}_{digest}.png"
+            target = images_dir / name
+            target.write_bytes(img_bytes)
+            figures.append(
+                FigureRecord(
+                    id=target.stem,
+                    href=f"../source_assets/images/{target.name}",
+                    path=_posix(target),
+                    caption=table_caption,
+                    source="pdf",
+                    page_number=page_no,
+                    bbox=_rect_list(table_rect),
+                    extraction_method="table_region",
+                    natural_width=int(pix.width),
+                    natural_height=int(pix.height),
+                    aspect_ratio=_ratio(int(pix.width), int(pix.height)),
+                    context_before=page_context[0],
+                    context_after=page_context[1],
+                    section_hint=section_hint,
+                )
+            )
+
         used_caption_keys = {_caption_key(fig.caption) for fig in figures if fig.page_number == page_no}
         for cap in captions:
             caption = cap["text"]
             if _caption_key(caption) in used_caption_keys:
                 continue
-            clip = _caption_region_clip(page_rect, cap["rect"], text_blocks)
+            clip = _caption_region_clip(page_rect, cap["rect"], text_blocks, captions)
             if clip is None:
                 continue
             try:
@@ -584,8 +628,18 @@ def _pdf_caption_blocks(text_blocks: list[dict[str, Any]]) -> list[dict[str, Any
     for block in text_blocks:
         text = block["text"].strip()
         if CAPTION_RE.search(text):
-            captions.append({"text": text, "rect": fitz.Rect(block["rect"])})
+            captions.append({"text": _normalize_pdf_caption(text), "rect": fitz.Rect(block["rect"])})
     return captions
+
+
+def _normalize_pdf_caption(text: str) -> str:
+    value = re.sub(r"\s+", " ", (text or "").strip())
+
+    def split_index_year(match: re.Match[str]) -> str:
+        digits = match.group(2)
+        return f"{match.group(1)}{digits[:-4]} {digits[-4:]}"
+
+    return re.sub(r"^([图表]\s*)([0-9０-９]{5,})(?=\s)", split_index_year, value)
 
 
 def _pdf_meaningful_bbox(page_rect: Any, bbox: Any, image_info: dict[str, Any]) -> bool:
@@ -610,12 +664,86 @@ def _nearest_caption_text(bbox: Any, captions: list[dict[str, Any]]) -> str:
     return best
 
 
-def _caption_region_clip(page_rect: Any, caption_rect: Any, text_blocks: list[dict[str, Any]]) -> Any | None:
+def _pdf_table_regions(page: Any, captions: list[dict[str, Any]]) -> list[tuple[Any, str]]:
+    try:
+        import fitz  # type: ignore[import-not-found]
+    except Exception:
+        return []
+    if not hasattr(page, "find_tables"):
+        return []
+    try:
+        tables = page.find_tables().tables
+    except Exception:
+        return []
+    results: list[tuple[Any, str]] = []
+    for table in tables:
+        try:
+            raw_rect = fitz.Rect(table.bbox)
+        except Exception:
+            continue
+        if raw_rect.width < MIN_IMAGE_SIDE or raw_rect.height < MIN_IMAGE_SIDE:
+            continue
+        clip = fitz.Rect(
+            max(page.rect.x0, raw_rect.x0 - 6),
+            max(page.rect.y0, raw_rect.y0 - 6),
+            min(page.rect.x1, raw_rect.x1 + 6),
+            min(page.rect.y1, raw_rect.y1 + 6),
+        )
+        caption = _nearest_caption_text(clip, captions)
+        for cap in captions:
+            cap_rect = fitz.Rect(cap["rect"])
+            if cap["text"] == caption and clip.y0 < cap_rect.y1 < clip.y1:
+                # Some layout backends absorb an above-table caption and
+                # preceding formula into the detected table box. The caption
+                # remains in metadata; keep the rendered asset data-only.
+                clip.y0 = max(clip.y0, cap_rect.y1 + 12)
+                break
+        results.append((clip, caption))
+    return results
+
+
+def _caption_region_clip(
+    page_rect: Any,
+    caption_rect: Any,
+    text_blocks: list[dict[str, Any]],
+    captions: list[dict[str, Any]] | None = None,
+) -> Any | None:
     try:
         import fitz  # type: ignore[import-not-found]
     except Exception:
         return None
-    top = max(page_rect.y0, caption_rect.y0 - min(360, page_rect.height * 0.45))
+    captions = captions or []
+    top = max(page_rect.y0, caption_rect.y0 - min(PDF_CAPTION_MAX_GAP, page_rect.height * 0.45))
+    preceding_captions = [
+        fitz.Rect(cap["rect"])
+        for cap in captions
+        if fitz.Rect(cap["rect"]).y1 < caption_rect.y0 - 2
+    ]
+    if preceding_captions:
+        # The preceding caption is a hard divider on pages containing stacked
+        # figures. It prevents Figure N+1 from swallowing Figure N's panels.
+        top = max(top, max(rect.y1 for rect in preceding_captions) + 10)
+    else:
+        # Tall full-page maps and multi-panel plots can legitimately occupy
+        # more than the fixed caption search window. Expand only on sparse
+        # pages with no intervening prose, retaining the header margin.
+        body_chars = sum(
+            int(block.get("char_count", 0))
+            for block in text_blocks
+            if fitz.Rect(block["rect"]).y0 > page_rect.y0 + page_rect.height * 0.12
+            and fitz.Rect(block["rect"]).y1 < caption_rect.y0
+            and not CAPTION_RE.search(str(block.get("text") or "").strip())
+        )
+        if body_chars < 100:
+            header_bottom = max(
+                (
+                    fitz.Rect(block["rect"]).y1
+                    for block in text_blocks
+                    if fitz.Rect(block["rect"]).y1 <= page_rect.y0 + page_rect.height * 0.14
+                ),
+                default=page_rect.y0 + 20,
+            )
+            top = header_bottom + 8
     for block in text_blocks:
         rect = fitz.Rect(block["rect"])
         if rect.y1 > caption_rect.y0 or rect.y1 < top:

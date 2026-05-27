@@ -11,6 +11,9 @@ def _paper(tmp_path: Path) -> ParsedPaper:
     fig = PaperFigure(
         path=tmp_path / "fig_001_p1.png",
         caption="Figure 1: benchmark accuracy improves with sparse attention.",
+        page_number=1,
+        bbox=(80.0, 120.0, 480.0, 320.0),
+        extraction_method="caption_region",
         natural_width=800,
         natural_height=400,
         quality_score=0.92,
@@ -49,6 +52,9 @@ def test_provider_memory_compacts_full_paper_and_keeps_evidence(tmp_path: Path) 
     assert len(memory.compact_markdown) < len(_paper(tmp_path).to_markdown()) + 2000
     assert any("60%" in card.text for card in memory.evidence_cards)
     assert memory.figures[0].id == "fig_001_p1"
+    assert memory.figures[0].bbox == (80.0, 120.0, 480.0, 320.0)
+    assert memory.figures[0].extraction_method == "caption_region"
+    assert "caption_region" in memory.compact_markdown
 
 
 def test_slide_context_retrieves_relevant_cards(tmp_path: Path) -> None:
@@ -69,3 +75,4 @@ def test_slide_context_retrieves_relevant_cards(tmp_path: Path) -> None:
     assert "Provider Slide Working Memory" in contexts[1]
     assert "KV cache" in contexts[1] or "cache" in contexts[1]
     assert "fig_001_p1" in contexts[1]
+    assert "source=caption_region" in contexts[1]
