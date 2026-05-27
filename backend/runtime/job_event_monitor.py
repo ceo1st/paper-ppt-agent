@@ -64,6 +64,7 @@ async def sync_job_events_once(job_id: str) -> None:
         _offsets[job_id] = offset
         for message in messages:
             await _apply_message(job_id, message)
+        await _mark_lost_worker_if_needed(job_id)
 
 
 async def _apply_message(job_id: str, message: dict[str, Any]) -> None:
@@ -122,6 +123,32 @@ def _record_error(job_id: str, message: str) -> None:
     event = _ProgressEvent("error", "error", message, job.progress)
     for payload, updates in payloads_from_progress_event(job_id, job, event):
         session_manager.record_event(job_id, payload, **updates)
+
+
+async def _mark_lost_worker_if_needed(job_id: str) -> None:
+    job = session_manager.get_job(job_id)
+    if job is None or job.status in TERMINAL_STATUSES:
+        return
+    if getattr(job, "worker_backend", None) != "huey-sqlite":
+        return
+
+    from backend.runtime.worker_process_registry import (
+        has_job_process_record,
+        is_job_process_lost,
+        unregister_job_process,
+    )
+
+    has_record = await aoffload(has_job_process_record, job_id)
+    lost = await aoffload(is_job_process_lost, job_id)
+    if not has_record and job.status != "pending":
+        lost = True
+    if not lost:
+        return
+    await aoffload(unregister_job_process, job_id)
+    _record_error(
+        job_id,
+        "Generation worker process exited or was lost before reporting completion.",
+    )
 
 
 async def write_generation_request(job_id: str, request: Any) -> Path:

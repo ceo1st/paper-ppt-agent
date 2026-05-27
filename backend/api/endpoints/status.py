@@ -53,6 +53,11 @@ async def cancel_job(job_id: str) -> CancelJobResponse:
     cancelled = session_manager.cancel_job(job_id)
     if not cancelled:
         session_manager.mark_job_cancelled(job_id)
+        await session_manager.flush_now()
+        return CancelJobResponse(job_id=job_id, status="cancelled")
+    job = session_manager.get_job(job_id)
+    if job is not None and job.status == "cancelled":
+        await session_manager.flush_now()
         return CancelJobResponse(job_id=job_id, status="cancelled")
 
     return CancelJobResponse(job_id=job_id, status="cancelling")

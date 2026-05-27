@@ -79,6 +79,20 @@ def test_agent_research_policy_keeps_query_choice_with_agent() -> None:
     assert "backend does not preselect" in policy["query_rule"]
 
 
+def test_empty_agent_output_message_reports_stray_svg(tmp_path: Path) -> None:
+    stray_dir = tmp_path / "nested"
+    stray_dir.mkdir()
+    (stray_dir / "slide_001.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        encoding="utf-8",
+    )
+
+    message = agent_pipeline._empty_agent_output_message(tmp_path)
+
+    assert "completed without producing SVG slides" in message
+    assert "nested/slide_001.svg" in message
+
+
 def _write_research_gated_task(project_dir: Path) -> None:
     (project_dir / "agent_task.json").write_text(
         json.dumps(

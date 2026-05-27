@@ -2581,6 +2581,13 @@ def _empty_agent_output_message(project_dir: Path) -> str:
     return f"Agent mode completed without producing SVG slides in svg_output/.{suffix}"
 
 
+def _relative_path(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def _update_agent_usage_totals(totals: _AgentUsageTotals, message: Any) -> AgentProgressEvent | None:
     if totals.runtime == "codex":
         changed = False

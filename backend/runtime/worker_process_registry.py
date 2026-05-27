@@ -43,6 +43,15 @@ def get_job_process_pid(job_id: str) -> int | None:
         return None
 
 
+def has_job_process_record(job_id: str) -> bool:
+    return process_file(job_id).exists()
+
+
+def is_job_process_lost(job_id: str) -> bool:
+    pid = get_job_process_pid(job_id)
+    return bool(pid and not psutil.pid_exists(pid))
+
+
 def is_job_process_alive(job_id: str) -> bool:
     pid = get_job_process_pid(job_id)
     return bool(pid and psutil.pid_exists(pid))

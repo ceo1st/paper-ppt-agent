@@ -202,6 +202,7 @@ class SessionManager:
         return bool(task and not task.done())
 
     def cancel_job(self, job_id: str) -> bool:
+        job = self._jobs.get(job_id)
         try:
             from backend.runtime.worker_process_registry import terminate_job_process_tree
 
@@ -210,6 +211,15 @@ class SessionManager:
                 return True
         except Exception:
             logger.exception("failed to terminate isolated worker for job %s", job_id)
+
+        if job is not None and job.worker_backend == "huey-sqlite":
+            # Huey jobs are supervised by a monitor task. Cancelling only that
+            # task leaves the UI stuck unless the job itself becomes terminal.
+            self.mark_job_cancelled(job_id)
+            task = self._tasks.get(job_id)
+            if task is not None and not task.done():
+                task.cancel()
+            return True
 
         # Prefer the scheduler when it's been wired in: it knows about both
         # running tasks *and* still-queued ones (which we can't reach via

@@ -55,6 +55,20 @@ def _terminate(proc: subprocess.Popen[str]) -> None:
     if proc.poll() is not None:
         return
     try:
+        import psutil
+
+        parent = psutil.Process(proc.pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            child.terminate()
+        parent.terminate()
+        _, alive = psutil.wait_procs([parent, *children], timeout=5.0)
+        for item in alive:
+            item.kill()
+        return
+    except Exception:
+        pass
+    try:
         proc.terminate()
     except OSError:
         return
@@ -63,6 +77,17 @@ def _terminate(proc: subprocess.Popen[str]) -> None:
 def _kill(proc: subprocess.Popen[str]) -> None:
     if proc.poll() is not None:
         return
+    try:
+        import psutil
+
+        parent = psutil.Process(proc.pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            child.kill()
+        parent.kill()
+        return
+    except Exception:
+        pass
     try:
         proc.kill()
     except OSError:
@@ -135,7 +160,7 @@ def main() -> int:
         print("Paper PPT Agent is starting:", flush=True)
         print("  Backend:  http://127.0.0.1:8000", flush=True)
         print("  Frontend: http://127.0.0.1:5173", flush=True)
-        print("  Worker:   SQLiteHuey local queue", flush=True)
+        print("  Worker:   SQLiteHuey local queue (dynamic concurrency)", flush=True)
         print("Press Ctrl+C to stop all processes.", flush=True)
 
         while not stop:

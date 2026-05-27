@@ -31,6 +31,7 @@ def _job() -> SimpleNamespace:
         total_slides=0,
         output_path=None,
         project_dir=None,
+        worker_backend="huey-sqlite",
     )
 
 
@@ -49,8 +50,12 @@ async def test_sync_job_events_applies_worker_progress(monkeypatch) -> None:
         },
     }
 
-    async def fake_aoffload(_fn, _job_id, _offset):
-        return 10, [{"type": "worker_stdout", "payload": json.dumps(worker_payload)}]
+    async def fake_aoffload(fn, *args):
+        if getattr(fn, "__name__", "") == "read_messages_after":
+            return 10, [{"type": "worker_stdout", "payload": json.dumps(worker_payload)}]
+        if getattr(fn, "__name__", "") == "has_job_process_record":
+            return True
+        return False
 
     monkeypatch.setattr(job_event_monitor, "session_manager", manager)
     monkeypatch.setattr(job_event_monitor, "aoffload", fake_aoffload)
@@ -69,8 +74,10 @@ async def test_sync_job_events_marks_worker_exit_error(monkeypatch) -> None:
     job = _job()
     manager = _Manager(job)
 
-    async def fake_aoffload(_fn, _job_id, _offset):
-        return 10, [{"type": "worker_exit", "returncode": 7}]
+    async def fake_aoffload(fn, *args):
+        if getattr(fn, "__name__", "") == "read_messages_after":
+            return 10, [{"type": "worker_exit", "returncode": 7}]
+        return False
 
     monkeypatch.setattr(job_event_monitor, "session_manager", manager)
     monkeypatch.setattr(job_event_monitor, "aoffload", fake_aoffload)
@@ -80,3 +87,52 @@ async def test_sync_job_events_marks_worker_exit_error(monkeypatch) -> None:
 
     assert job.status == "error"
     assert "exited with code 7" in job.error
+
+
+@pytest.mark.asyncio
+async def test_sync_job_events_marks_lost_worker_error(monkeypatch) -> None:
+    job = _job()
+    job.status = "research"
+    job.progress = 0.24
+    manager = _Manager(job)
+
+    async def fake_aoffload(fn, *args):
+        if getattr(fn, "__name__", "") == "read_messages_after":
+            return 10, []
+        if getattr(fn, "__name__", "") == "is_job_process_lost":
+            return True
+        return None
+
+    monkeypatch.setattr(job_event_monitor, "session_manager", manager)
+    monkeypatch.setattr(job_event_monitor, "aoffload", fake_aoffload)
+    job_event_monitor._offsets.pop("job-3", None)
+
+    await job_event_monitor.sync_job_events_once("job-3")
+
+    assert job.status == "error"
+    assert "worker process" in job.error
+
+
+@pytest.mark.asyncio
+async def test_sync_job_events_marks_missing_worker_record_error(monkeypatch) -> None:
+    job = _job()
+    job.status = "research"
+    manager = _Manager(job)
+
+    async def fake_aoffload(fn, *args):
+        if getattr(fn, "__name__", "") == "read_messages_after":
+            return 10, []
+        if getattr(fn, "__name__", "") == "has_job_process_record":
+            return False
+        if getattr(fn, "__name__", "") == "is_job_process_lost":
+            return False
+        return None
+
+    monkeypatch.setattr(job_event_monitor, "session_manager", manager)
+    monkeypatch.setattr(job_event_monitor, "aoffload", fake_aoffload)
+    job_event_monitor._offsets.pop("job-4", None)
+
+    await job_event_monitor.sync_job_events_once("job-4")
+
+    assert job.status == "error"
+    assert "worker process" in job.error
