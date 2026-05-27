@@ -26,6 +26,8 @@ from backend.usage.tracker import reset_usage_context, set_usage_context
 
 from .manuscript import count_manuscript_pages
 from . import research_agent, strategist_agent, svg_executor
+from .deck_plan import build_deck_plan
+from .provider_memory import build_provider_memory, build_slide_contexts, save_provider_memory
 from .research_agent import ResearchContext
 from .research_enrichment import enrich_context
 
@@ -223,6 +225,12 @@ async def run_pipeline(
 
         async with heavy_stage_slot():
             paper = await parser.parse(request.file_path, output_dir)
+        provider_memory = build_provider_memory(paper)
+        await aoffload(
+            save_provider_memory,
+            provider_memory,
+            project_dir / "provider_memory",
+        )
 
         parse_info: dict = {}
         if request.source_type == "pdf":
@@ -319,6 +327,7 @@ async def run_pipeline(
                     detail_level=request.detail_level,
                     research_context=research_ctx,
                     enable_deep_research=effective_deep_research,
+                    provider_memory=provider_memory,
                     debug_dir=project_dir / "debug",
                     on_progress=_on_research_progress,
                 )
@@ -411,6 +420,25 @@ async def run_pipeline(
         # Stage 4: SVG executor
         set_usage_context(stage="generation", page=None, attempt=1)
         total_pages = count_manuscript_pages(manuscript)
+        generation_deck_plan = build_deck_plan(
+            manuscript,
+            design_spec,
+            detail_level=request.detail_level,
+        )
+        slide_contexts = build_slide_contexts(
+            manuscript,
+            provider_memory,
+            generation_deck_plan,
+        )
+        if slide_contexts:
+            try:
+                await awrite_text(
+                    project_dir / "provider_memory" / "slide_contexts.json",
+                    json.dumps(slide_contexts, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
         generation_start_data: dict[str, object] = {"total_slides": total_pages}
         if request.generation_mode != "sequential":
             generation_start_data["generation_mode"] = request.generation_mode
@@ -471,6 +499,7 @@ async def run_pipeline(
                 on_critic=_on_critic,
                 on_svg_update=_on_svg_update,
                 figure_inventory=figure_inventory,
+                slide_contexts=slide_contexts,
                 enable_visual_critic=request.enable_visual_critic,
                 max_critic_attempts=request.max_critic_attempts,
                 visual_qa_max_attempts=request.visual_qa_max_attempts,
@@ -493,6 +522,7 @@ async def run_pipeline(
                 on_critic=_on_critic,
                 on_svg_update=_on_svg_update,
                 figure_inventory=figure_inventory,
+                slide_contexts=slide_contexts,
                 enable_visual_critic=request.enable_visual_critic,
                 max_critic_attempts=request.max_critic_attempts,
                 visual_qa_max_attempts=request.visual_qa_max_attempts,

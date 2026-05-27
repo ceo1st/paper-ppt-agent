@@ -45,6 +45,12 @@ TERMINAL_STATUSES = {"complete", "error", "cancelled"}
 @router.websocket("/ws/{job_id}")
 async def job_updates(websocket: WebSocket, job_id: str) -> None:
     await websocket.accept()
+    try:
+        from backend.runtime.job_event_monitor import sync_job_events_once
+
+        await sync_job_events_once(job_id)
+    except Exception:
+        pass
 
     # Parse ``?since_seq=N``. Anything malformed → start from 0 (full replay).
     since_seq_raw = websocket.query_params.get("since_seq", "0")

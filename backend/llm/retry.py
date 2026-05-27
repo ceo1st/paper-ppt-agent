@@ -16,8 +16,8 @@ from typing import TypeVar
 T = TypeVar("T")
 
 
-# Default retry budget: 4 attempts ≈ up to ~15s of backoff + jitter.
-DEFAULT_MAX_ATTEMPTS = 4
+# Default retry budget: 10 attempts ≈ up to ~60s of backoff + jitter.
+DEFAULT_MAX_ATTEMPTS = 10
 DEFAULT_BASE_DELAY = 1.0     # seconds
 DEFAULT_MAX_DELAY = 10.0
 
@@ -31,6 +31,33 @@ def _is_retryable(exc: BaseException) -> bool:
     name = type(exc).__name__.lower()
     # Classic transient signatures.
     if any(tok in name for tok in ("timeout", "connection", "apiconnection")):
+        return True
+    text = str(exc).lower()
+    if any(
+        tok in text
+        for tok in (
+            "socket connection was closed",
+            "connection was closed",
+            "connection closed",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "connection terminated",
+            "broken pipe",
+            "econnreset",
+            "ecconnreset",
+            "read error",
+            "remote protocol error",
+            "server disconnected",
+            "network error",
+            "tls",
+            "ssl",
+            "temporarily unavailable",
+        )
+    ):
+        return True
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if cause is not None and cause is not exc and _is_retryable(cause):
         return True
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     if isinstance(status, int):
