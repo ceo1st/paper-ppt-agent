@@ -39,6 +39,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             scheduler = get_scheduler()
             await scheduler.start()
             logger.info("scheduler started")
+            from backend.runtime.job_event_monitor import resume_provider_job_monitors
+
+            resume_provider_job_monitors()
         except ImportError:
             scheduler = None
 

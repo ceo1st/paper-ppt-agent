@@ -80,6 +80,7 @@ class Job:
     language: str | None = None
     detail_level: str | None = None
     instruction: str | None = None
+    worker_backend: str | None = None
     # Bounded ring buffer of recent events with monotonically increasing
     # ``seq`` ids. Persisted to disk so a reconnecting client can ask for
     # everything after its last seen seq.
@@ -171,10 +172,20 @@ class SessionManager:
     def get_job(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
+    def list_jobs(self) -> list[Job]:
+        return list(self._jobs.values())
+
     def is_job_running(self, job_id: str) -> bool:
-        """True if there is a live asyncio task for *job_id*."""
+        """True if there is a live monitor task or isolated worker process."""
         task = self._tasks.get(job_id)
-        return bool(task and not task.done())
+        if task and not task.done():
+            return True
+        try:
+            from backend.runtime.worker_process_registry import is_job_process_alive
+
+            return is_job_process_alive(job_id)
+        except Exception:
+            return False
 
     def register_task(self, job_id: str, task: asyncio.Task[Any]) -> None:
         self._tasks[job_id] = task
@@ -186,7 +197,20 @@ class SessionManager:
 
         task.add_done_callback(_cleanup)
 
+    def has_registered_task(self, job_id: str) -> bool:
+        task = self._tasks.get(job_id)
+        return bool(task and not task.done())
+
     def cancel_job(self, job_id: str) -> bool:
+        try:
+            from backend.runtime.worker_process_registry import terminate_job_process_tree
+
+            if terminate_job_process_tree(job_id):
+                self.mark_job_cancelled(job_id)
+                return True
+        except Exception:
+            logger.exception("failed to terminate isolated worker for job %s", job_id)
+
         # Prefer the scheduler when it's been wired in: it knows about both
         # running tasks *and* still-queued ones (which we can't reach via
         # ``self._tasks``). Falls through to legacy task cancellation when
@@ -403,6 +427,11 @@ class SessionManager:
         for job in self._jobs.values():
             if job.status in terminal:
                 continue
+            # Provider jobs are now backed by the local SQLiteHuey queue and
+            # durable event logs, so an API reload can resume monitoring them.
+            # Agent jobs keep live SDK sessions in-process and cannot recover.
+            if job.worker_backend == "huey-sqlite":
+                continue
             if job.status in running_states or job.status not in terminal:
                 job.status = "error"
                 if not job.error:
@@ -557,6 +586,7 @@ class SessionManager:
                     language=raw_job.get("language"),
                     detail_level=raw_job.get("detail_level"),
                     instruction=raw_job.get("instruction"),
+                    worker_backend=raw_job.get("worker_backend"),
                     events=events[-EVENT_RING_SIZE:],
                     last_seq=last_seq,
                     agent_session_id=raw_job.get("agent_session_id"),

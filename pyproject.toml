@@ -39,6 +39,9 @@ dependencies = [
     "aiofiles>=24.0.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
+    "psutil>=5.9.0",
+    "huey>=3.0.1",
+    "peewee>=4.0.6",
 ]
 
 [project.optional-dependencies]

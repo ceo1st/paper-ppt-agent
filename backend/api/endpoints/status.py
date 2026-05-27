@@ -12,6 +12,9 @@ router = APIRouter()
 
 @router.get("/status/{job_id}", response_model=JobStatus)
 async def get_job_status(job_id: str) -> JobStatus:
+    from backend.runtime.job_event_monitor import sync_job_events_once
+
+    await sync_job_events_once(job_id)
     job = session_manager.get_job(job_id)
     if job is None:
         raise HTTPException(

@@ -36,6 +36,7 @@ from backend.orchestrator.manuscript import (
     strip_page_type_metadata,
     split_manuscript_pages,
 )
+from backend.orchestrator.provider_memory import ProviderMemory
 from backend.parser.paper_model import ParsedPaper
 
 if TYPE_CHECKING:
@@ -140,11 +141,13 @@ async def _run_lightweight_paper_brief(
     detail_level: str = "normal",
     enrichment_block: str = "",
     is_deepseek: bool = False,
+    paper_markdown: str | None = None,
     debug_dir: Path | None = None,
 ) -> str:
     """Extract a compact, evidence-first brief for the non-deep manuscript path."""
+    paper_context = paper_markdown or paper.to_markdown()
     user_parts = [
-        f"## Paper Content\n\n{paper.to_markdown()}",
+        f"## Paper Working Memory\n\n{paper_context}",
         f"\n## Target Language\n\n{language}\n\n{_language_guidance(language)}",
         f"\n## Detail Level\n\n{detail_level}\n\n{DETAIL_GUIDANCE.get(detail_level, DETAIL_GUIDANCE['normal'])}",
     ]
@@ -198,11 +201,13 @@ async def _run_single_pass_analysis(
     enrichment_block: str = "",
     paper_brief: str = "",
     is_deepseek: bool = False,
+    paper_markdown: str | None = None,
     debug_dir: Path | None = None,
 ) -> str:
     """Generate a slide manuscript for the non-deep mode."""
+    paper_context = paper_markdown or paper.to_markdown()
     user_parts = [
-        f"## Paper Content\n\n{paper.to_markdown()}",
+        f"## Paper Working Memory\n\n{paper_context}",
         f"\n## Target Language\n\n{language}\n\n{_language_guidance(language)}",
         f"\n## Target Slides\n\n{_target_slides_guidance(num_pages, detail_level)}",
         f"\n## Detail Level\n\n{detail_level}\n\n{DETAIL_GUIDANCE.get(detail_level, DETAIL_GUIDANCE['normal'])}",
@@ -818,6 +823,7 @@ async def analyze_paper(
     detail_level: str = "normal",
     research_context: ResearchContext | None = None,
     enable_deep_research: bool = False,
+    provider_memory: ProviderMemory | None = None,
     debug_dir: Path | None = None,
     on_progress: Callable[[str, float], None] | None = None,
 ) -> str:
@@ -842,6 +848,7 @@ async def analyze_paper(
     """
     is_deepseek = is_deepseek_provider(llm, model)
     paper_md = paper.to_markdown()
+    compact_paper_md = provider_memory.compact_markdown if provider_memory else paper_md
 
     # External enrichment is injected into Pass 1 specifically — that's where
     # related-work context actually changes the analysis (gap framing,
@@ -864,6 +871,7 @@ async def analyze_paper(
             detail_level=detail_level,
             enrichment_block=enrichment_block,
             is_deepseek=is_deepseek,
+            paper_markdown=compact_paper_md,
             debug_dir=debug_dir,
         )
         logger.info("Research lightweight brief complete (%d chars)", len(paper_brief))
@@ -880,6 +888,7 @@ async def analyze_paper(
             enrichment_block=enrichment_block,
             paper_brief=paper_brief,
             is_deepseek=is_deepseek,
+            paper_markdown=compact_paper_md,
             debug_dir=debug_dir,
         )
         _debug_write_text(debug_dir, "research_final_manuscript.md", manuscript)
