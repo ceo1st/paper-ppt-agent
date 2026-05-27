@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Bot, CircleCheck, Database, FileText, Info, Loader2, MessageSquareText, Sparkles, Type, Wand2, X } from "lucide-react";
 import { Layout } from "../components/layout/Layout";
@@ -87,9 +87,9 @@ export function ResultPage() {
   const [remoteCriticEvents, setRemoteCriticEvents] = useState<CriticEvent[] | null>(null);
   const resolvedRun = jobId ? runs[jobId] : undefined;
   const isActiveJob = jobId === activeJobId;
-  const logs = isActiveJob ? globalLogs : (resolvedRun?.logs ?? []);
-  const agentMessages = isActiveJob ? globalAgentMessages : (resolvedRun?.agentMessages ?? []);
-  const localCritic = isActiveJob ? globalCriticEvents : (resolvedRun?.criticEvents ?? []);
+  const logs = resolvedRun?.logs ?? (isActiveJob ? globalLogs : []);
+  const agentMessages = resolvedRun?.agentMessages ?? (isActiveJob ? globalAgentMessages : []);
+  const localCritic = resolvedRun?.criticEvents ?? (isActiveJob ? globalCriticEvents : []);
   const criticEvents = localCritic.length > 0 ? localCritic : (remoteCriticEvents ?? []);
   // Direct-bind the global error-store setters so we can mirror local
   // page errors (load / refine / reexport / failed-job) into the global
@@ -146,10 +146,10 @@ export function ResultPage() {
       : job?.provider?.startsWith("agent:")
         ? job.provider.slice("agent:".length)
         : "claude_code");
+  const requestedAgentHistoryForJob = useRef<string | null>(null);
 
   const handleAgentResultSend = async (text: string) => {
     if (!jobId) return;
-    connect(jobId);
     await sendAgentFeedback(text, jobId);
   };
   const pptistPreviewRevision = useMemo(
@@ -171,6 +171,21 @@ export function ResultPage() {
       setJob(liveJob);
     }
   }, [activeJobId, jobId, liveJob, liveResult]);
+
+  useEffect(() => {
+    if (!jobId || !isAgentResult || resultRunStatus !== "complete") {
+      return;
+    }
+    if (requestedAgentHistoryForJob.current === jobId) {
+      return;
+    }
+    const run = useGeneration.getState().runs[jobId];
+    if ((run?.agentMessages.length ?? 0) > 0 && typeof run?.lastSeq === "number") {
+      return;
+    }
+    requestedAgentHistoryForJob.current = jobId;
+    connect(jobId, { replayFromStart: (run?.agentMessages.length ?? 0) === 0 });
+  }, [connect, isAgentResult, jobId, resultRunStatus]);
 
   useEffect(() => {
     let cancelled = false;

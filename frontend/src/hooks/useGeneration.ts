@@ -130,7 +130,7 @@ interface GenerationState {
   cancelCurrentRun: () => Promise<void>;
   interruptCurrentAgent: () => Promise<void>;
   sendAgentFeedback: (message: string, jobId?: string) => Promise<void>;
-  connect: (jobId: string) => void;
+  connect: (jobId: string, options?: { replayFromStart?: boolean }) => void;
   hydrateResult: (jobId: string) => Promise<void>;
   refreshHistoryStatuses: () => Promise<void>;
   resumeCurrentRun: (targetJobId?: string) => Promise<boolean>;
@@ -501,6 +501,7 @@ function serializeRunsForStorage(runs: Record<string, RunSnapshot>) {
         error: run.error,
         currentRunConfig: run.currentRunConfig,
         connectionStatus: "disconnected" as const,
+        lastSeq: run.lastSeq,
       } satisfies StoredRunSnapshot,
     ]),
   );
@@ -523,6 +524,7 @@ function normalizeStoredRun(jobId: string, run?: Partial<RunSnapshot>): RunSnaps
     result: undefined,
     currentRunConfig: run?.currentRunConfig,
     connectionStatus: "disconnected",
+    lastSeq: run?.lastSeq,
     enrichmentStats: run?.enrichmentStats,
   });
 }
@@ -928,11 +930,20 @@ export const useGeneration = create<GenerationState>()(
               };
             });
             get().syncHistory(jobId);
+            if (!get().socketsByJob[jobId]?.isOpen()) {
+              get().connect(jobId);
+            }
             return;
           }
           if (response.status === "queued") {
+            const terminalSocket = get().socketsByJob[jobId];
+            terminalSocket?.close();
             set((state) => {
               const currentRun = state.runs[jobId] ?? createRunSnapshot(jobId);
+              const nextSockets = { ...state.socketsByJob };
+              if (nextSockets[jobId] === terminalSocket) {
+                delete nextSockets[jobId];
+              }
               const nextJob = currentRun.job
                 ? {
                     ...currentRun.job,
@@ -955,9 +966,11 @@ export const useGeneration = create<GenerationState>()(
                   ...state.runs,
                   [jobId]: updatedRun,
                 },
+                socketsByJob: nextSockets,
               };
             });
             get().syncHistory(jobId);
+            get().connect(jobId);
           }
         } catch (error) {
           set((state) => {
@@ -985,10 +998,16 @@ export const useGeneration = create<GenerationState>()(
           throw error;
         }
       },
-      connect(jobId) {
+      connect(jobId, options) {
         const existingSocket = get().socketsByJob[jobId];
         const existingRun = get().runs[jobId];
-        const initialSeq = Math.max(existingRun?.lastSeq ?? 0, seenSeqByJob.get(jobId) ?? 0);
+        const replayFromStart = options?.replayFromStart === true;
+        if (replayFromStart) {
+          seenSeqByJob.delete(jobId);
+        }
+        const initialSeq = replayFromStart
+          ? 0
+          : Math.max(existingRun?.lastSeq ?? 0, seenSeqByJob.get(jobId) ?? 0);
         if (initialSeq > 0) {
           seenSeqByJob.set(jobId, initialSeq);
         }
@@ -1071,20 +1090,24 @@ export const useGeneration = create<GenerationState>()(
                     : event.data.agent_interrupt === true
                       ? "pausing"
                       : undefined;
+              const terminalStatus =
+                event.type === "complete" || (event.stage === "export" && event.status === "complete")
+                  ? "complete"
+                  : event.type === "error" || event.status === "error"
+                    ? event.stage === "cancelled"
+                      ? "cancelled"
+                      : "error"
+                    : undefined;
               const nextJob: JobStatus = {
                 status:
-                  event.type === "complete"
-                    ? "complete"
-                    : event.type === "error"
-                      ? "error"
-                      : agentLifecycleStatus ?? displayStage,
+                  terminalStatus ?? agentLifecycleStatus ?? displayStage,
                 progress: event.progress,
                 message: event.message,
                 slides_completed: slidesCompleted,
                 total_slides: event.total_slides,
                 output_path:
                   typeof event.data.output_path === "string" ? event.data.output_path : currentRun.job?.output_path,
-                error: event.type === "error" ? event.message : undefined,
+                error: terminalStatus === "error" ? event.message : undefined,
                 provider: currentRun.job?.provider,
                 model: currentRun.job?.model,
                 base_url: currentRun.job?.base_url,
@@ -1138,7 +1161,7 @@ export const useGeneration = create<GenerationState>()(
                     : pickSelectedSlide(slides, currentRun.selectedSlide),
                 logs,
                 agentMessages,
-                error: event.type === "error" ? event.message : undefined,
+                error: terminalStatus === "error" ? event.message : undefined,
                 connectionStatus: FINAL_JOB_STATUSES.has(nextJob.status) ? "disconnected" : currentRun.connectionStatus,
                 lastSeq: typeof seq === "number" && seq > 0 ? Math.max(currentRun.lastSeq ?? 0, seq) : currentRun.lastSeq,
               };
@@ -1229,7 +1252,7 @@ export const useGeneration = create<GenerationState>()(
               const run = state.runs[jobId] ?? createRunSnapshot(jobId);
               const updatedRun = { ...run, connectionStatus: willReconnect ? "connecting" as const : "disconnected" as const };
               const nextSockets = { ...state.socketsByJob };
-              if (!willReconnect) {
+              if (!willReconnect && nextSockets[jobId] === socket) {
                 delete nextSockets[jobId];
               }
               return {
