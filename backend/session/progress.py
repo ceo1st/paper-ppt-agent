@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .manager import Job
+if TYPE_CHECKING:
+    from .manager import Job
 
 PIPELINE_STAGES = (
     "agent",

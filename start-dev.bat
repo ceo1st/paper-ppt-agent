@@ -40,15 +40,9 @@ if not exist "%FRONTEND_DIR%\node_modules" (
   popd
 )
 
-echo ==> Starting backend
-start "Paper PPT Agent Backend" cmd /k "cd /d ""%ROOT%"" && set PYTHONUNBUFFERED=1 && uv run python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload --reload-dir backend --reload-include=*.py"
-
-echo ==> Starting frontend
-start "Paper PPT Agent Frontend" cmd /k "cd /d ""%FRONTEND_DIR%"" && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort --open"
-
-echo.
-echo Paper PPT Agent is starting:
-echo   Backend:  http://127.0.0.1:8000
-echo   Frontend: %FRONTEND_URL%
+echo ==> Starting Paper PPT Agent in this window
+cd /d "%ROOT%"
+set PYTHONUNBUFFERED=1
+call uv run python -m backend.dev_launcher
 
 endlocal

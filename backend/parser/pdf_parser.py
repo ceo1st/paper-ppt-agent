@@ -79,7 +79,7 @@ LABEL_TEXT_CHARS_THRESHOLD = 80
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CAPTION_RE = re.compile(
-    r"^\s*(fig(?:ure)?\.?\s*\d+|table\s*\d+)\b",
+    r"^\s*(fig(?:ure)?\.?\s*[0-9０-９]+|table\s*[0-9０-９]+|[图表]\s*[0-9０-９]+)",
     re.IGNORECASE,
 )
 
@@ -346,8 +346,19 @@ class PDFParser(PaperParser):
             if m:
                 key = re.sub(r"\s+", "", m.group(0).lower())
                 rect = fitz.Rect(block["bbox"])
-                result[key] = (block_text, rect)
+                result[key] = (self._normalize_caption_text(block_text), rect)
         return result
+
+    @staticmethod
+    def _normalize_caption_text(text: str) -> str:
+        """Restore spacing when PDF extraction joins a figure index to a year."""
+        value = re.sub(r"\s+", " ", (text or "").strip())
+
+        def split_index_year(match: re.Match[str]) -> str:
+            digits = match.group(2)
+            return f"{match.group(1)}{digits[:-4]} {digits[-4:]}"
+
+        return re.sub(r"^([图表]\s*)([0-9０-９]{5,})(?=\s)", split_index_year, value)
 
     def _nearest_caption(
         self,
@@ -358,8 +369,9 @@ class PDFParser(PaperParser):
         best_dist = float("inf")
         best_cap = ""
         for _key, (cap_text, cap_rect) in caption_map.items():
-            # vertical distance between centres
-            dist = abs(cap_rect.y0 - img_rect.y1)
+            # Captions usually sit below figures but above tables. Compare the
+            # nearest vertical edges so both conventions retain their identity.
+            dist = min(abs(cap_rect.y0 - img_rect.y1), abs(img_rect.y0 - cap_rect.y1))
             if dist < best_dist and dist < CAPTION_SEARCH_PX * 2:
                 best_dist = dist
                 best_cap = cap_text
@@ -517,6 +529,13 @@ class PDFParser(PaperParser):
                 )
             if clip is None:
                 continue
+            clip = self._normalize_caption_clip(
+                clip,
+                page_rect,
+                cap_rect,
+                text_blocks,
+                caption_map,
+            )
 
             if self._is_region_already_covered(clip, raster_rects):
                 continue
@@ -885,6 +904,54 @@ class PDFParser(PaperParser):
                 continue
             trimmed.y0 = max(trimmed.y0, rect.y1 + 4)
         return trimmed
+
+    def _normalize_caption_clip(
+        self,
+        clip: fitz.Rect,
+        page_rect: fitz.Rect,
+        caption_rect: fitz.Rect,
+        text_blocks: list[dict],
+        caption_map: dict[str, tuple[str, fitz.Rect]],
+    ) -> fitz.Rect:
+        """Keep stacked crops separate while restoring sparse full-page figures."""
+        normalized = fitz.Rect(clip)
+        preceding_captions = [
+            other_rect
+            for _, other_rect in caption_map.values()
+            if other_rect.y1 < caption_rect.y0 - 2
+        ]
+        if preceding_captions:
+            horizontal_pad = max(20.0, page_rect.width * 0.04)
+            normalized.x0 = page_rect.x0 + horizontal_pad
+            normalized.x1 = page_rect.x1 - horizontal_pad
+            normalized.y0 = max(normalized.y0, max(rect.y1 for rect in preceding_captions) + 10)
+            normalized.y1 = caption_rect.y0 - 4
+            return normalized
+
+        body_chars = sum(
+            block["char_count"]
+            for block in text_blocks
+            if block["rect"].y0 > page_rect.y0 + page_rect.height * 0.12
+            and block["rect"].y1 < caption_rect.y0
+            and not _CAPTION_RE.search(block["text"].strip())
+        )
+        if body_chars >= 100:
+            return normalized
+
+        header_bottom = max(
+            (
+                block["rect"].y1
+                for block in text_blocks
+                if block["rect"].y1 <= page_rect.y0 + page_rect.height * 0.14
+            ),
+            default=page_rect.y0 + 20,
+        )
+        horizontal_pad = max(20.0, page_rect.width * 0.04)
+        normalized.x0 = page_rect.x0 + horizontal_pad
+        normalized.x1 = page_rect.x1 - horizontal_pad
+        normalized.y0 = header_bottom + 8
+        normalized.y1 = caption_rect.y0 - 4
+        return normalized
 
     def _is_region_already_covered(self, region: fitz.Rect, raster_rects: list[fitz.Rect]) -> bool:
         for rect in raster_rects:

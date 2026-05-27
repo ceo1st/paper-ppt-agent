@@ -250,6 +250,7 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         language=request.options.language,
         detail_level=request.options.detail_level,
         instruction=request.instruction,
+        worker_backend="huey-sqlite" if generation_backend == "provider" else None,
     )
 
     pipeline_request = GenerationRequest(
@@ -306,35 +307,55 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         ),
     )
 
-    scheduler = get_scheduler()
+    if generation_backend == "provider":
+        from backend.queue.tasks import run_generation_job
+        from backend.runtime.job_event_monitor import monitor_job_events, write_generation_request
 
-    async def _runner() -> None:
-        await _run_generation_job(job.id, pipeline_request)
+        request_file = await write_generation_request(job.id, pipeline_request)
+        try:
+            run_generation_job(job.id, str(request_file), pipeline_request.timeout_seconds)
+        except Exception as exc:
+            msg = describe_exception(exc, "Failed to enqueue generation job")
+            session_manager.update_job(job.id, status="error", error=msg, message=msg)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=msg,
+            ) from exc
+        monitor_task = asyncio.create_task(
+            monitor_job_events(job.id),
+            name=f"job-{job.id}-event-monitor",
+        )
+        session_manager.register_task(job.id, monitor_task)
+    else:
+        scheduler = get_scheduler()
 
-    try:
-        await scheduler.submit(job.id, _runner)
-    except QueueFull as exc:
-        session_manager.update_job(
-            job.id,
-            status="error",
-            error="Server is busy: too many jobs queued.",
-            message="Server is busy: too many jobs queued.",
-        )
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=str(exc),
-        ) from exc
-    except SchedulerDraining as exc:
-        session_manager.update_job(
-            job.id,
-            status="error",
-            error="Server is shutting down.",
-            message="Server is shutting down.",
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
+        async def _runner() -> None:
+            await _run_generation_job(job.id, pipeline_request)
+
+        try:
+            await scheduler.submit(job.id, _runner)
+        except QueueFull as exc:
+            session_manager.update_job(
+                job.id,
+                status="error",
+                error="Server is busy: too many jobs queued.",
+                message="Server is busy: too many jobs queued.",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=str(exc),
+            ) from exc
+        except SchedulerDraining as exc:
+            session_manager.update_job(
+                job.id,
+                status="error",
+                error="Server is shutting down.",
+                message="Server is shutting down.",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
 
     return GenerateResponse(job_id=job.id, status="queued")
 

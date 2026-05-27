@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     # ── Job scheduling ───────────────────────────────────────────────────
     # Backlog cap for queued jobs; a 16th queued job returns 429.
     job_queue_capacity: int = 16
+    # Number of Huey consumer slots for provider-backed generation. When 0,
+    # the worker picks a conservative value from local CPU/memory.
+    generation_worker_concurrency: int = 0
 
     # ── External tool timeouts (seconds) ─────────────────────────────────
     pandoc_timeout: int = 60
