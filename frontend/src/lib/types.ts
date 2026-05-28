@@ -752,6 +752,12 @@ export interface JobPingEvent {
 
 export type JobSocketMessage = JobEvent | JobPingEvent;
 
+export interface JobEventsResponse {
+  job_id: string;
+  last_seq: number;
+  events: JobEvent[];
+}
+
 export interface RefineRequestPayload {
   job_id: string;
   feedback: string;

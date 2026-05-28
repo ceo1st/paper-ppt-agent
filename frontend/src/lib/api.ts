@@ -14,6 +14,7 @@ import type {
   ImportStartResponse,
   ImportStatus,
   JobStatus,
+  JobEventsResponse,
   PreviewResponse,
   PreviewSlide,
   PptistDeckPayload,
@@ -154,6 +155,10 @@ export async function fetchProviders(): Promise<ProvidersResponse> {
 
 export async function fetchBackendHealth(init?: RequestInit): Promise<HealthResponse> {
   return request<HealthResponse>("/healthz", init);
+}
+
+export async function fetchJobEvents(jobId: string, sinceSeq = 0): Promise<JobEventsResponse> {
+  return request<JobEventsResponse>(`/api/status/${jobId}/events?since_seq=${Math.max(0, sinceSeq)}`);
 }
 
 export async function fetchTemplates(): Promise<TemplateInfo[]> {
