@@ -95,21 +95,27 @@ const appRootRef = ref<HTMLElement | null>(null)
 let stopDomI18n: (() => void) | undefined
 const statusBusy = computed(() => statusKind.value === 'busy' && !!statusText.value && !errorText.value)
 const statusSaved = computed(() => statusKind.value === 'success' && !!statusText.value && !errorText.value)
+const apiBase = String(import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
+
+const apiUrl = (path: string) => {
+  if (!apiBase || /^(https?:|data:|blob:)/i.test(path)) return path
+  return path.startsWith('/') ? `${apiBase}${path}` : `${apiBase}/${path}`
+}
 
 const deckEndpoint = computed(() => {
-  if (props.options.kind === 'templateImport') return `/api/templates/import/${props.options.id}/pptist/deck`
-  return `/api/pptist/preview/${props.options.id}/deck`
+  if (props.options.kind === 'templateImport') return apiUrl(`/api/templates/import/${props.options.id}/pptist/deck`)
+  return apiUrl(`/api/pptist/preview/${props.options.id}/deck`)
 })
 
 const exportEndpoint = computed(() => {
-  if (props.options.kind === 'templateImport') return `/api/templates/import/${props.options.id}/pptist/export`
-  return `/api/pptist/preview/${props.options.id}/export`
+  if (props.options.kind === 'templateImport') return apiUrl(`/api/templates/import/${props.options.id}/pptist/export`)
+  return apiUrl(`/api/pptist/preview/${props.options.id}/export`)
 })
 
 const paperDownloadUrl = computed(() => {
   if (props.options.downloadUrl) return props.options.downloadUrl
   if (props.options.kind !== 'preview') return ''
-  return `/api/download/${props.options.id}`
+  return apiUrl(`/api/download/${props.options.id}`)
 })
 
 const setStatus = (message: string, kind: 'busy' | 'success' | 'info' = 'busy') => {
@@ -171,7 +177,7 @@ const loadDeck = async () => {
 
 const importSourcePptx = async (sourceUrl: string) => {
   setStatus(pptistT('pptist.parsingPptx'))
-  const response = await fetch(sourceUrl)
+  const response = await fetch(apiUrl(sourceUrl))
   if (!response.ok) throw new Error(await response.text())
   const blob = await response.blob()
   const file = new File([blob], 'source.pptx', {
