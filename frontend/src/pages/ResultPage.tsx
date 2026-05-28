@@ -67,6 +67,7 @@ export function ResultPage() {
     cancelCurrentRun,
     interruptCurrentAgent,
     connect,
+    hydrateAgentHistory,
     activeJobId,
     job: liveJob,
     slides: liveSlides,
@@ -180,12 +181,17 @@ export function ResultPage() {
       return;
     }
     const run = useGeneration.getState().runs[jobId];
-    if ((run?.agentMessages.length ?? 0) > 0 && typeof run?.lastSeq === "number") {
+    if (run && typeof run.lastSeq === "number" && run.agentMessages.some((message) => message.role !== "user")) {
       return;
     }
     requestedAgentHistoryForJob.current = jobId;
-    connect(jobId, { replayFromStart: (run?.agentMessages.length ?? 0) === 0 });
-  }, [connect, isAgentResult, jobId, resultRunStatus]);
+    void hydrateAgentHistory(jobId).catch(() => {
+      const latestRun = useGeneration.getState().runs[jobId];
+      if ((latestRun?.agentMessages.length ?? 0) === 0) {
+        connect(jobId, { replayFromStart: true });
+      }
+    });
+  }, [connect, hydrateAgentHistory, isAgentResult, jobId, resultRunStatus]);
 
   useEffect(() => {
     let cancelled = false;

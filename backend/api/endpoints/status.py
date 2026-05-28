@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
 from backend.api.schemas import CancelJobResponse, JobStatus
 from backend.session.manager import session_manager
@@ -36,6 +36,25 @@ async def get_job_status(job_id: str) -> JobStatus:
         model=job.model_name,
         base_url=job.base_url,
     )
+
+
+@router.get("/status/{job_id}/events")
+async def get_job_events(job_id: str, since_seq: int = Query(default=0, ge=0)) -> dict:
+    """Return retained job events for deterministic result-page hydration."""
+    from backend.runtime.job_event_monitor import sync_job_events_once
+
+    await sync_job_events_once(job_id)
+    job = session_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found.",
+        )
+    return {
+        "job_id": job_id,
+        "last_seq": job.last_seq,
+        "events": session_manager.get_events_after(job_id, since_seq),
+    }
 
 
 @router.post("/status/{job_id}/cancel", response_model=CancelJobResponse)

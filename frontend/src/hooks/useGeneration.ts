@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { cancelJob, deleteJob, deleteSession, fetchBackendHealth, fetchJobStatus, fetchPreview, fetchProjectPreview, fetchProviders, generatePresentation, interruptGenerationAgent, isNotFoundError, refinePresentation, sendGenerationAgentFeedback, uploadPaper } from "../lib/api";
+import { cancelJob, deleteJob, deleteSession, fetchBackendHealth, fetchJobEvents, fetchJobStatus, fetchPreview, fetchProjectPreview, fetchProviders, generatePresentation, interruptGenerationAgent, isNotFoundError, refinePresentation, sendGenerationAgentFeedback, uploadPaper } from "../lib/api";
 import type {
   CriticEvent,
   GenerateRequestPayload,
@@ -131,6 +131,7 @@ interface GenerationState {
   interruptCurrentAgent: () => Promise<void>;
   sendAgentFeedback: (message: string, jobId?: string) => Promise<void>;
   connect: (jobId: string, options?: { replayFromStart?: boolean }) => void;
+  hydrateAgentHistory: (jobId: string, options?: { force?: boolean }) => Promise<void>;
   hydrateResult: (jobId: string) => Promise<void>;
   refreshHistoryStatuses: () => Promise<void>;
   resumeCurrentRun: (targetJobId?: string) => Promise<boolean>;
@@ -446,6 +447,14 @@ function isGenerationSubagentTool(tool: string | undefined): boolean {
   if (!tool) return false;
   const normalized = tool.toLowerCase();
   return normalized === "task" || normalized.endsWith(":task");
+}
+
+function hasHydratedAgentHistory(run?: RunSnapshot): boolean {
+  return Boolean(
+    run &&
+      typeof run.lastSeq === "number" &&
+      run.agentMessages.some((message) => message.role === "assistant" || message.role === "system"),
+  );
 }
 
 function applyRunToCurrent(run?: RunSnapshot) {
@@ -1284,6 +1293,49 @@ export const useGeneration = create<GenerationState>()(
             [jobId]: socket,
           },
         }));
+      },
+      async hydrateAgentHistory(jobId, options) {
+        const existingRun = get().runs[jobId];
+        if (!options?.force && hasHydratedAgentHistory(existingRun)) {
+          return;
+        }
+        const response = await fetchJobEvents(jobId, 0);
+        const nextMessagesById = new Map<string, GenerationAgentMessage>();
+        for (const message of existingRun?.agentMessages ?? []) {
+          nextMessagesById.set(message.id, message);
+        }
+        let lastSeq = Math.max(existingRun?.lastSeq ?? 0, response.last_seq ?? 0);
+        for (const event of response.events) {
+          const seq = typeof event.seq === "number" ? event.seq : undefined;
+          if (typeof seq === "number" && seq > lastSeq) {
+            lastSeq = seq;
+          }
+          const message = agentMessageFromEvent(event);
+          if (message) {
+            nextMessagesById.set(message.id, message);
+          }
+        }
+        const agentMessages = Array.from(nextMessagesById.values())
+          .sort((left, right) => left.created_at - right.created_at)
+          .slice(-PERSISTED_LOG_LIMIT);
+        if (lastSeq > 0) {
+          seenSeqByJob.set(jobId, lastSeq);
+        }
+        set((state) => {
+          const currentRun = state.runs[jobId] ?? createRunSnapshot(jobId);
+          const updatedRun: RunSnapshot = {
+            ...currentRun,
+            agentMessages,
+            lastSeq: lastSeq || currentRun.lastSeq,
+          };
+          return {
+            ...(state.jobId === jobId ? applyRunToCurrent(updatedRun) : {}),
+            runs: {
+              ...state.runs,
+              [jobId]: updatedRun,
+            },
+          };
+        });
       },
       async hydrateResult(jobId) {
         const historyEntry = get().history.find((entry) => entry.jobId === jobId);
