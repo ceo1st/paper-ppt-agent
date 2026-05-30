@@ -12,6 +12,7 @@ import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from backend.config import settings
 from backend.runtime.resource_gates import llm_request_slot
 from backend.usage.tracker import current_usage_context, usage_tracker
 
@@ -71,7 +72,16 @@ class OpenAIProvider(LLMProvider):
         openai_settings: dict | None = None,
     ) -> None:
         normalized_base_url = normalize_openai_base_url(base_url)
-        self._client = AsyncOpenAI(api_key=api_key, base_url=normalized_base_url)
+        # Explicit timeout + max_retries=0: the project's call_with_retry owns
+        # retry/backoff, so leaving the SDK's default 2 internal retries on
+        # would double-retry and, combined with the 600s default timeout,
+        # let a hung upstream block a single call for up to 30 min.
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=normalized_base_url,
+            timeout=settings.llm_request_timeout,
+            max_retries=0,
+        )
         self._api_key = api_key
         self._provider_name = provider_name
         self._base_url = (normalized_base_url or "").rstrip("/")
@@ -446,7 +456,7 @@ class OpenAIProvider(LLMProvider):
     async def _create_chat_completion(self, kwargs: dict):
         try:
             return await call_with_retry(
-                lambda: self._client.chat.completions.create(**kwargs)
+                lambda: self._consume_chat_stream(kwargs)
             )
         except BaseException as exc:
             if self._should_use_raw_compat_fallback(kwargs, exc):
@@ -457,7 +467,7 @@ class OpenAIProvider(LLMProvider):
             for index, fallback in enumerate(fallbacks):
                 try:
                     return await call_with_retry(
-                        lambda: self._client.chat.completions.create(**fallback)
+                        lambda: self._consume_chat_stream(fallback)
                     )
                 except BaseException as fallback_exc:
                     if (
@@ -465,6 +475,76 @@ class OpenAIProvider(LLMProvider):
                         or not self._is_parameter_compat_error(fallback_exc)
                     ):
                         raise
+            raise
+
+    def _is_stream_options_error(self, exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return "stream_options" in text or "include_usage" in text
+
+    async def _consume_chat_stream(self, kwargs: dict):
+        """Run a chat completion in streaming mode, accumulating it into a
+        non-streaming response shape the rest of ``chat()`` already expects.
+
+        A single buffered (non-streamed) response forces the upstream to
+        withhold all bytes until the full completion is ready; a long
+        generation then trips a proxy read timeout (e.g. Cloudflare 524 at
+        120s) even though the model is still working. Streaming keeps bytes
+        flowing so the timeout never fires. ``include_usage`` asks the server
+        for a final usage chunk so token accounting survives the switch.
+        """
+        stream_kwargs = dict(kwargs)
+        stream_kwargs["stream"] = True
+        stream_kwargs.setdefault("stream_options", {"include_usage": True})
+
+        async def run(create_kwargs: dict):
+            content_parts: list[str] = []
+            finish_reason = None
+            usage = None
+            response_id = None
+            model_name = None
+            stream = await self._client.chat.completions.create(**create_kwargs)
+            async for chunk in stream:
+                if response_id is None:
+                    response_id = getattr(chunk, "id", None)
+                if model_name is None:
+                    model_name = getattr(chunk, "model", None)
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    usage = chunk_usage
+                for choice in getattr(chunk, "choices", None) or []:
+                    delta = getattr(choice, "delta", None)
+                    delta_content = getattr(delta, "content", None) if delta else None
+                    if delta_content:
+                        content_parts.append(delta_content)
+                    choice_finish = getattr(choice, "finish_reason", None)
+                    if choice_finish:
+                        finish_reason = choice_finish
+            usage_ns = None
+            if usage is not None:
+                usage_ns = SimpleNamespace(
+                    prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
+                    completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+                )
+            message = SimpleNamespace(role="assistant", content="".join(content_parts))
+            return SimpleNamespace(
+                id=response_id,
+                object="chat.completion",
+                model=model_name or kwargs.get("model"),
+                choices=[
+                    SimpleNamespace(index=0, finish_reason=finish_reason, message=message)
+                ],
+                usage=usage_ns,
+            )
+
+        try:
+            return await run(stream_kwargs)
+        except BaseException as exc:
+            # Some OpenAI-compatible gateways reject stream_options. Retry
+            # once without it: we lose usage accounting but keep streaming.
+            if "stream_options" in stream_kwargs and self._is_stream_options_error(exc):
+                retry_kwargs = dict(stream_kwargs)
+                retry_kwargs.pop("stream_options", None)
+                return await run(retry_kwargs)
             raise
 
     async def _parse_chat_completion(
