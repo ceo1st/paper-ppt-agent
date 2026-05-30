@@ -19,6 +19,7 @@ import shutil
 import sys
 import threading
 import tomllib
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -214,6 +215,7 @@ class PersistentAgentSession:
         self._ready = threading.Event()
         self._session_id: str | None = resume_session_id
         self._active = True
+        self._accepting_feedback = False
         self._worker_thread: threading.Thread | None = None
         self._caller_loop: asyncio.AbstractEventLoop | None = None
         # Callback invoked for every SDK message.  Can be swapped at
@@ -248,10 +250,13 @@ class PersistentAgentSession:
             )
         if self._usage_totals.model:
             self._emit(_agent_usage_progress_event(self._usage_totals))
-        await self.send_message(initial_prompt)
+        self._accepting_feedback = True
+        self._prompt_queue.put(initial_prompt)
 
     async def send_message(self, prompt: str, *, interrupt_current: bool = False) -> None:
         """Inject a prompt and optionally interrupt an in-flight response."""
+        if not self.can_accept_feedback:
+            raise RuntimeError("Agent session is not accepting feedback.")
         self._prompt_queue.put(prompt)
         if interrupt_current:
             self._interrupt_event.set()
@@ -267,6 +272,11 @@ class PersistentAgentSession:
     @property
     def session_id(self) -> str | None:
         return self._session_id
+
+    @property
+    def can_accept_feedback(self) -> bool:
+        thread_alive = self._worker_thread is None or self._worker_thread.is_alive()
+        return self._active and self._accepting_feedback and thread_alive
 
     @session_id.setter
     def session_id(self, value: str | None) -> None:
@@ -407,6 +417,7 @@ class PersistentAgentSession:
 
                 # -- First chunk: process the initial prompt.
                 await client.query(first_prompt)
+                self._accepting_feedback = True
                 outcome = await self._receive_claude_response(
                     client,
                     interrupt_on_feedback=True,
@@ -502,6 +513,7 @@ class PersistentAgentSession:
                 return
             self._emit(exc)
         finally:
+            self._accepting_feedback = False
             self._emit(_SESSION_DONE)
 
     async def _receive_claude_response(
@@ -548,8 +560,22 @@ class PersistentAgentSession:
                 return
 
         interrupt_watcher = asyncio.create_task(_interrupt_when_requested())
+        idle_timeout = _agent_turn_idle_timeout()
+        iterator = client.receive_response().__aiter__()
         try:
-            async for message in client.receive_response():
+            while True:
+                try:
+                    message = await _next_agent_stream_item(iterator, idle_timeout)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    try:
+                        await client.interrupt()
+                    except Exception:
+                        logger.exception("Failed to interrupt timed-out Claude session")
+                    raise TimeoutError(
+                        f"Agent turn produced no activity for {idle_timeout}s."
+                    ) from None
                 if self._cancel_event.is_set():
                     return _ClaudeResponseOutcome(feedback=pending_feedback)
 
@@ -716,6 +742,7 @@ class PersistentAgentSession:
                         model=model,
                         sandbox_policy=sandbox_policy,
                     )
+                    self._accepting_feedback = True
                     turn_interrupted = False
                     async def _interrupt_codex_when_requested() -> None:
                         nonlocal turn_interrupted
@@ -734,15 +761,25 @@ class PersistentAgentSession:
 
                     interrupt_watcher = asyncio.create_task(_interrupt_codex_when_requested())
                     try:
-                        async for event in turn.stream():
+                        async for event in _iter_agent_stream_with_timeout(
+                            turn.stream(),
+                            _agent_turn_idle_timeout(),
+                        ):
                             if self._cancel_event.is_set():
                                 await turn.interrupt()
                                 break
                             self._emit(event)
                             queued_feedback = self._drain_user_message()
                             if queued_feedback is not None:
-                                await turn.steer(TextInput(queued_feedback))
+                                await turn.steer(TextInput(_live_feedback_prompt(queued_feedback)))
+                    except TimeoutError:
+                        try:
+                            await turn.interrupt()
+                        except Exception:
+                            logger.exception("Failed to interrupt timed-out Codex turn")
+                        raise
                     finally:
+                        self._accepting_feedback = False
                         if not interrupt_watcher.done():
                             interrupt_watcher.cancel()
                         await asyncio.gather(interrupt_watcher, return_exceptions=True)
@@ -755,6 +792,7 @@ class PersistentAgentSession:
         except BaseException as exc:
             self._emit(exc)
         finally:
+            self._accepting_feedback = False
             self._emit(_SESSION_DONE)
 
     # -- Helpers -----------------------------------------------------------
@@ -822,6 +860,30 @@ def _is_false_success_error(exc: BaseException) -> bool:
     if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 6:
         return True
     return False
+
+
+def _agent_turn_idle_timeout() -> float | None:
+    timeout = float(getattr(settings, "agent_turn_idle_timeout", 300) or 0)
+    return timeout if timeout > 0 else None
+
+
+async def _next_agent_stream_item(iterator: Any, timeout: float | None) -> Any:
+    if timeout is None:
+        return await iterator.__anext__()
+    return await asyncio.wait_for(iterator.__anext__(), timeout=timeout)
+
+
+async def _iter_agent_stream_with_timeout(stream: Any, timeout: float | None):
+    iterator = stream.__aiter__()
+    while True:
+        try:
+            yield await _next_agent_stream_item(iterator, timeout)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Agent turn produced no activity for {timeout}s."
+            ) from None
 
 
 def _is_claude_turn_limit_result(message: Any) -> bool:
@@ -1411,16 +1473,18 @@ async def _prepare_agent_source_assets(project_dir: Path) -> None:
     assets_dir = project_dir / "source_assets"
     if not script.exists():
         return
+    python_path = _agent_python_path()
+    command = [
+        str(python_path),
+        str(script),
+        "--task",
+        "agent_task.json",
+        "--out",
+        "source_assets",
+    ]
     try:
         cp = await arun(
-            [
-                str(_agent_python_path()),
-                str(script),
-                "--task",
-                "agent_task.json",
-                "--out",
-                "source_assets",
-            ],
+            command,
             timeout=180.0,
             cwd=project_dir,
             env=_agent_runtime_env(project_dir),
@@ -1428,42 +1492,53 @@ async def _prepare_agent_source_assets(project_dir: Path) -> None:
         )
     except Exception as exc:  # noqa: BLE001 - extraction is advisory
         assets_dir.mkdir(parents=True, exist_ok=True)
-        await awrite_text(
-            assets_dir / "extraction_error.json",
-            json.dumps(
-                {
-                    "error": str(exc) or exc.__class__.__name__,
-                    "notes": [
-                        "Automatic source asset extraction failed before the Agent runtime.",
-                        "The Agent may rerun skills/paper-ppt-generate/scripts/extract_paper_assets.py after inspecting the source.",
-                    ],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        await _write_agent_extraction_error(
+            assets_dir,
+            {
+                "error": str(exc) or exc.__class__.__name__,
+                "error_type": exc.__class__.__name__,
+                "traceback": traceback.format_exc(),
+                "command": command,
+                "python_path": str(python_path),
+                "script": str(script),
+                "cwd": str(project_dir),
+                "notes": [
+                    "Automatic source asset extraction failed before the Agent runtime.",
+                    "The Agent may rerun skills/paper-ppt-generate/scripts/extract_paper_assets.py after inspecting the source.",
+                ],
+            },
         )
         return
 
     if cp.returncode != 0:
         assets_dir.mkdir(parents=True, exist_ok=True)
-        await awrite_text(
-            assets_dir / "extraction_error.json",
-            json.dumps(
-                {
-                    "returncode": cp.returncode,
-                    "stdout": cp.stdout[-4000:],
-                    "stderr": cp.stderr[-4000:],
-                    "notes": [
-                        "Automatic source asset extraction exited non-zero before the Agent runtime.",
-                        "The Agent should inspect this error and may rerun the script manually.",
-                    ],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        await _write_agent_extraction_error(
+            assets_dir,
+            {
+                "returncode": cp.returncode,
+                "command": command,
+                "python_path": str(python_path),
+                "script": str(script),
+                "cwd": str(project_dir),
+                "stdout": cp.stdout[-4000:],
+                "stderr": cp.stderr[-4000:],
+                "notes": [
+                    "Automatic source asset extraction exited non-zero before the Agent runtime.",
+                    "The Agent should inspect this error and may rerun the script manually.",
+                ],
+            },
         )
+        return
+
+    (assets_dir / "extraction_error.json").unlink(missing_ok=True)
+
+
+async def _write_agent_extraction_error(assets_dir: Path, payload: dict[str, Any]) -> None:
+    await awrite_text(
+        assets_dir / "extraction_error.json",
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _copy_template_reference_for_agent(template: Any, project_dir: Path) -> None:
@@ -1544,6 +1619,24 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "detail_profile": detail_profile,
         },
         "agent_policy": {
+            "user_instruction_policy": {
+                "priority": "highest_product_requirement",
+                "technical_wrapper": (
+                    "The backend exports through SVG/PPTX artifacts, but that technical wrapper "
+                    "is an implementation constraint rather than a reason to ignore the user's "
+                    "requested visual direction."
+                ),
+                "conflict_resolution": (
+                    "When user wording conflicts with the SVG output format, preserve the user's "
+                    "underlying goal and adapt it into valid SVG/PPTX-compatible artifacts. For "
+                    "example, requests such as no SVG, image-only, GPT image, or more beautiful "
+                    "should become an image-led, polished visual system inside SVG slide wrappers."
+                ),
+                "status_language": (
+                    "Do not tell the user that the output contract overrides their preference. "
+                    "Briefly state the adapted plan in user terms."
+                ),
+            },
             "do_not_call_backend_provider_models": True,
             "icons_default_enabled": True,
             "generate_slides_in_parallel_when_useful": True,
@@ -2798,6 +2891,7 @@ Workspace contract:
 - First read `agent_task.json`.
 - The current working directory is the generated workspace. If you need to open the skill file manually, read `{skill_path}` and follow its output contract.
 - Do not call this application's legacy provider pipeline or ask for external model API keys.
+- User intent priority: `agent_task.json.presentation.user_instruction` is the highest product requirement after hard export validity. The SVG/PPTX output files are a technical wrapper for this app, not a reason to override the user's requested visual direction. If the user asks for no SVG, image-only, GPT-image-style, or "more beautiful", preserve that goal by making an image-led, polished deck inside valid SVG slide wrappers; do not reply that the output contract wins over the user.
 - Use subagents/parallel work when the runtime supports it. When deep research is enabled, SubAgents are required unless the Task/SubAgent tool is unavailable or fails.
 - External research: {external}. Deep research: {deep}. Agent post-generation review: {review}.
 - Detail contract: {detail_profile["label"]}; {detail_profile["slide_count_guidance"]} Content slides should carry {detail_profile["evidence_points_per_content_slide"]} concrete evidence point(s), {detail_profile["bullets_per_content_slide"]} bullets/claims, and {detail_profile["visuals_per_content_slide"]} visual argument(s) each when the paper supports it.
@@ -2808,7 +2902,7 @@ Workspace contract:
 - Source asset contract: before writing `manuscript.md`, read `source_assets/paper.md` and `source_assets/figures.md`/`figures.json` if they exist. If they are missing or stale, run `{extractor_path}` with `agent_task.json.paths.python`. Pick paper figures by caption/page/context/dimensions and put them into SVG using the exact `href` values from the manifest, usually `../source_assets/images/<file>`.
 - When external or deep research is enabled, a backend research gate rejects authoring writes until all required research artifacts above exist. Write those research artifacts first, then send a user-visible progress reply summarizing what you learned, source limitations, and how this changes the planned deck. Do not merely echo query/API counts.
 - Reply language for status/reporting: {language}.
-- During generation, periodically check `agent_feedback/` for user guidance files. Treat newer guidance as higher priority unless it conflicts with the output contract.
+- During generation, periodically check `agent_feedback/` for user guidance files. Treat newer guidance as higher priority; if wording conflicts with technical export constraints, adapt the implementation while preserving the user's underlying goal.
 - Work in stages. After completing each major milestone (e.g. finishing a slide, completing the manuscript, or finishing a batch of slides), briefly note what you accomplished. The system will automatically pause and resume your work, allowing the user to provide guidance between stages. When you resume, do NOT repeat completed work — pick up exactly where you left off.
 - If the source is a PDF, do not use the Read tool directly on the PDF binary. Use `agent_task.json.paths.python` or `PAPER_PPT_PYTHON` to run Python/PyMuPDF (`fitz`) first, and only report password protection when `doc.needs_pass` is true.
 - For PDF figures, rely on `source_assets/figures.json`: it includes figure image hrefs, captions, page numbers, bounding boxes, and nearby text so non-multimodal runtimes can still select meaningful figures.

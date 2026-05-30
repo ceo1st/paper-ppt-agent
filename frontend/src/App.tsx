@@ -11,14 +11,14 @@ export default function App() {
 
   useEffect(() => {
     setRouteAnimating(true);
-    const timer = window.setTimeout(() => setRouteAnimating(false), 360);
+    const timer = window.setTimeout(() => setRouteAnimating(false), 260);
     return () => window.clearTimeout(timer);
-  }, [location.pathname, location.search]);
+  }, [location.pathname]);
 
   return (
     <>
       <div className={`route-loading-bar ${routeAnimating ? "route-loading-bar-active" : ""}`} />
-      <div key={`${location.pathname}${location.search}`} className="route-motion-layer">
+      <div className={`route-motion-layer ${routeAnimating ? "route-motion-layer-active" : ""}`}>
         <Routes location={location}>
           <Route path="/" element={<GeneratePage />} />
           <Route path="/generate" element={<GeneratePage />} />

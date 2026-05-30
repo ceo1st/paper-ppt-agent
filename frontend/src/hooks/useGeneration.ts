@@ -402,14 +402,25 @@ function isGenerationAgentMessage(value: unknown): value is GenerationAgentMessa
   );
 }
 
-function agentMessageFromEvent(event: JobEvent): GenerationAgentMessage | null {
+function agentMessageFromEvent(event: JobEvent, options: { includeFeedback?: boolean } = {}): GenerationAgentMessage | null {
   if (event.stage !== "agent") {
     return null;
   }
+  const includeFeedback = options.includeFeedback !== false;
   const data = event.data as Record<string, unknown>;
   const feedback = data.agent_feedback as { message?: unknown } | undefined;
   if (feedback && typeof feedback.message === "string") {
-    return null;
+    if (!includeFeedback) {
+      return null;
+    }
+    return {
+      id: `${event.job_id}:feedback:${event.seq ?? event.ts ?? feedback.message}`,
+      role: "user",
+      content: feedback.message,
+      created_at: event.ts ? event.ts * 1000 : Date.now(),
+      kind: "message",
+      data: feedback as Record<string, unknown>,
+    };
   }
   const rawAgent = data.agent_event as Record<string, unknown> | undefined;
   const payload = (rawAgent?.data && typeof rawAgent.data === "object" ? rawAgent.data : data) as Record<string, unknown>;
@@ -1075,7 +1086,7 @@ export const useGeneration = create<GenerationState>()(
                 }
               }
               let agentMessages = currentRun.agentMessages;
-              const agentMessage = !isSnapshot ? agentMessageFromEvent(event) : null;
+              const agentMessage = !isSnapshot ? agentMessageFromEvent(event, { includeFeedback: false }) : null;
               if (agentMessage && !agentMessages.some((item) => item.id === agentMessage.id)) {
                 agentMessages = [...agentMessages, agentMessage].slice(-PERSISTED_LOG_LIMIT);
               }

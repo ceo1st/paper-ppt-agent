@@ -121,6 +121,11 @@ async def job_updates(websocket: WebSocket, job_id: str) -> None:
             if seq and seq in replayed_seqs:
                 continue  # already delivered during replay
             await websocket.send_json(event)
+            job = session_manager.get_job(job_id)
+            if job and job.status in TERMINAL_STATUSES and not session_manager.is_job_running(job_id):
+                await _drain_queue_into_socket(websocket, queue, {seq} if seq else set())
+                await websocket.close(code=1000)
+                return
     except WebSocketDisconnect:
         pass
     except Exception:
