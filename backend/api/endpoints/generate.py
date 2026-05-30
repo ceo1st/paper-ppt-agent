@@ -399,6 +399,28 @@ async def send_agent_generation_feedback(
             detail="Feedback message is required.",
         )
 
+    # Route only to an Agent session that is still able to consume a message.
+    # The live session object can remain registered while the backend is
+    # validating/finalizing/exporting, after the Agent turn itself has already
+    # ended. In that state returning "injected" is misleading: the user sees
+    # "received" but no Agent will act on it.
+    from backend.orchestrator.agent_session_registry import get as get_live_session
+
+    live_session = get_live_session(job_id)
+    can_inject_live = bool(
+        live_session is not None
+        and getattr(live_session, "can_accept_feedback", False)
+    )
+    if live_session is not None and not can_inject_live and job.status != "complete":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "The Agent has finished its current turn and the deck is being "
+                "finalized/exported. Wait for completion, then send guidance "
+                "as a revision."
+            ),
+        )
+
     from backend.runtime import aensure_dir, awrite_text
 
     target_dir = Path(job.project_dir) / "agent_feedback"
@@ -426,11 +448,7 @@ async def send_agent_generation_feedback(
         },
     )
 
-    # NEW: Route to live session if agent is actively running.
-    from backend.orchestrator.agent_session_registry import get as get_live_session
-    live_session = get_live_session(job_id)
-
-    if live_session is not None:
+    if can_inject_live and live_session is not None:
         was_paused = job.status == "paused"
         runtime = _agent_runtime_from_job(job)
         await live_session.send_message(
@@ -526,9 +544,6 @@ async def interrupt_agent_generation(job_id: str) -> AgentFeedbackResponse:
         )
     if job.status in {"complete", "error", "cancelled"}:
         return AgentFeedbackResponse(job_id=job_id, status=job.status)
-    if job.status == "pausing":
-        return AgentFeedbackResponse(job_id=job_id, status="interrupting")
-
     from backend.orchestrator.agent_session_registry import get as get_live_session
 
     live_session = get_live_session(job_id)
@@ -547,22 +562,7 @@ async def interrupt_agent_generation(job_id: str) -> AgentFeedbackResponse:
         session_manager.mark_job_cancelled(job_id, "Agent task cancelled.")
         return AgentFeedbackResponse(job_id=job_id, status="cancelled")
 
-    await live_session.interrupt()
-    session_manager.record_event(
-        job_id,
-        {
-            "type": "progress",
-            "job_id": job_id,
-            "stage": "agent",
-            "status": "progress",
-            "message": "Interrupt requested. Waiting for the Agent to pause...",
-            "progress": job.progress,
-            "slides_completed": job.slides_completed,
-            "total_slides": job.total_slides,
-            "data": {"agent_interrupt": True},
-        },
-        status="pausing",
-        message="Pausing Agent...",
-        error=None,
-    )
-    return AgentFeedbackResponse(job_id=job_id, status="interrupting")
+    await live_session.close()
+    session_manager.cancel_job(job_id)
+    session_manager.mark_job_cancelled(job_id, "Agent task cancelled.")
+    return AgentFeedbackResponse(job_id=job_id, status="cancelled")

@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     # Number of parallel equation renders allowed in flight.
     equation_render_concurrency: int = 4
     agent_runtime_ready_timeout: int = 30
+    # Max time an Agent SDK turn may stay silent before the backend treats it
+    # as stuck and interrupts the turn. Set <=0 to disable.
+    agent_turn_idle_timeout: int = 300
 
     # ── WebSocket ────────────────────────────────────────────────────────
     ws_subscriber_queue_size: int = 1024

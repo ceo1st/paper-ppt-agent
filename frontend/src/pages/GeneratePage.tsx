@@ -187,7 +187,6 @@ export function GeneratePage() {
     clearUploadSession,
     startGeneration,
     cancelCurrentRun,
-    interruptCurrentAgent,
     sendAgentFeedback,
     connect,
     resumeCurrentRun,
@@ -710,11 +709,7 @@ export function GeneratePage() {
             onStop={async () => {
               setCancelLoading(true);
               try {
-                if (job?.status === "paused") {
-                  await cancelCurrentRun();
-                } else {
-                  await interruptCurrentAgent();
-                }
+                await cancelCurrentRun();
               } finally {
                 setCancelLoading(false);
               }
@@ -1082,13 +1077,10 @@ export function GenerationAgentConsole({
     () => activityItems.some((item) => item.kind === "group" && item.state === "active"),
     [activityItems],
   );
-  const isPaused = job?.status === "paused";
   const isPausing = job?.status === "pausing";
-  const stopLabel = isPaused
-    ? t("generation.agent.cancel")
-    : isPausing
-      ? t("generation.agent.pausing")
-      : t("generation.agent.pause");
+  const stopLabel = isPausing
+    ? t("generation.agent.canceling")
+    : t("generation.agent.cancel");
   const showThinking = Boolean(
     job &&
     !terminal &&

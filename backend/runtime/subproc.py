@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -143,15 +144,32 @@ async def arun(
     else:
         creation_kwargs["start_new_session"] = True
 
-    proc = await asyncio.create_subprocess_exec(
-        *argv_list,
-        stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd_str,
-        env=dict(env) if env is not None else None,
-        **creation_kwargs,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv_list,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd_str,
+            env=dict(env) if env is not None else None,
+            **creation_kwargs,
+        )
+    except NotImplementedError:
+        logger.warning(
+            "asyncio subprocess transport is unavailable; using threaded fallback for %s",
+            argv_list[0],
+        )
+        return await asyncio.to_thread(
+            _run_subprocess_threaded,
+            argv_list,
+            timeout,
+            cwd_str,
+            dict(env) if env is not None else None,
+            stdin,
+            check,
+            encoding,
+            creation_kwargs,
+        )
 
     try:
         try:
@@ -189,3 +207,83 @@ async def arun(
         raise SubprocessError(argv_list, rc, stdout, stderr)
 
     return CompletedProcess(argv=argv_list, returncode=rc, stdout=stdout, stderr=stderr)
+
+
+def _run_subprocess_threaded(
+    argv_list: list[str],
+    timeout: float,
+    cwd_str: str | None,
+    env: dict[str, str] | None,
+    stdin: bytes | None,
+    check: bool,
+    encoding: str,
+    creation_kwargs: dict,
+) -> CompletedProcess:
+    proc = subprocess.Popen(
+        argv_list,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd_str,
+        env=env,
+        **creation_kwargs,
+    )
+    try:
+        stdout_b, stderr_b = proc.communicate(input=stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_tree_sync(proc)
+        try:
+            stdout_b, stderr_b = proc.communicate(timeout=2.0)
+        except (subprocess.TimeoutExpired, Exception):
+            stdout_b, stderr_b = b"", b""
+        stdout = stdout_b.decode(encoding, errors="replace") if stdout_b else ""
+        stderr = stderr_b.decode(encoding, errors="replace") if stderr_b else ""
+        raise SubprocessTimeout(argv_list, timeout, stdout, stderr)
+    finally:
+        if proc.poll() is None:
+            _terminate_tree_sync(proc)
+
+    stdout = stdout_b.decode(encoding, errors="replace") if stdout_b else ""
+    stderr = stderr_b.decode(encoding, errors="replace") if stderr_b else ""
+    rc = proc.returncode if proc.returncode is not None else -1
+
+    if check and rc != 0:
+        raise SubprocessError(argv_list, rc, stdout, stderr)
+
+    return CompletedProcess(argv=argv_list, returncode=rc, stdout=stdout, stderr=stderr)
+
+
+def _terminate_tree_sync(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is not None:
+        return
+
+    _killpg = getattr(os, "killpg", None)
+    _sigterm = getattr(signal, "SIGTERM", 15)
+    _sigkill = getattr(signal, "SIGKILL", 9)
+
+    try:
+        if _IS_WINDOWS or _killpg is None:
+            proc.terminate()
+        else:
+            _killpg(proc.pid, _sigterm)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+    try:
+        proc.wait(timeout=5.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    try:
+        if _IS_WINDOWS or _killpg is None:
+            proc.kill()
+        else:
+            _killpg(proc.pid, _sigkill)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+    try:
+        proc.wait(timeout=2.0)
+    except Exception:
+        pass

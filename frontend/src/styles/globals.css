@@ -243,7 +243,10 @@ button:disabled {
 
 .route-motion-layer {
   min-height: 100vh;
-  animation: route-enter 320ms var(--motion-spring) both;
+}
+
+.route-motion-layer-active {
+  animation: route-enter 260ms var(--motion-ease) both;
 }
 
 .route-loading-bar {
@@ -262,7 +265,7 @@ button:disabled {
 }
 
 .route-loading-bar-active {
-  animation: route-progress 360ms var(--motion-ease) both;
+  animation: route-progress 260ms var(--motion-ease) both;
 }
 
 .spin {
@@ -294,14 +297,12 @@ button:disabled {
 
 @keyframes route-enter {
   from {
-    opacity: 0;
-    transform: translateY(6px);
-    filter: blur(2px);
+    opacity: 0.82;
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
-    filter: blur(0);
   }
 }
 
