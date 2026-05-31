@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from anthropic import AsyncAnthropic
 from pydantic import BaseModel
 
+from backend.config import settings
 from backend.runtime.resource_gates import llm_request_slot
 from backend.usage.tracker import current_usage_context, usage_tracker
 
@@ -28,8 +29,18 @@ from .types import (
 class AnthropicProvider(LLMProvider):
     """Anthropic provider wrapping AsyncAnthropic."""
 
-    def __init__(self, api_key: str) -> None:
-        self._client = AsyncAnthropic(api_key=api_key)
+    def __init__(self, api_key: str, base_url: str | None = None) -> None:
+        # Explicit timeout + max_retries=0: call_with_retry owns retry/backoff,
+        # so the SDK's default 2 internal retries plus 600s timeout would let a
+        # hung upstream block a single call for up to 30 min.
+        kwargs: dict = {
+            "api_key": api_key,
+            "timeout": settings.llm_request_timeout,
+            "max_retries": 0,
+        }
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = AsyncAnthropic(**kwargs)
 
     def _split_system_and_messages(
         self, messages: list[LLMMessage]
