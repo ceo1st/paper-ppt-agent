@@ -252,3 +252,33 @@ def test_agent_task_does_not_persist_research_api_keys(tmp_path: Path) -> None:
         "TAVILY_API_KEY": "tavily-secret",
         "SERPAPI_KEY": "serp-secret",
     }
+
+
+def test_agent_prompt_prioritizes_user_visual_intent_over_svg_wrapper(tmp_path: Path) -> None:
+    request = SimpleNamespace(
+        canvas_format="ppt169",
+        source_type="pdf",
+        language="zh",
+        num_pages=8,
+        detail_level="normal",
+        style="academic",
+        template_id=None,
+        instruction="不用 SVG，只用 GPT image 生成，更美观",
+        style_overrides=None,
+        research_config=None,
+    )
+
+    task = agent_pipeline._build_agent_task(
+        tmp_path,
+        tmp_path / "sources" / "paper.pdf",
+        request,
+        {},
+    )
+    prompt = agent_pipeline._build_runtime_prompt(tmp_path, request, {})
+
+    policy = task["agent_policy"]["user_instruction_policy"]
+    assert policy["priority"] == "highest_product_requirement"
+    assert "technical wrapper" in policy["technical_wrapper"]
+    assert "image-led" in policy["conflict_resolution"]
+    assert "User intent priority" in prompt
+    assert "do not reply that the output contract wins over the user" in prompt

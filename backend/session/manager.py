@@ -153,7 +153,7 @@ class SessionManager:
         job = Job(
             id=job_id,
             session_id=parent.session_id,
-            project_dir=project_dir or parent.project_dir,
+            project_dir=project_dir,
             parent_job_id=parent_job_id,
             feedback_history=history,
             provider=parent.provider,
@@ -176,10 +176,17 @@ class SessionManager:
         return list(self._jobs.values())
 
     def is_job_running(self, job_id: str) -> bool:
-        """True if there is a live monitor task or isolated worker process."""
+        """True if there is a live monitor task, scheduler task, or worker process."""
         task = self._tasks.get(job_id)
         if task and not task.done():
             return True
+        try:
+            from backend.runtime.scheduler import get_scheduler
+
+            if get_scheduler().is_active(job_id):
+                return True
+        except Exception:
+            pass
         try:
             from backend.runtime.worker_process_registry import is_job_process_alive
 
@@ -229,6 +236,7 @@ class SessionManager:
             from backend.runtime.scheduler import get_scheduler
 
             if get_scheduler().cancel(job_id):
+                self.mark_job_cancelled(job_id)
                 return True
         except Exception:
             pass

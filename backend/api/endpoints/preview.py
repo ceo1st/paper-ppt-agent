@@ -9,6 +9,7 @@ import shutil
 import xml.etree.ElementTree as ET
 from typing import Any
 from urllib.parse import quote
+import uuid
 
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
@@ -44,7 +45,7 @@ from backend.runtime import aoffload, apath_exists, aread_bytes, aread_text, awr
 from backend.session.manager import session_manager
 
 router = APIRouter()
-_preview_response_lock = asyncio.Lock()
+_preview_response_locks: dict[str, asyncio.Lock] = {}
 
 
 class SlideUpdateRequest(BaseModel):
@@ -330,6 +331,7 @@ async def delete_preview_slide(job_id: str, slide_index: int) -> PreviewResponse
         if 1 <= slide_index <= len(slide_files):
             svg_path = slide_files[slide_index - 1]
             _delete_svg_slide_assets(project_dir, svg_path)
+            _renumber_svg_slide_assets(project_dir, _editable_slide_files(project_dir)[0])
         return await _build_preview_response(job_id, project_dir, str(paths.deck_pptx), "complete")
 
     if len(slide_files) <= 1:
@@ -340,6 +342,7 @@ async def delete_preview_slide(job_id: str, slide_index: int) -> PreviewResponse
     svg_path = slide_files[slide_index - 1]
     try:
         _delete_svg_slide_assets(project_dir, svg_path)
+        _renumber_svg_slide_assets(project_dir, _editable_slide_files(project_dir)[0])
     except OSError as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete slide: {exc}") from exc
     normalized_status = "complete" if job.output_path and Path(job.output_path).exists() else job.status
@@ -595,7 +598,7 @@ async def _build_preview_response(
     *,
     last_slide_only: bool = False,
 ) -> PreviewResponse:
-    async with _preview_response_lock:
+    async with _preview_response_lock_for(job_id, project_dir):
         return await _build_preview_response_locked(
             job_id,
             project_dir,
@@ -603,6 +606,15 @@ async def _build_preview_response(
             status_value,
             last_slide_only=last_slide_only,
         )
+
+
+def _preview_response_lock_for(job_id: str, project_dir: Path | None) -> asyncio.Lock:
+    key = str(project_dir.resolve()) if project_dir is not None else job_id
+    lock = _preview_response_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _preview_response_locks[key] = lock
+    return lock
 
 
 async def _build_preview_response_locked(
@@ -809,6 +821,64 @@ def _delete_svg_slide_assets(project_dir: Path, svg_path: Path) -> None:
     svg_path.unlink(missing_ok=True)
     document_path.unlink(missing_ok=True)
     notes_path.unlink(missing_ok=True)
+
+
+def _renumber_svg_slide_assets(project_dir: Path, slide_files: list[Path]) -> None:
+    """Keep SVG slide filenames and sidecars aligned with 1-based UI indexes."""
+    operations: list[tuple[Path, Path, Path, Path, Path, Path]] = []
+    source_paths = {path.resolve() for path in slide_files}
+    for index, svg_path in enumerate(slide_files, start=1):
+        next_svg_path = svg_path.with_name(_renumbered_svg_name(svg_path, index))
+        if next_svg_path == svg_path:
+            continue
+        if next_svg_path.exists() and next_svg_path.resolve() not in source_paths:
+            raise OSError(f"Cannot renumber slide over existing file: {next_svg_path.name}")
+        operations.append(
+            (
+                svg_path,
+                next_svg_path,
+                _slide_document_path(project_dir, svg_path),
+                _slide_document_path(project_dir, next_svg_path),
+                _slide_notes_path(project_dir, svg_path),
+                _slide_notes_path(project_dir, next_svg_path),
+            )
+        )
+    if not operations:
+        return
+
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for paths in operations:
+            for old_path, _new_path in ((paths[0], paths[1]), (paths[2], paths[3]), (paths[4], paths[5])):
+                if not old_path.exists():
+                    continue
+                temp_path = old_path.with_name(f".__renumber_{uuid.uuid4().hex}_{old_path.name}")
+                old_path.replace(temp_path)
+                staged.append((temp_path, old_path))
+        for paths in operations:
+            for old_path, new_path in ((paths[0], paths[1]), (paths[2], paths[3]), (paths[4], paths[5])):
+                temp_path = next((temp for temp, original in staged if original == old_path), None)
+                if temp_path is None:
+                    continue
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path.replace(new_path)
+    except Exception:
+        for temp_path, original_path in reversed(staged):
+            if temp_path.exists() and not original_path.exists():
+                original_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path.replace(original_path)
+        raise
+
+
+def _renumbered_svg_name(svg_path: Path, index: int) -> str:
+    stem = svg_path.stem
+    match = re.match(r"^0*\d+([_-].*)?$", stem)
+    if match:
+        return f"{index:02d}{match.group(1) or '_custom'}.svg"
+    match = re.match(r"^(slide[_-])0*\d+(.*)$", stem, flags=re.IGNORECASE)
+    if match:
+        return f"{match.group(1)}{index:02d}{match.group(2)}.svg"
+    return f"{index:02d}_{stem or 'custom'}.svg"
 
 
 def _slides_from_retained_events(job_id: str) -> list[PreviewSlide]:

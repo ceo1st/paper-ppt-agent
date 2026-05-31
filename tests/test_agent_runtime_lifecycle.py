@@ -37,6 +37,7 @@ async def test_claude_live_feedback_interrupts_a_silent_response(tmp_path) -> No
     emitted: list[object] = []
     session.on_message = emitted.append
     client = _WaitingClaudeClient(emit_interrupt_result=True)
+    session._accepting_feedback = True
 
     await session.send_message("continue now", interrupt_current=True)
     outcome = await asyncio.wait_for(

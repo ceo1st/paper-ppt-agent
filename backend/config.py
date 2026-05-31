@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     # parallelism still exists; this prevents two active parallel jobs from
     # multiplying into a provider/network storm.
     llm_max_concurrent_requests: int = 4
+    # Per-request timeout (seconds) for LLM SDK calls. The SDK default is
+    # 600s with 2 internal retries, so a hung upstream (common with API
+    # aggregators/proxies) silently blocks a slide for up to 30 min. We set
+    # an explicit bound so genuine hangs surface and retry within minutes,
+    # while leaving headroom for slow reasoning calls (strategy ~227s seen,
+    # may run longer for dense papers on slower models like Opus).
+    llm_request_timeout: float = 420.0
 
     # ── Job scheduling ───────────────────────────────────────────────────
     # Backlog cap for queued jobs; a 16th queued job returns 429.
@@ -124,6 +131,9 @@ class Settings(BaseSettings):
     # Number of parallel equation renders allowed in flight.
     equation_render_concurrency: int = 4
     agent_runtime_ready_timeout: int = 30
+    # Max time an Agent SDK turn may stay silent before the backend treats it
+    # as stuck and interrupts the turn. Set <=0 to disable.
+    agent_turn_idle_timeout: int = 300
 
     # ── WebSocket ────────────────────────────────────────────────────────
     ws_subscriber_queue_size: int = 1024

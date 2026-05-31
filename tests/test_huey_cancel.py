@@ -42,3 +42,22 @@ def test_cancelled_queued_job_is_not_started(monkeypatch) -> None:
 
     assert tasks.run_generation_job.call_local("job-1", "request.json") == 0
     assert not called
+
+
+def test_refine_job_does_not_point_at_parent_workspace_before_clone(monkeypatch) -> None:
+    manager = object.__new__(SessionManager)
+    parent = Job(
+        id="parent-1",
+        session_id="session-1",
+        status="complete",
+        project_dir="workspaces/parent-1",
+        feedback_history=["make it shorter"],
+    )
+    manager._jobs = {parent.id: parent}
+    monkeypatch.setattr(manager, "_persist_state", lambda: None)
+
+    refine = manager.create_refine_job(parent.id, "make slide 3 visual")
+
+    assert refine is not None
+    assert refine.project_dir is None
+    assert refine.feedback_history == ["make it shorter", "make slide 3 visual"]

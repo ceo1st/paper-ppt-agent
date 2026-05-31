@@ -36,6 +36,7 @@ class _LiveSession:
         self.interrupt_calls = 0
         self.closed = False
         self.messages: list[tuple[str, bool]] = []
+        self.can_accept_feedback = True
 
     async def interrupt(self) -> None:
         self.interrupt_calls += 1
@@ -61,7 +62,7 @@ def _job(tmp_path, status: str) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_agent_interrupt_waits_for_runtime_ack_before_paused(monkeypatch, tmp_path) -> None:
+async def test_agent_interrupt_cancels_running_agent_job(monkeypatch, tmp_path) -> None:
     manager = _SessionManager(_job(tmp_path, "generation"))
     live = _LiveSession()
     monkeypatch.setattr(generate, "session_manager", manager)
@@ -69,9 +70,10 @@ async def test_agent_interrupt_waits_for_runtime_ack_before_paused(monkeypatch, 
 
     response = await generate.interrupt_agent_generation("job-1")
 
-    assert response.status == "interrupting"
-    assert manager.job.status == "pausing"
-    assert live.interrupt_calls == 1
+    assert response.status == "cancelled"
+    assert manager.job.status == "cancelled"
+    assert live.closed
+    assert manager.cancelled
 
 
 @pytest.mark.asyncio
@@ -104,3 +106,21 @@ async def test_feedback_resumes_paused_agent(monkeypatch, tmp_path) -> None:
     assert manager.job.status == "generation"
     assert live.messages == [("continue with the research", False)]
     assert any(event.get("data", {}).get("agent_resumed") for event in manager.events)
+
+
+@pytest.mark.asyncio
+async def test_feedback_rejects_live_session_that_no_longer_accepts_messages(monkeypatch, tmp_path) -> None:
+    manager = _SessionManager(_job(tmp_path, "export"))
+    live = _LiveSession()
+    live.can_accept_feedback = False
+    monkeypatch.setattr(generate, "session_manager", manager)
+    monkeypatch.setattr(agent_session_registry, "get", lambda _job_id: live)
+
+    with pytest.raises(generate.HTTPException) as exc:
+        await generate.send_agent_generation_feedback(
+            "job-1",
+            generate.AgentFeedbackRequest(message="change the ending"),
+        )
+
+    assert exc.value.status_code == 409
+    assert not manager.events
