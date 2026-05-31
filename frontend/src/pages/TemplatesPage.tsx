@@ -1535,6 +1535,13 @@ function UploadCard({
     setSkipGuideNextTime(false);
   }, [mode]);
 
+  useEffect(() => {
+    if (!uploading) return;
+    setGuideMode(null);
+    setPendingFile(null);
+    setSkipGuideNextTime(false);
+  }, [uploading]);
+
   const requestFileSelection = () => {
     if (dismissedGuides[mode]) {
       inputRef.current?.click();
@@ -1554,10 +1561,14 @@ function UploadCard({
     if (pendingFile) {
       const file = pendingFile;
       setPendingFile(null);
-      void handleFile(file);
+      window.setTimeout(() => {
+        void handleFile(file);
+      }, 0);
       return;
     }
-    inputRef.current?.click();
+    window.setTimeout(() => {
+      inputRef.current?.click();
+    }, 0);
   };
 
   const onDragOver = (event: DragEvent<HTMLDivElement>) => {
