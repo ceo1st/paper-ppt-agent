@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import httpx
 from openai import AsyncOpenAI
+from openai.lib._parsing import type_to_response_format_param
 from pydantic import BaseModel
 
 from backend.config import settings
@@ -511,6 +512,27 @@ class OpenAIProvider(LLMProvider):
         buffered_kwargs.pop("stream_options", None)
         return await self._client.chat.completions.create(**buffered_kwargs)
 
+    def _chat_kwargs_with_response_format(
+        self,
+        kwargs: dict,
+        response_format: type[BaseModel],
+    ) -> dict:
+        structured_kwargs = dict(kwargs)
+        structured_kwargs["response_format"] = type_to_response_format_param(
+            response_format
+        )
+        return structured_kwargs
+
+    def _attach_parsed_response_format(
+        self,
+        resp,
+        response_format: type[BaseModel],
+    ):
+        content = resp.choices[0].message.content or ""
+        parsed = response_format.model_validate_json(content)
+        resp.choices[0].message.parsed = parsed
+        return resp
+
     async def _consume_chat_stream(self, kwargs: dict):
         """Run a chat completion in streaming mode, accumulating it into a
         non-streaming response shape the rest of ``chat()`` already expects.
@@ -599,12 +621,40 @@ class OpenAIProvider(LLMProvider):
         kwargs: dict,
         response_format: type[BaseModel],
     ):
+        structured_kwargs = self._chat_kwargs_with_response_format(
+            kwargs,
+            response_format,
+        )
+        try:
+            resp = await call_with_retry(
+                lambda: self._consume_chat_stream(structured_kwargs)
+            )
+            return self._attach_parsed_response_format(resp, response_format)
+        except BaseException as exc:
+            if self._should_use_raw_compat_fallback(structured_kwargs, exc):
+                resp = await self._create_raw_chat_completion(structured_kwargs)
+                return self._attach_parsed_response_format(resp, response_format)
+            fallbacks = self._fallback_chat_kwargs(structured_kwargs)
+            if not fallbacks or not self._is_parameter_compat_error(exc):
+                raise
+            for index, fallback in enumerate(fallbacks):
+                try:
+                    resp = await call_with_retry(
+                        lambda: self._consume_chat_stream(fallback)
+                    )
+                    return self._attach_parsed_response_format(resp, response_format)
+                except BaseException as fallback_exc:
+                    if (
+                        index >= len(fallbacks) - 1
+                        or not self._is_parameter_compat_error(fallback_exc)
+                    ):
+                        raise
+            raise
+
+    async def _create_stream(self, kwargs: dict):
         try:
             return await call_with_retry(
-                lambda: self._client.beta.chat.completions.parse(
-                    **kwargs,
-                    response_format=response_format,
-                )
+                lambda: self._client.chat.completions.create(**kwargs)
             )
         except BaseException as exc:
             fallbacks = self._fallback_chat_kwargs(kwargs)
@@ -613,10 +663,7 @@ class OpenAIProvider(LLMProvider):
             for index, fallback in enumerate(fallbacks):
                 try:
                     return await call_with_retry(
-                        lambda: self._client.beta.chat.completions.parse(
-                            **fallback,
-                            response_format=response_format,
-                        )
+                        lambda: self._client.chat.completions.create(**fallback)
                     )
                 except BaseException as fallback_exc:
                     if (
@@ -734,24 +781,7 @@ class OpenAIProvider(LLMProvider):
         )
 
         async with llm_request_slot():
-            stream = None
-            try:
-                stream = await self._client.chat.completions.create(**kwargs)
-            except BaseException as exc:
-                fallbacks = self._fallback_chat_kwargs(kwargs)
-                if not fallbacks or not self._is_parameter_compat_error(exc):
-                    raise
-                for index, fallback in enumerate(fallbacks):
-                    try:
-                        stream = await self._client.chat.completions.create(**fallback)
-                        break
-                    except BaseException as fallback_exc:
-                        if (
-                            index >= len(fallbacks) - 1
-                            or not self._is_parameter_compat_error(fallback_exc)
-                        ):
-                            raise
-            assert stream is not None
+            stream = await self._create_stream(kwargs)
             async for chunk in stream:
                 delta = chunk.choices[0].delta
                 if delta.content:
