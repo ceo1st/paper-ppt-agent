@@ -55,6 +55,7 @@ frontend/.cache/
 *.tsbuildinfo
 
 # Testing
+tests/
 .pytest_cache/
 .pytest_tmp/
 .test-runtime/
