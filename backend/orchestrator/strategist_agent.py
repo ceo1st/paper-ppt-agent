@@ -242,20 +242,29 @@ def _has_required_design_spec_section(text: str, roman: str, title: str) -> bool
     pattern = rf"(?im)^#+\s*{roman}\.\s+.*{re.escape(title)}"
     if re.search(pattern, text):
         return True
-    if roman != "XI":
-        return False
 
-    # LLMs sometimes keep section XI but rename it to equivalent execution notes.
-    return bool(
-        re.search(
-            r"(?im)^#+\s*XI\.\s+.*(?:"
+    # LLMs sometimes rename sections to equivalent titles.  Accept common
+    # aliases so that a valid design spec is not rejected on a wording variant.
+    _SECTION_FALLBACKS: dict[str, str] = {
+        "I": (
+            r"Project\s+Information|Project\s+Overview|Project\s+Details|"
+            r"Project\s+Summary|项目信息|项目概况|项目概览|项目详情|项目概述"
+        ),
+        "XI": (
             r"Technical|Constraints?|Requirements?|Guidelines?|Notes?|"
             r"Specification|Implementation|Execution|Rendering|SVG|Output|"
             r"技术|约束|限制|要求|规范|实现|执行|渲染|输出"
-            r")",
-            text,
+        ),
+    }
+    fallback = _SECTION_FALLBACKS.get(roman)
+    if fallback:
+        return bool(
+            re.search(
+                rf"(?im)^#+\s*{roman}\.\s+.*(?:{fallback})",
+                text,
+            )
         )
-    )
+    return False
 
 
 _PAGE_TYPE_ALIASES: dict[str, tuple[str, ...]] = {
