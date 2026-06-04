@@ -14,6 +14,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
 
+from rank_bm25 import BM25Okapi
+
 from backend.orchestrator.deck_plan import DeckPlan
 from backend.orchestrator.manuscript import extract_page_type, page_title, split_manuscript_pages
 from backend.parser.paper_model import ParsedPaper, PaperFigure, PaperSection
@@ -23,18 +25,171 @@ MAX_SECTION_BRIEF_CHARS = 1400
 MAX_CARD_TEXT_CHARS = 520
 MAX_EVIDENCE_CARDS = 180
 SLIDE_CONTEXT_CARD_COUNT = 7
+BM25_K1 = 1.5
+BM25_B = 0.75
 
-_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{2,}|[\u4e00-\u9fff]{2,}")
+_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]*|[\u4e00-\u9fff]+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？.!?])\s+|\n{2,}")
 _EVIDENCE_RE = re.compile(
     r"(?i)(\d|%|table|figure|fig\.?|equation|formula|experiment|benchmark|"
     r"dataset|baseline|sota|accuracy|pass@|rating|flops|cache|latency|"
     r"ablation|parameter|token|training|inference|图|表|公式|实验|指标|"
-    r"数据集|基线|消融|参数|训练|推理|精度|缓存|延迟)"
+    r"数据集|基线|消融|参数|训练|推理|精度|缓存|延迟|"
+    r"study|survey|interview|participant|sample|cohort|trial|case|finding|"
+    r"theme|theory|hypothesis|measure|scale|regression|correlation|"
+    r"significant|confidence interval|effect size|qualitative|quantitative|"
+    r"研究|调查|访谈|参与者|样本|队列|试验|案例|发现|主题|理论|假设|"
+    r"量表|回归|相关|显著|置信区间|效应|质性|定量|定性)"
 )
 _METHOD_RE = re.compile(
     r"(?i)(method|architecture|framework|algorithm|module|attention|optimizer|"
-    r"training|pipeline|mechanism|方法|架构|算法|模块|注意力|优化器|机制|流程)"
+    r"training|pipeline|mechanism|approach|design|protocol|procedure|model|"
+    r"construct|coding|方法|架构|算法|模块|注意力|优化器|机制|流程|"
+    r"路径|设计|方案|模型|构念|编码)"
+)
+_STOPWORDS = frozenset(
+    {
+        "about",
+        "above",
+        "after",
+        "again",
+        "against",
+        "also",
+        "among",
+        "and",
+        "are",
+        "because",
+        "between",
+        "both",
+        "but",
+        "can",
+        "could",
+        "does",
+        "during",
+        "each",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "into",
+        "its",
+        "may",
+        "more",
+        "most",
+        "not",
+        "our",
+        "out",
+        "over",
+        "paper",
+        "page",
+        "result",
+        "results",
+        "section",
+        "show",
+        "shows",
+        "slide",
+        "study",
+        "such",
+        "than",
+        "that",
+        "the",
+        "their",
+        "then",
+        "there",
+        "these",
+        "this",
+        "through",
+        "using",
+        "was",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "with",
+    }
+)
+_QUERY_INTENTS = {
+    "result": re.compile(
+        r"(?i)(result|finding|outcome|effect|impact|evidence|analysis|"
+        r"结果|发现|影响|效果|证据|分析)"
+    ),
+    "method": re.compile(
+        r"(?i)(method|approach|design|framework|model|theory|construct|procedure|sample|participant|"
+        r"方法|路径|设计|框架|模型|理论|构念|流程|样本|参与者)"
+    ),
+    "limitation": re.compile(
+        r"(?i)(limitation|future|assumption|threat|bias|constraint|"
+        r"局限|未来|假设|偏差|限制)"
+    ),
+}
+_CONCEPT_GROUPS = (
+    frozenset(
+        {
+            "participant",
+            "participants",
+            "sample",
+            "samples",
+            "respondent",
+            "respondents",
+            "cohort",
+            "population",
+            "subject",
+            "subjects",
+            "参与者",
+            "样本",
+            "受试者",
+            "人群",
+        }
+    ),
+    frozenset(
+        {
+            "interview",
+            "interviews",
+            "qualitative",
+            "theme",
+            "themes",
+            "coding",
+            "coded",
+            "访谈",
+            "质性",
+            "主题",
+            "编码",
+        }
+    ),
+    frozenset({"survey", "questionnaire", "scale", "measure", "measurement", "调查", "问卷", "量表", "测量"}),
+    frozenset(
+        {
+            "theory",
+            "framework",
+            "model",
+            "construct",
+            "mechanism",
+            "理论",
+            "框架",
+            "模型",
+            "构念",
+            "机制",
+        }
+    ),
+    frozenset(
+        {
+            "finding",
+            "findings",
+            "outcome",
+            "outcomes",
+            "effect",
+            "effects",
+            "impact",
+            "发现",
+            "结果",
+            "效果",
+            "影响",
+        }
+    ),
+    frozenset({"limitation", "limitations", "future", "assumption", "bias", "局限", "未来", "假设", "偏差"}),
 )
 
 
@@ -204,20 +359,72 @@ def retrieve_evidence_cards(
     *,
     limit: int = SLIDE_CONTEXT_CARD_COUNT,
 ) -> list[EvidenceCard]:
-    query_terms = _terms(query)
-    if not query_terms:
+    query_tokens = _tokens(query)
+    if not query_tokens:
         return list(memory.evidence_cards[:limit])
-    ranked: list[tuple[float, EvidenceCard]] = []
-    for card in memory.evidence_cards:
-        card_terms = _terms(f"{card.section} {card.kind} {card.text}")
-        overlap = len(query_terms.intersection(card_terms))
-        if overlap <= 0:
-            score = card.score * 0.05
-        else:
-            score = overlap * 4.0 + min(card.score, 8.0)
-        ranked.append((score, card))
-    ranked.sort(key=lambda item: item[0], reverse=True)
+    ranked = _rank_cards(query, query_tokens, memory.evidence_cards)
     return [card for score, card in ranked[:limit] if score > 0]
+
+
+def _rank_cards(
+    query: str,
+    query_tokens: list[str],
+    cards: Iterable[EvidenceCard],
+) -> list[tuple[float, EvidenceCard]]:
+    card_list = list(cards)
+    doc_tokens = [_tokens(_card_search_text(card)) for card in card_list]
+    bm25_scores = _bm25_scores(query_tokens, doc_tokens)
+
+    query_terms = set(query_tokens)
+    query_intents = _query_intents(query)
+    query_concepts = _concept_matches(query_terms)
+    query_phrases = _token_phrases(query_tokens)
+
+    ranked: list[tuple[float, EvidenceCard]] = []
+    for card, tokens, bm25_score in zip(card_list, doc_tokens, bm25_scores, strict=True):
+        token_terms = set(tokens)
+        score = bm25_score
+
+        # Keep the original extraction score as a weak prior: good evidence remains
+        # available as fallback, but lexical relevance drives the ordering.
+        score += min(card.score, 10.0) * 0.08
+
+        section_terms = set(_tokens(card.section))
+        score += min(len(query_terms.intersection(section_terms)), 3) * 0.7
+
+        phrase_hits = sum(1 for phrase in query_phrases if phrase in _normalized_text(card.text))
+        score += min(phrase_hits, 3) * 0.8
+
+        if card.kind in query_intents:
+            score += 1.2
+        elif "result" in query_intents and card.kind in {"evidence", "table"}:
+            score += 0.8
+        elif "method" in query_intents and card.kind in {"equation", "context"}:
+            score += 0.4
+
+        shared_concepts = sum(1 for concept in query_concepts if token_terms.intersection(concept))
+        score += min(shared_concepts, 3) * 0.65
+
+        if token_terms.intersection(query_terms):
+            score += min(len(token_terms.intersection(query_terms)), 5) * 0.18
+
+        ranked.append((score, card))
+
+    ranked.sort(key=lambda item: (item[0], item[1].score), reverse=True)
+    return ranked
+
+
+def _bm25_scores(query_tokens: list[str], docs: list[list[str]]) -> list[float]:
+    if not docs:
+        return []
+    if not any(docs):
+        return [0.0 for _ in docs]
+    bm25 = BM25Okapi(docs, k1=BM25_K1, b=BM25_B)
+    return [float(score) for score in bm25.get_scores(query_tokens)]
+
+
+def _card_search_text(card: EvidenceCard) -> str:
+    return f"{card.section} {card.section} {card.kind} {card.text}"
 
 
 def _cards_for_section(section: PaperSection, section_index: int) -> list[EvidenceCard]:
@@ -289,7 +496,11 @@ def _sentence_score(sentence: str) -> float:
 
 
 def _sentence_kind(sentence: str) -> str:
-    if re.search(r"(?i)(result|benchmark|accuracy|pass@|rating|experiment|实验|结果|指标)", sentence):
+    if re.search(
+        r"(?i)(result|finding|outcome|effect|impact|benchmark|accuracy|pass@|rating|experiment|"
+        r"结果|发现|效果|影响|指标|实验)",
+        sentence,
+    ):
         return "result"
     if _METHOD_RE.search(sentence):
         return "method"
@@ -382,8 +593,68 @@ def _slide_figure_hints(page_content: str, memory: ProviderMemory) -> list[str]:
     return hints[:5]
 
 
-def _terms(text: str) -> set[str]:
-    return {token.lower() for token in _WORD_RE.findall(text or "") if len(token.strip()) >= 2}
+def _tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for match in _TOKEN_RE.finditer(text or ""):
+        raw = match.group(0)
+        if not raw:
+            continue
+        if _is_cjk(raw):
+            tokens.extend(_cjk_tokens(raw))
+            continue
+        normalized = raw.lower().strip("-_")
+        parts = [part for part in re.split(r"[-_]+", normalized) if part]
+        candidates = [normalized, *parts] if len(parts) > 1 else [normalized]
+        for candidate in candidates:
+            token = _normalize_token(candidate)
+            if len(token) >= 2 and token not in _STOPWORDS:
+                tokens.append(token)
+    return tokens
+
+
+def _normalize_token(token: str) -> str:
+    token = token.lower().strip()
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 4 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _is_cjk(value: str) -> bool:
+    return all("\u4e00" <= char <= "\u9fff" for char in value)
+
+
+def _cjk_tokens(value: str) -> list[str]:
+    if len(value) <= 2:
+        return [value]
+    tokens = [value]
+    tokens.extend(value[i : i + 2] for i in range(0, len(value) - 1))
+    return tokens
+
+
+def _query_intents(query: str) -> set[str]:
+    return {intent for intent, pattern in _QUERY_INTENTS.items() if pattern.search(query or "")}
+
+
+def _concept_matches(tokens: set[str]) -> tuple[frozenset[str], ...]:
+    return tuple(group for group in _CONCEPT_GROUPS if tokens.intersection(group))
+
+
+def _token_phrases(tokens: list[str]) -> tuple[str, ...]:
+    phrases: list[str] = []
+    for size in (3, 2):
+        for idx in range(0, max(len(tokens) - size + 1, 0)):
+            phrase = " ".join(tokens[idx : idx + size])
+            if len(phrase) >= 7:
+                phrases.append(phrase)
+    return tuple(dict.fromkeys(phrases[:12]))
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(_tokens(text))
 
 
 def _trim(text: str, limit: int) -> str:

@@ -42,6 +42,7 @@ dependencies = [
     "psutil>=5.9.0",
     "huey>=3.0.1",
     "peewee>=4.0.6",
+    "rank-bm25>=0.2.2",
 ]
 
 [project.optional-dependencies]

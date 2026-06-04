@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from backend.orchestrator.manuscript import normalize_manuscript_slide_delimiters
-from backend.orchestrator.provider_memory import build_provider_memory, build_slide_contexts
+from backend.orchestrator.provider_memory import build_provider_memory, build_slide_contexts, retrieve_evidence_cards
 from backend.parser.paper_model import ParsedPaper, PaperFigure, PaperSection
 
 
@@ -76,3 +76,42 @@ def test_slide_context_retrieves_relevant_cards(tmp_path: Path) -> None:
     assert "KV cache" in contexts[1] or "cache" in contexts[1]
     assert "fig_001_p1" in contexts[1]
     assert "source=caption_region" in contexts[1]
+
+
+def test_evidence_retrieval_handles_non_cs_academic_language() -> None:
+    paper = ParsedPaper(
+        title="Classroom Belonging and Relational Security",
+        authors=["B. Scholar"],
+        abstract="We examine how relational security shapes classroom belonging.",
+        sections=[
+            PaperSection(
+                title="Theoretical Framework",
+                level=1,
+                content=(
+                    "Attachment theory describes how caregiver responsiveness shapes internal working models "
+                    "of security and exploration in early childhood. The framework connects relational "
+                    "expectations with later emotion regulation."
+                ),
+            ),
+            PaperSection(
+                title="Qualitative Findings",
+                level=1,
+                content=(
+                    "In a qualitative interview study with 42 teachers and caregivers, participants described "
+                    "three recurring themes: trust-building routines, classroom transitions, and family communication. "
+                    "Survey responses showed perceived belonging increased by 18% after the intervention."
+                ),
+            ),
+        ],
+    )
+    memory = build_provider_memory(paper)
+
+    cards = retrieve_evidence_cards(
+        "teacher interview themes and caregiver communication",
+        memory,
+        limit=3,
+    )
+
+    assert cards
+    assert cards[0].section == "Qualitative Findings"
+    assert "recurring themes" in cards[0].text
