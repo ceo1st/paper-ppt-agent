@@ -24,7 +24,7 @@ MAX_COMPACT_PAPER_CHARS = 36000
 MAX_SECTION_BRIEF_CHARS = 1400
 MAX_CARD_TEXT_CHARS = 520
 MAX_EVIDENCE_CARDS = 180
-SLIDE_CONTEXT_CARD_COUNT = 7
+SLIDE_CONTEXT_CARD_COUNT = 5
 BM25_K1 = 1.5
 BM25_B = 0.75
 
@@ -191,6 +191,9 @@ _CONCEPT_GROUPS = (
     ),
     frozenset({"limitation", "limitations", "future", "assumption", "bias", "局限", "未来", "假设", "偏差"}),
 )
+_REFERENCE_SECTION_RE = re.compile(
+    r"(?i)^\s*(references|bibliography|works cited|参考文献|引用文献)\s*$"
+)
 
 
 @dataclass(frozen=True)
@@ -243,6 +246,8 @@ def build_provider_memory(paper: ParsedPaper) -> ProviderMemory:
     section_memories: list[SectionMemory] = []
 
     for section_index, section in enumerate(paper.sections, start=1):
+        if _REFERENCE_SECTION_RE.match(section.title):
+            continue
         section_cards = _cards_for_section(section, section_index)
         cards.extend(section_cards)
         brief = _section_brief(section, section_cards)
@@ -304,6 +309,7 @@ def build_slide_contexts(
     manuscript: str,
     memory: ProviderMemory | None,
     deck_plan: DeckPlan | None = None,
+    deck_brief: str = "",
 ) -> dict[int, str]:
     """Return compact evidence context for each manuscript page."""
     if memory is None:
@@ -323,15 +329,38 @@ def build_slide_contexts(
             )
             if part
         )
-        cards = retrieve_evidence_cards(query, memory, limit=SLIDE_CONTEXT_CARD_COUNT)
-        figure_lines = _slide_figure_hints(page, memory)
+        page_type = extract_page_type(page)
+        is_structural = page_type in {"cover", "chapter", "toc", "ending"}
+        cards = (
+            []
+            if is_structural
+            else retrieve_evidence_cards(
+                query,
+                memory,
+                limit=SLIDE_CONTEXT_CARD_COUNT,
+            )
+        )
+        relevant_sections = (
+            []
+            if is_structural
+            else _relevant_section_memories(query, cards, memory, limit=2)
+        )
+        brief_passages = (
+            []
+            if is_structural
+            else _relevant_brief_passages(query, deck_brief, limit=2)
+        )
+        figure_lines = [] if is_structural else _slide_figure_hints(page, memory)
         lines = [
             "## Provider Slide Working Memory",
             "",
-            "Use this scoped memory as evidence grounding. Prefer these cards over re-inferring from the full paper.",
+            "This is private grounding, not slide copy. Synthesize the manuscript; do not print card IDs, section labels, or this memory verbatim.",
             f"- Slide title: {page_title(page)}",
-            f"- Page type: {extract_page_type(page)}",
+            f"- Page type: {page_type}",
+            f"- Paper title: {memory.title}",
         ]
+        if memory.authors:
+            lines.append(f"- Authors: {', '.join(memory.authors)}")
         if slide_plan:
             lines.extend(
                 [
@@ -339,9 +368,26 @@ def build_slide_contexts(
                     f"- Density target: {slide_plan.density}",
                 ]
             )
+        if not is_structural and memory.abstract:
+            lines.extend(
+                [
+                    "",
+                    "### Paper-Level Anchor",
+                    _trim(memory.abstract, 900),
+                ]
+            )
+        if relevant_sections:
+            lines.extend(["", "### Relevant Source Sections"])
+            for section in relevant_sections:
+                lines.append(
+                    f"- {section.title}: {_trim(section.brief, 620)}"
+                )
+        if brief_passages:
+            lines.extend(["", "### Brief Claim Boundaries"])
+            lines.extend(f"- {_trim(passage, 620)}" for passage in brief_passages)
         if cards:
             lines.append("")
-            lines.append("### Relevant Evidence Cards")
+            lines.append("### Evidence Anchors")
             for card in cards:
                 figure_note = f" figures={', '.join(card.figure_ids)}" if card.figure_ids else ""
                 lines.append(f"- `{card.id}` [{card.kind}] {card.section}:{figure_note} {card.text}")
@@ -363,7 +409,98 @@ def retrieve_evidence_cards(
     if not query_tokens:
         return list(memory.evidence_cards[:limit])
     ranked = _rank_cards(query, query_tokens, memory.evidence_cards)
-    return [card for score, card in ranked[:limit] if score > 0]
+    return _select_diverse_cards(ranked, limit)
+
+
+def _select_diverse_cards(
+    ranked: list[tuple[float, EvidenceCard]],
+    limit: int,
+) -> list[EvidenceCard]:
+    selected: list[EvidenceCard] = []
+    section_counts: dict[str, int] = {}
+    kind_counts: dict[str, int] = {}
+    for score, card in ranked:
+        if score <= 0:
+            continue
+        if section_counts.get(card.section, 0) >= 3:
+            continue
+        if card.kind == "table" and kind_counts.get("table", 0) >= 2:
+            continue
+        selected.append(card)
+        section_counts[card.section] = section_counts.get(card.section, 0) + 1
+        kind_counts[card.kind] = kind_counts.get(card.kind, 0) + 1
+        if len(selected) >= limit:
+            break
+    if len(selected) < limit:
+        selected_ids = {card.id for card in selected}
+        for score, card in ranked:
+            if score <= 0 or card.id in selected_ids:
+                continue
+            selected.append(card)
+            selected_ids.add(card.id)
+            if len(selected) >= limit:
+                break
+    return selected
+
+
+def _relevant_section_memories(
+    query: str,
+    cards: list[EvidenceCard],
+    memory: ProviderMemory,
+    *,
+    limit: int,
+) -> list[SectionMemory]:
+    by_title = {section.title: section for section in memory.sections}
+    selected: list[SectionMemory] = []
+    seen: set[str] = set()
+    for card in cards:
+        section = by_title.get(card.section)
+        if section is None or section.title in seen:
+            continue
+        selected.append(section)
+        seen.add(section.title)
+        if len(selected) >= limit:
+            return selected
+    query_terms = set(_tokens(query))
+    ranked = sorted(
+        memory.sections,
+        key=lambda section: len(query_terms.intersection(_tokens(section.title))),
+        reverse=True,
+    )
+    for section in ranked:
+        if section.title in seen:
+            continue
+        selected.append(section)
+        seen.add(section.title)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _relevant_brief_passages(
+    query: str,
+    brief: str,
+    *,
+    limit: int,
+) -> list[str]:
+    if not brief.strip():
+        return []
+    passages = [
+        re.sub(r"\s+", " ", passage).strip(" -*")
+        for passage in re.split(r"\n{2,}|^#{1,6}\s+", brief, flags=re.MULTILINE)
+    ]
+    passages = [passage for passage in passages if len(passage) >= 30]
+    if not passages:
+        return []
+    query_tokens = _tokens(query)
+    scores = _bm25_scores(query_tokens, [_tokens(passage) for passage in passages])
+    ranked = sorted(
+        zip(scores, passages, strict=True),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    selected = [passage for score, passage in ranked if score > 0][:limit]
+    return selected or passages[:1]
 
 
 def _rank_cards(

@@ -43,6 +43,8 @@ validates SVGs, finalizes them, and exports PPTX.
    - `svg_output/slide_001.svg`
    - `svg_output/slide_002.svg`
    - etc.
+   Author each file directly and independently. Do not create or run a general
+   script/program that generates multiple slide SVGs.
 8. Optionally write speaker notes in `notes/slide_001.md`, etc.
 9. Write `agent_report.json` when finished.
 
@@ -52,6 +54,17 @@ validates SVGs, finalizes them, and exports PPTX.
 - Treat `agent_task.json.presentation.user_instruction` and newer `agent_feedback/` guidance as the highest product requirements after hard export validity. The backend needs SVG/PPTX-compatible files, but that is only the technical wrapper. Do not dismiss a user preference by saying the output contract requires SVG.
 - If user wording conflicts with the file format, preserve the user's underlying goal and translate it into valid artifacts. For example, requests such as "不用 SVG", "只用图像生成", "GPT image", or "更美观" should become an image-led, polished visual system inside SVG slide wrappers, using local/generated raster assets where available and SVG composition only as the export container.
 - Follow `agent_task.json.presentation.detail_profile` quantitatively. Treat its slide count, bullets per content slide, evidence points, visuals per content slide, and paper coverage fields as the content contract for the requested detail level.
+- Follow `agent_task.json.agent_policy.slide_authoring_policy` as a hard contract. Write one explicitly named slide SVG at a time. Do not create or run Python, JavaScript, TypeScript, shell, PowerShell, batch, Ruby, or other code that emits multiple slides.
+- Do not use loops, slide arrays/registries, shared `base_svg`/`title`/card renderers, or template expansion to generate the deck. Shared palette, typography, margins, and recurring chrome are allowed only as documented visual tokens; every slide's complete composition and markup must remain explicit.
+- Final slide SVGs must use inline SVG attributes. Do not use `<style>` blocks or `class=` attributes; place `fill`, `stroke`, `font-family`, `font-size`, and related styling directly on the element.
+- Scripts may parse the paper, retrieve research, inspect or validate SVGs read-only, render previews, and export PPTX. They may not write or regenerate slide SVGs.
+- Follow `agent_task.json.agent_policy.layout_policy` during generation, not only during review. Before writing SVG, put a concrete Region Plan in `design_spec.md` for each content slide, with final x/y/w/h boxes for figure, text, card, chart, and callout regions.
+- Content slides should use a shared grid, 24-40px gutters, and normally occupy 65-85% of the content area. Do not leave an empty quadrant, a short bullet list floating beside blank space, or a bottom callout detached from the main layout.
+- Before drawing a slide, perform a text-capacity preflight for every Region Plan box. Budget heading height, body line count, line-height, caption space, and top/bottom padding. Every line must end before the region's right edge and the last baseline plus descender space must remain above the region bottom.
+- Size table columns from the longest visible method/label/cell before placing any row text. A long method name must never collide with the first numeric column.
+- For Chinese body text, plan boxes that allow natural wrapping: about 24-36 CJK characters per ordinary line and 18-30 inside cards. Avoid several consecutive visible lines under 10 CJK characters unless they are labels, legends, or final paragraph lines.
+- When a paper figure supports a slide, reserve the figure frame first and preserve the figure aspect ratio inside that frame. Balance the adjacent text column with grouped callouts, captions, and a clear takeaway instead of treating evidence as pasted snippets.
+- Follow `agent_task.json.agent_policy.factual_rendering_policy`. Keep source numbers and units exact; do not turn `12,282,034` into `12.28M` or use K/M/B shorthand unless that notation appears in the paper. Do not invent or round chart ticks, metrics, sample sizes, dates, or model settings. Label derived values and show their inputs/calculation nearby.
 - Use `paper-ppt-deep-research` for deep work. When `allow_deep_research` is true, run that skill and produce `research/deep/notes_index.json` and `research/deep/brief.md` before authoring any deck output. Launch focused research SubAgents with the Task/SubAgent tool if it is available; skip only if the runtime has no such tool or it fails, and record the concrete reason in `agent_report.json.subagents`. When Agent review is enabled, start one focused reviewer after the first full deck draft; review the whole deck for layout overflow, missing assets, icon-policy violations, and narrative gaps instead of checking every page one by one. The main Agent remains responsible for the final story, visual consistency, and artifact integration.
 - Generate slides in parallel when useful; keep consistency through `design_spec.md`.
 - Icons are enabled but optional. Use them only when they clarify repeated semantic labels, process steps, comparison dimensions, legend keys, compact section markers, or actual diagram nodes. Do not add icons as filler decoration to ordinary bullet lists or dense evidence slides.
@@ -81,11 +94,15 @@ preview.
 ## Quality Bar
 
 - Every SVG must parse as XML and define a correct canvas `viewBox`.
+- Do not use `<style>`, `class=`, `mask`, `filter`, `clipPath`, `foreignObject`, scripts, event handlers, or remote URLs in final SVGs.
 - Keep all needed assets local or embedded by relative path.
 - Avoid external image URLs in final SVGs.
 - Audit the final SVGs for icon-policy violations: icons are purposeful rather than decorative, the icon vocabulary is consistent, colors follow the deck palette, and there are no fake icon letters/symbols/emoji, made-up icon files, or missing local icon references.
 - Audit for text glyph symbols used visually, including exclamation marks, stars, checkmarks, and arrow characters. Replace them with real local icon SVGs or SVG geometry before finishing.
 - Preserve template chrome when a template is provided.
 - Prefer clear academic storytelling over dense paper transcription.
+- Audit layout against the planned regions: major elements should align to the Region Plan, content slides should have balanced occupancy, paper figures should not be stretched, and Chinese line breaks should not create repeated short orphan lines or large dead zones.
+- Treat out-of-bounds text, text outside a card, table-column collision, and a last baseline below its assigned region as generation failures that must be repaired before completion.
+- Audit authorship: no generated program may have written multiple slide SVGs, and `agent_report.json.slide_authoring.direct_files` must list every final slide.
 - End only when all slides are present and `agent_report.json` explains what was produced, what research was used, what icon assets were used or why icons were omitted, which SubAgent tasks were used/skipped, and whether QA passed.
 - Include `paper_figures_used` in `agent_report.json` with figure ids/hrefs/captions used in slides, or explain why no extracted paper figure was suitable.

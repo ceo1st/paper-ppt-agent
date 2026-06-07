@@ -227,6 +227,11 @@ class CriticConfig:
     # offset between circle cy and text y exceeds font_size * this factor.
     icon_text_misalign_factor: float = 0.30
 
+    # Table/readout gutter: adjacent same-baseline text elements that include
+    # a numeric cell need enough visible separation to avoid labels visually
+    # merging with the first numeric column.
+    min_numeric_column_gutter: float = 24.0
+
 
 def _strip_ns(tag: str) -> str:
     """Strip XML namespace from a tag name."""
@@ -299,6 +304,16 @@ def _text_of(el: ET.Element) -> str:
     return "".join(parts).strip()
 
 
+def _looks_numeric_cell(text: str) -> bool:
+    normalized = text.strip()
+    return bool(
+        re.fullmatch(
+            r"[+\-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?",
+            normalized,
+        )
+    )
+
+
 def _font_size_of(el: ET.Element, inherited: float) -> float:
     raw = el.get("font-size")
     if raw:
@@ -317,19 +332,63 @@ def _font_size_of(el: ET.Element, inherited: float) -> float:
 
 
 def _text_bbox(el: ET.Element, font_size: float) -> tuple[float, float, float, float]:
-    """Estimate text bbox. y is treated as baseline; widen to include ascender."""
+    """Estimate text bbox, including direct tspan line positioning."""
     x = _float_attr(el, "x", 0.0)
     y = _float_attr(el, "y", 0.0)
-    text = _text_of(el)
-    w = _text_width_estimate(text, font_size)
-    h = font_size * 1.25
-    # anchor can shift x left/right
     anchor = (el.get("text-anchor") or "").strip().lower()
-    if anchor == "middle":
-        x = x - w / 2
-    elif anchor == "end":
-        x = x - w
-    return x, y - font_size, w, h
+    tspans = [child for child in list(el) if _strip_ns(child.tag) == "tspan"]
+    if not tspans:
+        text = _text_of(el)
+        w = _text_width_estimate(text, font_size)
+        h = font_size * 1.25
+        if anchor == "middle":
+            x = x - w / 2
+        elif anchor == "end":
+            x = x - w
+        return x, y - font_size, w, h
+
+    current_x = x
+    current_y = y
+    line_boxes: list[tuple[float, float, float, float]] = []
+    for tspan in tspans:
+        if tspan.get("x") is not None:
+            current_x = _float_attr(tspan, "x", current_x)
+        elif tspan.get("dx") is not None:
+            current_x += _float_attr(tspan, "dx", 0.0)
+        if tspan.get("y") is not None:
+            current_y = _float_attr(tspan, "y", current_y)
+        elif tspan.get("dy") is not None:
+            current_y += _float_attr(tspan, "dy", 0.0)
+
+        child_font_size = _font_size_of(tspan, font_size)
+        text = _text_of(tspan)
+        if not text:
+            continue
+        width = _text_width_estimate(text, child_font_size)
+        child_anchor = (tspan.get("text-anchor") or anchor).strip().lower()
+        left = current_x
+        if child_anchor == "middle":
+            left -= width / 2
+        elif child_anchor == "end":
+            left -= width
+        line_boxes.append(
+            (
+                left,
+                current_y - child_font_size,
+                width,
+                child_font_size * 1.25,
+            )
+        )
+        if tspan.get("x") is None:
+            current_x += width
+
+    if not line_boxes:
+        return x, y - font_size, 0.0, font_size * 1.25
+    left = min(box[0] for box in line_boxes)
+    top = min(box[1] for box in line_boxes)
+    right = max(box[0] + box[2] for box in line_boxes)
+    bottom = max(box[1] + box[3] for box in line_boxes)
+    return left, top, right - left, bottom - top
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
@@ -573,6 +632,14 @@ def check_svg(svg_content: str, config: CriticConfig | None = None) -> CriticRep
                 )
             )
 
+    if canvas:
+        _check_default_content_area_overflow(
+            root,
+            text_boxes,
+            canvas,
+            violations,
+        )
+
     # 4. Text-to-text overlap (coarse; tolerates small padding).
     seen_pairs: set[tuple[int, int]] = set()
     for i, (_, el_a, box_a) in enumerate(text_boxes):
@@ -584,6 +651,60 @@ def check_svg(svg_content: str, config: CriticConfig | None = None) -> CriticRep
                 continue
             seen_pairs.add(key)
             iou = _iou(box_a, box_b)
+            ax, ay, aw, ah = box_a
+            bx, by, bw, bh = box_b
+            horizontal_overlap = min(ax + aw, bx + bw) - max(ax, bx)
+            vertical_overlap = min(ay + ah, by + bh) - max(ay, by)
+            same_line_collision = (
+                horizontal_overlap > 2.0
+                and vertical_overlap > min(ah, bh) * 0.55
+                and abs((ay + ah) - (by + bh)) <= 5.0
+            )
+            if same_line_collision:
+                violations.append(
+                    Violation(
+                        rule="text_line_overlap",
+                        severity="error",
+                        detail=(
+                            "Two text elements collide on the same visual line. "
+                            "Reallocate table columns or merge intentional inline "
+                            "styling into one text element with tspans."
+                        ),
+                        element=_element_identifier(el_a),
+                        bbox=box_a,
+                    )
+                )
+                continue
+            same_baseline = (
+                vertical_overlap > min(ah, bh) * 0.50
+                and abs((ay + ah) - (by + bh)) <= 5.0
+            )
+            if same_baseline:
+                left_el, left_box = (el_a, box_a)
+                right_el, right_box = (el_b, box_b)
+                if box_b[0] < box_a[0]:
+                    left_el, left_box = (el_b, box_b)
+                    right_el, right_box = (el_a, box_a)
+                gap = right_box[0] - (left_box[0] + left_box[2])
+                numeric_pair = (
+                    _looks_numeric_cell(_text_of(left_el))
+                    or _looks_numeric_cell(_text_of(right_el))
+                )
+                if 0 <= gap < cfg.min_numeric_column_gutter and numeric_pair:
+                    violations.append(
+                        Violation(
+                            rule="text_column_tight_gutter",
+                            severity="warning",
+                            detail=(
+                                f"Adjacent same-row text has only {gap:.0f}px of "
+                                "gutter near a numeric/table cell. Recompute table "
+                                "column widths or move the numeric column right so "
+                                "labels do not visually merge with values."
+                            ),
+                            element=_element_identifier(left_el),
+                            bbox=left_box,
+                        )
+                    )
             if iou > cfg.text_overlap_iou:
                 violations.append(
                     Violation(
@@ -717,7 +838,13 @@ def check_svg(svg_content: str, config: CriticConfig | None = None) -> CriticRep
 
     # 4i. Inline emphasis drift: short colored keywords should not be
     #     separated from their surrounding sentence as distant sibling text.
-    _check_inline_emphasis_drift(text_boxes, violations)
+    _check_inline_emphasis_drift(
+        root,
+        text_boxes,
+        element_order,
+        canvas,
+        violations,
+    )
 
     # 5. Palette compliance (optional).
     if cfg.allowed_palette:
@@ -1092,24 +1219,111 @@ def _check_text_container_overflow(
 
         _container_order, container_el, container_bbox = owner
         x, y, w, h = container_bbox
-        pad = min(16.0, max(8.0, min(w, h) * 0.08))
-        padded = (x + pad, y + pad, max(0.0, w - pad * 2), max(0.0, h - pad * 2))
-        if _box_inside(text_bbox, padded, slack=3.0):
+        pad_x = min(16.0, max(8.0, min(w, h) * 0.08))
+        pad_y = min(10.0, max(4.0, h * 0.04))
+        padded = (
+            x + pad_x,
+            y + pad_y,
+            max(0.0, w - pad_x * 2),
+            max(0.0, h - pad_y * 2),
+        )
+        if not _box_inside(text_bbox, container_bbox, slack=2.0):
+            tx, ty, tw, th = text_bbox
+            violations.append(
+                Violation(
+                    rule="text_overflow_in_container",
+                    severity="error",
+                    detail=(
+                        "Text extends outside its local card/callout container. "
+                        f"Estimated text bbox ({tx:.0f},{ty:.0f},{tw:.0f},{th:.0f}) "
+                        f"does not fit inside container {_element_identifier(container_el)}. "
+                        "Wrap the line, shorten it, or enlarge/replan the container."
+                    ),
+                    element=_element_identifier(text_el),
+                    bbox=text_bbox,
+                )
+            )
             continue
-        tx, ty, tw, th = text_bbox
+        if not _box_inside(text_bbox, padded, slack=3.0):
+            tx, ty, tw, th = text_bbox
+            violations.append(
+                Violation(
+                    rule="text_container_tight_padding",
+                    severity="warning",
+                    detail=(
+                        "Text remains inside its card but uses less than the preferred "
+                        f"horizontal/vertical padding {pad_x:.0f}/{pad_y:.0f}px. "
+                        "Inspect readability before tightening the layout further."
+                    ),
+                    element=_element_identifier(text_el),
+                    bbox=text_bbox,
+                )
+            )
+
+
+def _check_default_content_area_overflow(
+    root: ET.Element,
+    text_boxes: list[tuple[int, ET.Element, tuple[float, float, float, float]]],
+    canvas: tuple[float, float],
+    violations: list[Violation],
+) -> None:
+    """Catch content containers crossing into the default footer band.
+
+    The executor contract reserves y=100..canvas_height-100 for content. Footer
+    text may live below that band, so only elements that start inside the
+    content area and cross its bottom boundary are flagged.
+    """
+    cw, ch = canvas
+    content_top = 100.0
+    content_bottom = ch - 100.0
+    slack = 2.0
+
+    for _order, text_el, bbox in text_boxes:
+        x, y, w, h = bbox
+        if y < content_top or y >= content_bottom:
+            continue
+        if y + h <= content_bottom + slack:
+            continue
         violations.append(
             Violation(
-                rule="text_overflow_in_container",
+                rule="content_area_overflow",
                 severity="error",
                 detail=(
-                    "Text extends outside its local card/callout container. "
-                    f"Estimated text bbox ({tx:.0f},{ty:.0f},{tw:.0f},{th:.0f}) "
-                    f"does not fit inside container {_element_identifier(container_el)} "
-                    f"with padding {pad:.0f}px. Wrap the line, shorten it, or use "
-                    "a wider layout."
+                    "Text starts in the content area but crosses into the footer "
+                    f"band below y={content_bottom:.0f}. Resize the region, reduce "
+                    "line count, or move the full block upward."
                 ),
                 element=_element_identifier(text_el),
-                bbox=text_bbox,
+                bbox=bbox,
+            )
+        )
+
+    for element in _iter_all(root):
+        if _strip_ns(element.tag) not in {"rect", "image"}:
+            continue
+        bbox = _shape_bbox(element)
+        if bbox is None:
+            continue
+        x, y, w, h = bbox
+        if w >= cw * 0.9 and h >= ch * 0.7:
+            continue
+        if w < 80 or h < 32:
+            continue
+        if y < content_top or y >= content_bottom:
+            continue
+        if y + h <= content_bottom + slack:
+            continue
+        violations.append(
+            Violation(
+                rule="content_area_overflow",
+                severity="error",
+                detail=(
+                    "A content container starts inside the content area but crosses "
+                    f"into the footer band below y={content_bottom:.0f}. Replan the "
+                    "row heights before placing its text."
+                ),
+                element=_element_identifier(element),
+                bbox=bbox,
             )
         )
 
@@ -1370,9 +1584,38 @@ def _check_bold_tspan_in_cjk(
 
 
 def _check_inline_emphasis_drift(
+    root: ET.Element,
     text_boxes: list[tuple[int, ET.Element, tuple[float, float, float, float]]],
+    element_order: dict[int, int],
+    canvas: tuple[float, float] | None,
     violations: list[Violation],
 ) -> None:
+    containers = (
+        _collect_text_containers(root, element_order, canvas)
+        if canvas is not None
+        else []
+    )
+    owner_keys: dict[int, int | None] = {}
+    for text_order, text_el, _bbox in text_boxes:
+        anchor_x = _float_attr(text_el, "x", 0.0)
+        anchor_y = (
+            _float_attr(text_el, "y", 0.0)
+            - _font_size_of(text_el, 16.0) * 0.4
+        )
+        owner_key: int | None = None
+        owner_area = float("inf")
+        for container_order, container_el, container_bbox in containers:
+            if container_order > text_order:
+                continue
+            if not _box_contains_point(container_bbox, anchor_x, anchor_y):
+                continue
+            _x, _y, width, height = container_bbox
+            area = width * height
+            if area < owner_area:
+                owner_key = id(container_el)
+                owner_area = area
+        owner_keys[id(text_el)] = owner_key
+
     rows: list[list[tuple[int, ET.Element, tuple[float, float, float, float]]]] = []
     for entry in sorted(text_boxes, key=lambda item: (item[2][1], item[2][0])):
         _order, el, bbox = entry
@@ -1396,6 +1639,8 @@ def _check_inline_emphasis_drift(
         for previous, current in zip(row, row[1:]):
             _prev_order, prev_el, prev_box = previous
             _cur_order, cur_el, cur_box = current
+            if owner_keys.get(id(prev_el)) != owner_keys.get(id(cur_el)):
+                continue
             cur_text = _text_of(cur_el)
             if not _looks_like_inline_emphasis(cur_el, cur_text):
                 continue

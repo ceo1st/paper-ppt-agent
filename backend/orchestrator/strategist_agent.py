@@ -388,6 +388,45 @@ def _design_spec_validation_error(
         if missing_types:
             return "Content Outline page types do not match manuscript: " + ", ".join(missing_types[:5])
 
+        missing_region_plan = []
+        missing_text_capacity = []
+        contradictory_region_plan = []
+        for item in expected_inventory:
+            if str(item["type"]) != "content":
+                continue
+            page_num = int(item["page"])
+            page_pattern = rf"(?is)\b(?:page|slide)\s*0*{page_num}\b(.+?)(?=\b(?:page|slide)\s*0*\d+\b|\Z)"
+            page_match = re.search(page_pattern, outline)
+            if not page_match:
+                continue
+            block = page_match.group(0)
+            if not re.search(r"(?i)\bRegion\s+Plan\b|区域规划|区域计划", block):
+                missing_region_plan.append(str(page_num))
+            if not re.search(r"(?i)\bText\s+Capacity\b|文本容量|文字容量", block):
+                missing_text_capacity.append(str(page_num))
+            region_lines = [
+                line
+                for line in block.splitlines()
+                if re.search(r"(?i)\bRegion\s+Plan\b|区域规划|区域计划", line)
+            ]
+            if any(re.search(r"≈|\badjust\b|ratio\s*[-=]*>", line, re.IGNORECASE) for line in region_lines):
+                contradictory_region_plan.append(str(page_num))
+        if missing_region_plan:
+            return (
+                "Content pages are missing Region Plan lines: "
+                + ", ".join(missing_region_plan[:8])
+            )
+        if contradictory_region_plan:
+            return (
+                "Content pages have contradictory Region Plan sizing notes: "
+                + ", ".join(contradictory_region_plan[:8])
+            )
+        if missing_text_capacity:
+            return (
+                "Content pages are missing Text Capacity lines: "
+                + ", ".join(missing_text_capacity[:8])
+            )
+
     missing_icons = sorted(
         {
             match.group(1).strip()
@@ -455,11 +494,21 @@ def _repair_design_spec_page_contract(
         page_num = int(item["page"])
         page_type = str(item["type"])
         title = str(item["title"]).strip() or f"Page {page_num}"
+        region_plan = (
+            "\n- **Region Plan**: content area x=40 y=100 w=1200 h=520; "
+            "primary region x=70 y=130 w=540 h=390; secondary region "
+            "x=650 y=130 w=500 h=390; optional callout x=650 y=540 w=500 h=80"
+            "\n- **Text Capacity**: primary/secondary body max 8 lines at 18px "
+            "with 26px leading; optional callout max 2 lines at 18px with 24px leading"
+            if page_type == "content"
+            else ""
+        )
         additions.append(
             f"#### Slide {page_num:02d} - {title}\n"
             f"- **Page Type**: {page_type}\n"
             f"- **Title**: {title}\n"
             "- **Layout**: Follow the global design system and the manuscript content for this page."
+            f"{region_plan}"
         )
 
     patched_outline = outline.rstrip() + "\n\n" + "\n\n".join(additions)
@@ -618,6 +667,12 @@ async def create_design_spec(
             "- Keep content pages as content pages: do not style them as chapter dividers or add oversized chapter/section counters.",
             "- Put any page number in the footer only; do not create top-left administrative labels or mixed section/page counters.",
             "- In Section IX, every page must include `Style Family:`, `Layout Family:`, and `Density:` fields. All chapter pages must share the same Style Family.",
+            "- In Section IX, every content page must include `Region Plan:` with concrete content-area boxes (x/y/w/h) for major regions such as figure, text, callout, cards, chart, and caption.",
+            "- Region Plan coordinates are final layout boxes. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`; for figures, define a final frame and say the image should fit inside it preserving aspect ratio.",
+            "- Use reusable content layout families such as `figure-left-text-right`, `text-left-figure-right`, `two-column-evidence`, `three-card-grid`, `process-flow-with-evidence`, `comparison-table-callout`, or `full-width-chart-with-notes` unless the manuscript truly requires another.",
+            "- Plan balanced occupancy: content pages should use about 65-85% of the content area with aligned gutters, no empty quadrant, no floating short bullet list, and no detached bottom callout.",
+            "- Plan Chinese text boxes wide enough for natural wrapping: target 24-36 CJK characters per body line and avoid repeated short orphan lines under 10 CJK characters.",
+            "- After each content-page Region Plan, include `Text Capacity:` with intended line counts/font/leading for text-heavy boxes and explicit column widths for tables. Check that heading + body lines + gaps + padding fit the planned height.",
             "- In Section IX, separate footer page numbering from chapter index. Chapter labels use the planned chapter index, never the slide page number.",
             f"- The visible slide language must be `{language}`.",
             f"- {_language_constraint(language)}",
@@ -644,6 +699,12 @@ async def create_design_spec(
             "- Keep content pages as content pages: do not style them as chapter dividers or add oversized chapter/section counters.",
             "- Put any page number in the footer only; do not create top-left administrative labels or mixed section/page counters.",
             "- In Section IX, every page must include `Style Family:`, `Layout Family:`, and `Density:` fields. All chapter pages must share the same Style Family.",
+            "- In Section IX, every content page must include `Region Plan:` with concrete content-area boxes (x/y/w/h) for major regions such as figure, text, callout, cards, chart, and caption.",
+            "- Region Plan coordinates are final layout boxes. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`; for figures, define a final frame and say the image should fit inside it preserving aspect ratio.",
+            "- Use reusable content layout families such as `figure-left-text-right`, `text-left-figure-right`, `two-column-evidence`, `three-card-grid`, `process-flow-with-evidence`, `comparison-table-callout`, or `full-width-chart-with-notes` unless the manuscript truly requires another.",
+            "- Plan balanced occupancy: content pages should use about 65-85% of the content area with aligned gutters, no empty quadrant, no floating short bullet list, and no detached bottom callout.",
+            "- Plan Chinese text boxes wide enough for natural wrapping: target 24-36 CJK characters per body line and avoid repeated short orphan lines under 10 CJK characters.",
+            "- After each content-page Region Plan, include `Text Capacity:` with intended line counts/font/leading for text-heavy boxes and explicit column widths for tables. Check that heading + body lines + gaps + padding fit the planned height.",
             "- In Section IX, separate footer page numbering from chapter index. Chapter labels use the planned chapter index, never the slide page number.",
             f"- The visible slide language must be `{language}`.",
             f"- {_language_constraint(language)}",

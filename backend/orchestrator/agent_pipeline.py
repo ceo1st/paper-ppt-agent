@@ -84,6 +84,30 @@ _AGENT_IDLE_MESSAGE = (
     "Agent has not produced new activity for a while. "
     "You can pause it or send guidance to continue."
 )
+_AGENT_AUTHORING_SCRIPT_SUFFIXES = {
+    ".bat",
+    ".cmd",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ps1",
+    ".py",
+    ".rb",
+    ".sh",
+    ".ts",
+}
+_AGENT_AUTHORING_SCAN_EXCLUDED_ROOTS = {
+    "agent_feedback",
+    "exports",
+    "notes",
+    "research",
+    "skills",
+    "source_assets",
+    "sources",
+    "svg_final",
+    "svg_output",
+    "templates",
+}
 
 # Sentinel marking end of the persistent session message stream.
 _SESSION_DONE = object()
@@ -709,6 +733,15 @@ class PersistentAgentSession:
             sandbox_policy = SandboxPolicy(
                 root=DangerFullAccessSandboxPolicy(type="dangerFullAccess")
             )
+            self._emit(
+                AgentProgressEvent(
+                    "agent",
+                    "progress",
+                    "Codex app-server is ready; starting Agent thread...",
+                    0.12,
+                    data={"runtime": "codex", "model": model, "reasoning_effort": effort.value},
+                )
+            )
             async with AsyncCodex(config=codex_config) as codex:
                 thread_kwargs = {
                     "approval_mode": ApprovalMode.auto_review,
@@ -724,6 +757,15 @@ class PersistentAgentSession:
                 else:
                     thread = await codex.thread_start(**thread_kwargs)
                 self._session_id = thread.id
+                self._emit(
+                    AgentProgressEvent(
+                        "agent",
+                        "progress",
+                        "Codex Agent thread started; waiting for initial prompt...",
+                        0.12,
+                        data={"runtime": "codex", "thread_id": thread.id},
+                    )
+                )
                 while self._active:
                     try:
                         prompt = self._prompt_queue.get(timeout=1.0)
@@ -734,6 +776,15 @@ class PersistentAgentSession:
                     if self._cancel_event.is_set():
                         break
                     # Start a new turn.
+                    self._emit(
+                        AgentProgressEvent(
+                            "agent",
+                            "progress",
+                            "Submitting Codex Agent turn...",
+                            0.12,
+                            data={"runtime": "codex", "thread_id": thread.id},
+                        )
+                    )
                     turn = await thread.turn(
                         [SkillInput(name=_AGENT_SKILL_NAME, path=skill_path), TextInput(prompt)],
                         approval_mode=ApprovalMode.auto_review,
@@ -741,6 +792,15 @@ class PersistentAgentSession:
                         effort=effort,
                         model=model,
                         sandbox_policy=sandbox_policy,
+                    )
+                    self._emit(
+                        AgentProgressEvent(
+                            "agent",
+                            "progress",
+                            "Codex Agent turn submitted; streaming events...",
+                            0.12,
+                            data={"runtime": "codex", "thread_id": thread.id},
+                        )
                     )
                     self._accepting_feedback = True
                     turn_interrupted = False
@@ -988,6 +1048,201 @@ def _load_agent_session_id(project_dir: Path) -> str | None:
         return None
 
 
+def _build_agent_contract_repair_prompt(
+    project_dir: Path,
+    violations: list[str],
+) -> str:
+    rendered = "\n".join(f"- {item}" for item in violations)
+    return f"""The backend rejected the deck's slide-authoring or SVG contract.
+
+Detected violations:
+{rendered}
+
+Repair the existing workspace without changing the requested narrative or slide count:
+- Read `agent_task.json.agent_policy.slide_authoring_policy`.
+- Delete every multi-slide generator program you created.
+- Rewrite every affected `svg_output/slide_###.svg` directly, one explicitly named file at a time.
+- Do not use a loop, slide list/registry, shared renderer, template expansion, or a program that emits multiple SVGs.
+- Keep only deck-level visual tokens shared: palette, typography, margins, and recurring chrome.
+- Re-evaluate each slide's claim, evidence, paper figure, Region Plan, whitespace, and Chinese wrapping independently.
+- Fix every listed out-of-bounds, card overflow, line collision, or text-capacity violation by changing the Region Plan, container size, line breaks, table columns, or wording. Do not merely shrink all text.
+- Remove disallowed SVG constructs such as `<style>`, `class=`, `mask`, `filter`, `clipPath`, `foreignObject`, scripts, event handlers, or remote URLs. Put fill/stroke/font attributes directly on each SVG element instead of using CSS classes.
+- Before finishing each slide, verify `text_right <= region_right`, `last_baseline + font_size*0.25 <= region_bottom`, and every table column has enough width for its longest visible cell.
+- Preserve exact source numbers and units; remove K/M/B shorthand unless it appears verbatim in the paper.
+- Update `design_spec.md` so every content slide has its own concrete Region Plan.
+- Update `agent_report.json.slide_authoring` to:
+  - `mode`: `direct_per_slide`
+  - `multi_slide_generator_used`: false
+  - `direct_files`: every final `slide_###.svg`
+  - `notes`: a concise description of how page-specific compositions were chosen.
+
+Validation and rendering scripts may read all slides, but they must not write or regenerate slide SVGs.
+Finish only after the generator files are removed and every final slide is directly authored.
+"""
+
+
+def _write_agent_contract_warnings(project_dir: Path, violations: list[str]) -> None:
+    if not violations:
+        return
+    payload = {
+        "status": "exported_with_contract_warnings",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "violations": violations,
+    }
+    try:
+        (project_dir / "agent_contract_warnings.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.warning("Failed to persist Agent contract warnings for %s", project_dir)
+
+
+def _agent_generation_contract_violations(
+    project_dir: Path,
+    svg_files: list[Path],
+) -> list[str]:
+    preflight_violations: list[str] = []
+    try:
+        _ensure_recoverable_agent_report(project_dir, svg_files)
+    except RuntimeError as exc:
+        # Deep/external runs still require the Agent to write its own report,
+        # and generator-script detections should go through the normal repair
+        # turn. Normal runs with directly authored slides can be recovered here
+        # so we do not spend another Agent turn just to fill report metadata.
+        preflight_violations.append(str(exc))
+    authorship_violations = _agent_slide_authorship_violations(
+        project_dir,
+        svg_files=svg_files,
+    )
+    if preflight_violations:
+        authorship_violations = [
+            violation
+            for violation in authorship_violations
+            if violation != "agent_report.json is missing slide_authoring evidence"
+        ]
+    return [
+        *preflight_violations,
+        *authorship_violations,
+        *_agent_layout_contract_violations(svg_files),
+    ]
+
+
+async def _repair_agent_generation_contracts_if_needed(
+    project_dir: Path,
+    runtime: str,
+    agent_config: dict[str, Any],
+) -> Any:
+    svg_files = get_svg_files(project_dir, source="output")
+    violations = _agent_generation_contract_violations(project_dir, svg_files)
+    if not violations:
+        return
+
+    yield AgentProgressEvent(
+        "generation",
+        "progress",
+        "Agent generation contract failed; requesting a direct per-slide repair...",
+        0.68,
+        data={
+            "generation_mode": "agent",
+            "contract": "direct_per_slide_authoring",
+            "violations": violations,
+        },
+    )
+    repair_session = PersistentAgentSession(
+        project_dir,
+        runtime,
+        agent_config,
+        resume_session_id=_load_agent_session_id(project_dir),
+    )
+    repair_session.set_bridge_mode()
+    try:
+        await repair_session.start(
+            _build_agent_contract_repair_prompt(project_dir, violations)
+        )
+        async for message in repair_session:
+            if isinstance(message, AgentProgressEvent):
+                yield message
+                continue
+            usage_event = _update_agent_usage_totals(repair_session._usage_totals, message)
+            if usage_event is not None:
+                yield usage_event
+            if runtime == "codex":
+                item_event = _codex_item_progress_event(
+                    message,
+                    str(getattr(message, "method", "") or ""),
+                )
+                if item_event is not None:
+                    yield item_event
+            else:
+                for sdk_event in _agent_sdk_events_from_message(message):
+                    text = str(sdk_event.get("message") or "").strip()
+                    if text:
+                        yield AgentProgressEvent(
+                            "agent",
+                            "progress",
+                            text,
+                            0.68,
+                            data={
+                                "runtime": "claude_code",
+                                "agent_event": sdk_event,
+                            },
+                        )
+                if message.__class__.__name__ == "ResultMessage" and bool(
+                    getattr(message, "is_error", False)
+                ):
+                    if _is_claude_turn_limit_result(message):
+                        continue
+                    result = str(getattr(message, "result", "") or "Agent repair failed.")
+                    raise RuntimeError(result)
+        if repair_session.session_id:
+            _save_agent_session(project_dir, repair_session.session_id)
+    finally:
+        await repair_session.close()
+
+    repaired_svg_files = get_svg_files(project_dir, source="output")
+    remaining_authoring = _agent_slide_authorship_violations(
+        project_dir,
+        svg_files=repaired_svg_files,
+    )
+    if remaining_authoring:
+        rendered = "\n- ".join(remaining_authoring)
+        raise RuntimeError(
+            "Agent still violated the direct-authoring contract after "
+            f"one repair turn:\n- {rendered}"
+        )
+    remaining_layout = _agent_layout_contract_violations(repaired_svg_files)
+    if remaining_layout:
+        _write_agent_contract_warnings(project_dir, remaining_layout)
+        yield AgentProgressEvent(
+            "generation",
+            "progress",
+            (
+                "Agent still has SVG/layout contract warnings after repair; "
+                "continuing export with warnings recorded."
+            ),
+            0.72,
+            data={
+                "generation_mode": "agent",
+                "contract": "svg_layout_quality",
+                "warnings": remaining_layout,
+                "export_will_continue": True,
+            },
+        )
+        return
+    yield AgentProgressEvent(
+        "generation",
+        "progress",
+            "Agent repaired direct authoring and SVG contract violations.",
+        0.72,
+        data={
+            "generation_mode": "agent",
+            "contract": "direct_per_slide_authoring",
+            "repaired": True,
+        },
+    )
+
+
 async def run_agent_pipeline(request: Any):
     """Run the Agent-mode generation path.
 
@@ -1175,6 +1430,12 @@ async def run_agent_pipeline(request: Any):
 
         # Session is now in direct mode — feedback turns broadcast via
         # session_manager.record_event directly.  Proceed to finalization.
+        async for repair_event in _repair_agent_generation_contracts_if_needed(
+            project_dir,
+            runtime,
+            agent_config,
+        ):
+            yield repair_event
 
         await _scan_svg_updates(
             project_dir,
@@ -1374,6 +1635,13 @@ async def run_agent_feedback_pipeline(
     )
     while not queue.empty():
         yield queue.get_nowait()
+
+    async for repair_event in _repair_agent_generation_contracts_if_needed(
+        project_dir,
+        runtime,
+        agent_config,
+    ):
+        yield repair_event
 
     svg_files = get_svg_files(project_dir, source="output")
     _validate_agent_artifacts(project_dir, svg_files, total_hint)
@@ -1646,6 +1914,9 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "external_research_skill": _RESEARCH_SKILL_NAME,
             "deep_research_skill": "paper-ppt-deep-research",
             "icon_policy": _agent_icon_policy(),
+            "layout_policy": _agent_layout_policy(),
+            "slide_authoring_policy": _agent_slide_authoring_policy(),
+            "factual_rendering_policy": _agent_factual_rendering_policy(),
             "source_asset_policy": _agent_source_asset_policy(),
             "subagent_policy": _agent_subagent_policy(request, agent_config, detail_profile),
             "research_policy": _agent_research_policy(research_payload),
@@ -1808,7 +2079,12 @@ def _codex_developer_instructions(project_dir: Path) -> str:
         "Prefer the configured Python from PAPER_PPT_PYTHON for PDF/TeX/SVG checks. "
         "Use source_assets/paper.md and source_assets/figures.json for paper text "
         "and figure selection. When invoking shell commands on Windows, keep the "
-        "working directory in the workspace and avoid long-running interactive commands."
+        "working directory in the workspace and avoid long-running interactive commands. "
+        "Author every slide SVG directly as its own file. Never create or run a Python, "
+        "JavaScript, shell, PowerShell, or other general-purpose program that generates "
+        "multiple slide SVGs, and never use a loop or shared renderer to emit the deck. "
+        "Shared colors and typography may be documented, but each slide's Region Plan "
+        "and SVG markup must be explicitly authored for that slide."
     )
 
 
@@ -1823,6 +2099,9 @@ def _install_codex_jsonrpc_noise_filter() -> None:
     taskkill status lines such as "SUCCESS: The process with PID ... has been
     terminated." into stdout, which otherwise kills the reader thread. This
     compatibility shim is intentionally narrow and only skips those lines.
+    The SDK also opens stderr as UTF-8 text; some Windows subprocess messages
+    can be locale-encoded. stderr is diagnostic only, so decode it with
+    replacement instead of letting the drain thread die.
     """
 
     global _CODEX_NOISE_FILTER_INSTALLED
@@ -1860,7 +2139,38 @@ def _install_codex_jsonrpc_noise_filter() -> None:
                 raise AppServerError(f"Invalid JSON-RPC payload: {message!r}")
             return message
 
+    def _start_stderr_drain_thread(self) -> None:
+        if self._proc is None or self._proc.stderr is None:
+            return
+
+        def _drain() -> None:
+            stderr = self._proc.stderr
+            if stderr is None:
+                return
+            raw = getattr(stderr, "buffer", None)
+            if raw is not None:
+                for raw_line in raw:
+                    try:
+                        line = raw_line.decode("utf-8", errors="replace")
+                    except Exception:
+                        line = repr(raw_line)
+                    self._stderr_lines.append(line.rstrip("\n"))
+                return
+            while True:
+                try:
+                    line = stderr.readline()
+                except UnicodeDecodeError as exc:
+                    self._stderr_lines.append(f"ignored undecodable stderr: {exc}")
+                    continue
+                if not line:
+                    break
+                self._stderr_lines.append(line.rstrip("\n"))
+
+        self._stderr_thread = threading.Thread(target=_drain, daemon=True)
+        self._stderr_thread.start()
+
     codex_client.AppServerClient._read_message = _read_message
+    codex_client.AppServerClient._start_stderr_drain_thread = _start_stderr_drain_thread
     _CODEX_NOISE_FILTER_INSTALLED = True
 
 
@@ -1999,6 +2309,48 @@ def _agent_waiting_event() -> AgentProgressEvent:
 
 
 def _codex_item_progress_event(event: Any, method: str) -> AgentProgressEvent | None:
+    if method == "turn/started":
+        return AgentProgressEvent(
+            "agent",
+            "progress",
+            "Codex Agent turn started.",
+            0.12,
+            data={
+                "runtime": "codex",
+                "method": method,
+                "agent_event": {
+                    "type": "status",
+                    "status": "running",
+                    "data": {},
+                },
+            },
+        )
+    if method == "error":
+        payload = getattr(event, "payload", None)
+        error = getattr(payload, "error", None)
+        message = str(getattr(error, "message", "") or "Codex Agent error").strip()
+        details = str(getattr(error, "additional_details", "") or "").strip()
+        will_retry = bool(getattr(payload, "will_retry", False))
+        rendered = message if not details else f"{message} ({details[:500]})"
+        return AgentProgressEvent(
+            "agent",
+            "progress",
+            rendered[:2000],
+            0.12,
+            data={
+                "runtime": "codex",
+                "method": method,
+                "agent_event": {
+                    "type": "error",
+                    "status": "retrying" if will_retry else "error",
+                    "data": {
+                        "message": message,
+                        "additional_details": details,
+                        "will_retry": will_retry,
+                    },
+                },
+            },
+        )
     if method not in {"item/started", "item/completed"}:
         return None
     item = _codex_event_item(event)
@@ -2317,28 +2669,257 @@ def _validate_agent_artifacts(project_dir: Path, svg_files: list[Path], total_sl
         )
     for svg_path in svg_files:
         _validate_single_svg(svg_path, svg_path.read_text(encoding="utf-8"))
+    report_path = _ensure_recoverable_agent_report(project_dir, svg_files)
+    authorship_violations = _agent_slide_authorship_violations(
+        project_dir,
+        svg_files=svg_files,
+    )
+    if authorship_violations:
+        rendered = "\n- ".join(authorship_violations)
+        raise RuntimeError(
+            "Agent generation contract failed. Slides must be directly authored:\n"
+            f"- {rendered}"
+        )
+    layout_violations = _agent_layout_contract_violations(svg_files)
+    if layout_violations:
+        _write_agent_contract_warnings(project_dir, layout_violations)
+        logger.warning(
+            "Agent export continues with %d SVG/layout contract warning(s) for %s",
+            len(layout_violations),
+            project_dir,
+        )
+    _validate_agent_report(project_dir, report_path)
+
+
+def _ensure_recoverable_agent_report(
+    project_dir: Path,
+    svg_files: list[Path],
+) -> Path:
+    report_path = project_dir / "agent_report.json"
+    if report_path.exists():
+        return report_path
+
+    task = _read_agent_task(project_dir)
+    policy = task.get("agent_policy") if isinstance(task.get("agent_policy"), dict) else {}
+    if policy.get("allow_external_research") or policy.get("allow_deep_research"):
+        raise RuntimeError(
+            "Agent mode requires agent_report.json when external or deep research is enabled."
+        )
+
+    generator_violations: list[str] = []
+    for path in _agent_authored_script_paths(project_dir):
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _script_writes_multiple_slide_svgs(content):
+            generator_violations.append(_rel(project_dir, path))
+    if generator_violations:
+        raise RuntimeError(
+            "Agent omitted agent_report.json and a multi-slide generator was detected: "
+            + ", ".join(generator_violations)
+        )
+
+    presentation = (
+        task.get("presentation")
+        if isinstance(task.get("presentation"), dict)
+        else {}
+    )
+    direct_files = [path.name for path in svg_files]
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "completed_with_backend_recovery_report",
+                "slides": len(svg_files),
+                "language": presentation.get("language"),
+                "external_research_used": False,
+                "deep_research_used": False,
+                "report_provenance": {
+                    "source": "backend_inferred_recovery",
+                    "reason": (
+                        "The Agent completed the slide files but its turn ended "
+                        "before writing agent_report.json."
+                    ),
+                    "claims_limited_to_observable_workspace_evidence": True,
+                },
+                "slide_authoring": {
+                    "mode": "direct_per_slide",
+                    "multi_slide_generator_used": False,
+                    "direct_files": direct_files,
+                    "notes": (
+                        "Backend recovery inference: every final slide exists as an "
+                        "explicit file and no Agent-authored multi-slide generator "
+                        "was found in the workspace."
+                    ),
+                },
+                "layout_qa": {
+                    "region_plans_followed": None,
+                    "text_capacity_preflight": None,
+                    "occupancy_or_wrapping_repairs": [],
+                    "remaining_limitations": _agent_layout_contract_violations(svg_files),
+                },
+                "visual_qa": "skipped",
+                "notes": [
+                    "This recovery report records only facts observable in the workspace."
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return report_path
+
+
+def _agent_authored_script_paths(project_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for path in project_dir.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in _AGENT_AUTHORING_SCRIPT_SUFFIXES:
+            continue
+        try:
+            relative = path.relative_to(project_dir)
+        except ValueError:
+            continue
+        if relative.parts and relative.parts[0] in _AGENT_AUTHORING_SCAN_EXCLUDED_ROOTS:
+            continue
+        candidates.append(path)
+    return sorted(candidates)
+
+
+def _script_writes_multiple_slide_svgs(content: str) -> bool:
+    lowered = content.lower()
+    if "svg_output" not in lowered and not re.search(r"slide[_-]?\d{1,3}\.svg", lowered):
+        return False
+
+    writes_files = bool(
+        re.search(
+            r"(?:write_text|writebytes|open\s*\([^)]*[\"'][wa][bt]?[\"']|"
+            r"writefilesync|writefile|out-file|set-content|add-content|"
+            r">\s*[^\r\n]*slide[_-])",
+            lowered,
+        )
+    )
+    if not writes_files:
+        return False
+
+    explicit_slides = set(re.findall(r"slide[_-]?(\d{1,3})\.svg", lowered))
+    dynamic_slide_name = bool(
+        re.search(r"slide[_-]?\{[^}]+\}\.svg", lowered)
+        or re.search(r"slide[_-]?[\"']?\s*\+", lowered)
+        or re.search(r"slide[_-]?%0?\d*d?\.svg", lowered)
+    )
+    iteration = bool(
+        re.search(r"\bfor\b[\s\S]{0,240}\b(?:slides?|makers?|range|enumerate)\b", lowered)
+        or re.search(r"\bforeach\b[\s\S]{0,240}\bslide", lowered)
+        or re.search(r"\.(?:map|foreach)\s*\(", lowered)
+    )
+    shared_renderer = bool(
+        re.search(
+            r"(?:def|function)\s+(?:base_svg|render_slide|make_slide|"
+            r"write_outputs|generate_deck|build_slide)",
+            lowered,
+        )
+        or "slides =" in lowered
+        or "makers =" in lowered
+    )
+    contains_svg_markup = "<svg" in lowered or "base_svg" in lowered
+    return (
+        len(explicit_slides) >= 2
+        or dynamic_slide_name
+        or (iteration and contains_svg_markup)
+        or (shared_renderer and contains_svg_markup)
+    )
+
+
+def _agent_slide_authorship_violations(
+    project_dir: Path,
+    *,
+    svg_files: list[Path] | None = None,
+) -> list[str]:
+    violations: list[str] = []
+    for path in _agent_authored_script_paths(project_dir):
+        try:
+            if path.stat().st_size > 2_000_000:
+                continue
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _script_writes_multiple_slide_svgs(content):
+            violations.append(
+                f"multi-slide generator detected: {_rel(project_dir, path)}"
+            )
+
     report_path = project_dir / "agent_report.json"
     if not report_path.exists():
-        task = _read_agent_task(project_dir)
-        policy = task.get("agent_policy") if isinstance(task.get("agent_policy"), dict) else {}
-        if policy.get("allow_external_research") or policy.get("allow_deep_research"):
-            raise RuntimeError(
-                "Agent mode requires agent_report.json when external or deep research is enabled."
-            )
-        report_path.write_text(
-            json.dumps(
-                {
-                    "status": "completed_without_report",
-                    "slides": [path.name for path in svg_files],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        return
+        violations.append("agent_report.json is missing slide_authoring evidence")
+        return violations
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        violations.append("agent_report.json cannot prove direct per-slide authoring")
+        return violations
 
-    _validate_agent_report(project_dir, report_path)
+    slide_authoring = report.get("slide_authoring") if isinstance(report, dict) else None
+    if not isinstance(slide_authoring, dict):
+        violations.append("agent_report.json.slide_authoring is missing")
+        return violations
+    if str(slide_authoring.get("mode") or "").strip() != "direct_per_slide":
+        violations.append("slide_authoring.mode must be direct_per_slide")
+    if slide_authoring.get("multi_slide_generator_used") is not False:
+        violations.append("slide_authoring.multi_slide_generator_used must be false")
+
+    expected = {
+        path.name
+        for path in (svg_files if svg_files is not None else get_svg_files(project_dir, source="output"))
+    }
+    direct_files_raw = slide_authoring.get("direct_files")
+    direct_files = {
+        Path(str(item)).name
+        for item in direct_files_raw
+        if str(item).strip()
+    } if isinstance(direct_files_raw, list) else set()
+    missing = sorted(expected - direct_files)
+    if missing:
+        violations.append(
+            "slide_authoring.direct_files does not list final slides: "
+            + ", ".join(missing)
+        )
+    return violations
+
+
+def _agent_layout_contract_violations(svg_files: list[Path]) -> list[str]:
+    from backend.generator.svg_critic import check_svg
+
+    hard_rules = {
+        "forbidden_class",
+        "forbidden_element",
+        "content_area_overflow",
+        "out_of_bounds",
+        "text_line_overlap",
+        "text_overflow_in_container",
+    }
+    violations: list[str] = []
+    for svg_path in svg_files:
+        try:
+            report = check_svg(svg_path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        page_findings = [
+            violation
+            for violation in report.violations
+            if violation.rule in hard_rules
+            and (violation.severity == "error" or violation.rule == "forbidden_class")
+        ]
+        grouped: dict[str, list[Any]] = {}
+        for violation in page_findings:
+            grouped.setdefault(violation.rule, []).append(violation)
+        for rule, findings in grouped.items():
+            violation = findings[0]
+            count_suffix = f" ({len(findings)} occurrences)" if len(findings) > 1 else ""
+            violations.append(
+                f"{svg_path.name}: {rule}{count_suffix}: {violation.detail}"
+            )
+    return violations
 
 
 def _agent_research_gate_requirements(project_dir: Path) -> list[Path]:
@@ -2550,19 +3131,84 @@ def _agent_research_gate_block_reason(
     )
 
 
+def _agent_batch_authoring_block_reason(
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> str | None:
+    script_path = ""
+    candidate_content = ""
+    if tool_name in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
+        script_path = str(
+            tool_input.get("file_path")
+            or tool_input.get("path")
+            or tool_input.get("notebook_path")
+            or ""
+        )
+        chunks = [
+            tool_input.get("content"),
+            tool_input.get("new_string"),
+            tool_input.get("cell_source"),
+        ]
+        edits = tool_input.get("edits")
+        if isinstance(edits, list):
+            chunks.extend(
+                item.get("new_string")
+                for item in edits
+                if isinstance(item, dict)
+            )
+        candidate_content = "\n".join(
+            str(chunk)
+            for chunk in chunks
+            if chunk is not None
+        )
+        suffix = Path(script_path).suffix.lower()
+        if suffix in _AGENT_AUTHORING_SCRIPT_SUFFIXES and _script_writes_multiple_slide_svgs(
+            candidate_content
+        ):
+            return (
+                "Do not create a program that generates multiple slide SVGs. "
+                "Write each svg_output/slide_###.svg directly and independently, "
+                "using that slide's own Region Plan."
+            )
+
+    if tool_name != "Bash":
+        return None
+    command = str(tool_input.get("command") or "")
+    lowered = command.lower().replace("\\", "/")
+    invokes_program = bool(
+        re.search(r"\b(?:python|python3|node|deno|ruby|pwsh|powershell|bash|sh)\b", lowered)
+    )
+    generator_name = bool(
+        re.search(r"(?:generate|build|make|render)[_-]?(?:deck|slides?)", lowered)
+    )
+    shell_loop = bool(re.search(r"\b(?:for|foreach)\b", lowered))
+    slide_target = "svg_output" in lowered or bool(
+        re.search(r"slide[_-]?(?:\d{1,3}|\{|\$|%)", lowered)
+    )
+    if slide_target and (shell_loop or (invokes_program and generator_name)):
+        return (
+            "Do not run a multi-slide generator or loop over slide files. "
+            "Author one explicitly named slide SVG at a time with direct file edits."
+        )
+    return None
+
+
 def _agent_research_gate_hooks(project_dir: Path) -> dict[str, list[Any]]:
     from claude_agent_sdk import HookMatcher
 
-    async def _deny_early_authoring(
+    async def _enforce_agent_authoring_contracts(
         input_data: dict[str, Any],
         _tool_use_id: str | None,
         _context: Any,
     ) -> dict[str, Any]:
+        tool_name = str(input_data.get("tool_name") or "")
+        tool_input = input_data.get("tool_input") if isinstance(input_data.get("tool_input"), dict) else {}
         reason = _agent_research_gate_block_reason(
             project_dir,
-            str(input_data.get("tool_name") or ""),
-            input_data.get("tool_input") if isinstance(input_data.get("tool_input"), dict) else {},
+            tool_name,
+            tool_input,
         )
+        reason = reason or _agent_batch_authoring_block_reason(tool_name, tool_input)
         if not reason:
             return {}
         return {
@@ -2577,7 +3223,7 @@ def _agent_research_gate_hooks(project_dir: Path) -> dict[str, list[Any]]:
         "PreToolUse": [
             HookMatcher(
                 matcher="Write|Edit|MultiEdit|NotebookEdit|Bash",
-                hooks=[_deny_early_authoring],
+                hooks=[_enforce_agent_authoring_contracts],
             )
         ]
     }
@@ -2895,6 +3541,9 @@ Workspace contract:
 - Use subagents/parallel work when the runtime supports it. When deep research is enabled, SubAgents are required unless the Task/SubAgent tool is unavailable or fails.
 - External research: {external}. Deep research: {deep}. Agent post-generation review: {review}.
 - Detail contract: {detail_profile["label"]}; {detail_profile["slide_count_guidance"]} Content slides should carry {detail_profile["evidence_points_per_content_slide"]} concrete evidence point(s), {detail_profile["bullets_per_content_slide"]} bullets/claims, and {detail_profile["visuals_per_content_slide"]} visual argument(s) each when the paper supports it.
+- Per-slide authoring contract: author every `svg_output/slide_###.svg` directly as a separate file. Do not create or run a Python/JavaScript/TypeScript/shell/PowerShell/batch/Ruby program that generates multiple slides. Do not use loops, a `SLIDES`/maker registry, shared `base_svg`/`title`/card rendering functions, or template expansion to emit the deck. Shared palette, typography, margins, and recurring chrome may be documented, but each slide must have an explicit slide-specific Region Plan and explicit SVG markup chosen from that slide's claim and evidence. Read-only validation/render/export scripts remain allowed.
+- Layout contract: before writing SVG, put concrete Region Plans in `design_spec.md` for every content slide. Build from aligned rectangular regions first; content slides should normally occupy 65-85% of the content area, avoid empty quadrants or detached bottom callouts, and wrap Chinese body text into natural 24-36 CJK-character lines (18-30 inside cards). If a paper figure is used, reserve the figure frame first and fit it inside the frame preserving aspect ratio. Before drawing, perform a text-capacity preflight for every region: estimate line width, line count, line-height, heading/caption space, and padding; require every line and final baseline to remain inside its Region Plan. Size table columns from their longest visible cells.
+- Factual rendering contract: preserve exact source numbers and units. Do not abbreviate values into K/M/B shorthand unless the paper itself uses that shorthand; for example, keep `12,282,034` rather than `12.28M`. Do not invent or round metrics, chart axes, ticks, dates, sample sizes, or settings. Mark derived values explicitly and show their source inputs/calculation nearby. Evidence-card ids and retrieval snippets are private grounding, not visible slide copy.
 - Icon contract: icons are optional visual aids, not decoration. Use them only when they clarify repeated semantic labels, process steps, comparison dimensions, legends, or diagram nodes. Before using icons, define a small vocabulary in `design_spec.md` (concept -> existing local file -> size/style/color), search `agent_task.json.paths.icons`, reuse the same icon for the same concept, keep to one icon family/style, and color icons with the template/deck palette. Avoid scattering one-off icons or multi-color icon accents across unrelated slides. Never use letters, initials, ASCII/Unicode symbols, emoji, dingbats, or decorative characters as icon substitutes; omit the icon or use a non-icon shape if no matching asset exists.
 - SubAgent contract: do not split work just to satisfy ordinary slide count or detail level. When deep research is enabled, launch focused research SubAgents if the Task tool is available; use separate readers for background/related work, method, experiments, and critique when the paper is complex. When Agent review is enabled, run one focused review SubAgent after the first full deck is drafted; it should review the whole deck for layout overflow, missing assets, icon-policy violations, and narrative gaps instead of checking pages one by one. If you skip a required deep-research or review SubAgent, write a concrete reason in `agent_report.json.subagents`; the main Agent must merge results and keep final narrative/design consistency.
 - External research contract: if external research is enabled, use the `{_RESEARCH_SKILL_NAME}` skill after reading the paper. You, not the backend, must choose search queries from paper understanding before calling its script/API helpers. It is mandatory to produce `research/raw_external_results.json`, `research/sources.json`, and `research/brief.md` before writing any manuscript, design specification, notes, report, or slide SVG. Read `research/external_search_summary.json` before sampling raw results. Sparse or zero directly relevant external results are acceptable when `research/sources.json` records a concrete limitation; do not repeat searches merely to satisfy the gate or increase counts. For web results, open/read relevant pages deeply enough to understand the source; do not cite titles/snippets alone.
@@ -2932,6 +3581,9 @@ Workspace contract:
 - Preserve existing slide order and style unless the feedback asks to change them.
 - When a slide SVG is revised, write it immediately to `svg_output/` so the app can preview it live.
 - Keep following `agent_task.json.presentation.detail_profile`, `agent_task.json.agent_policy.icon_policy`, and `agent_task.json.agent_policy.subagent_policy`.
+- Keep following `agent_task.json.agent_policy.slide_authoring_policy`: revise each affected SVG directly. Do not introduce a generator script, loop, shared renderer, or template expander even when many slides need the same change.
+- Keep following `agent_task.json.agent_policy.layout_policy`: revise layout by changing the Region Plan and SVG placement math, not by only adding a post-hoc QA note.
+- Keep following `agent_task.json.agent_policy.factual_rendering_policy`: preserve exact source numbers/units, avoid K/M/B shorthand unless source-authored, and label transparent derivations.
 - Keep following `agent_task.json.agent_policy.source_asset_policy`: when adding/replacing paper figures, use the exact `href` from `source_assets/figures.json` and preserve the figure's aspect ratio.
 - Continue to follow the icon vocabulary in `design_spec.md`: use icons only where they clarify structure or repeated concepts, reuse the same local icon/style/color for the same concept, and omit icons that would be one-off decoration. Never use letters, symbols, emoji, or decorative glyphs as icon substitutes.
 - Use `agent_task.json.paths.python` or `PAPER_PPT_PYTHON` for Python/PyMuPDF commands instead of system Python.
@@ -3091,6 +3743,135 @@ def _agent_icon_policy() -> dict[str, Any]:
         ],
         "fallback_when_missing": "Omit the icon or use a neutral non-icon shape/card accent; do not add an unrelated icon just to fill space.",
         "reporting": "agent_report.json must mention whether local icons were searched, list any icon assets used, and explain the icon vocabulary or why icons were mostly omitted.",
+    }
+
+
+def _agent_layout_policy() -> dict[str, Any]:
+    return {
+        "generation_phase": "plan_before_svg",
+        "region_plan_required": True,
+        "region_plan_contract": (
+            "Every content slide in design_spec.md must include concrete final "
+            "boxes such as x/y/w/h for figure, text, card, chart, and callout "
+            "regions. Coordinates are layout commitments, not suggestions."
+        ),
+        "content_area_default": {
+            "ppt169": {"x": 40, "y": 100, "w": 1200, "h": 520},
+        },
+        "occupancy_target": {
+            "content_slides": "65-85% of the content area should be meaningfully occupied",
+            "structural_slides": "sparse by design; do not force content density",
+        },
+        "layout_families": [
+            "figure-left-text-right",
+            "text-left-figure-right",
+            "two-column-evidence",
+            "three-card-grid",
+            "process-flow-with-evidence",
+            "comparison-table-callout",
+            "full-width-chart-with-notes",
+        ],
+        "balance_rules": [
+            "Use a shared grid and 24-40px gutters between major regions.",
+            "Avoid empty quadrants, floating short bullet lists, and bottom callouts detached from the main grid.",
+            "For sparse content, enlarge the supported figure, convert bullets into grouped callouts, or draw a simple paper-supported mechanism diagram.",
+            "For image+text pages, reserve the figure frame first, preserve aspect ratio inside that frame, and make the text column use comparable vertical rhythm.",
+        ],
+        "text_wrapping": {
+            "ordinary_cjk_body_line": "24-36 CJK characters",
+            "card_cjk_line": "18-30 CJK characters",
+            "avoid": "multiple consecutive visible lines under 10 CJK characters except labels, legends, and final paragraph lines",
+            "repair": "widen the box, reduce font size slightly, split into callouts, or rewrite more concisely",
+        },
+        "text_capacity_preflight": {
+            "required_before_svg": True,
+            "horizontal_check": (
+                "For every text line, estimate its rendered width and require "
+                "text_right <= assigned_region_right - padding."
+            ),
+            "vertical_check": (
+                "Reserve heading, body line-height, caption, and bottom padding before "
+                "choosing a card height. Require the last baseline plus descender space "
+                "to remain inside the assigned region."
+            ),
+            "table_check": (
+                "Size each table column from its longest visible cell before placing text. "
+                "Never let a model/method name collide with the first numeric column."
+            ),
+            "minimums": [
+                "Body text should normally be at least 18px.",
+                "A heading plus two body lines normally needs at least 96px including padding.",
+                "A heading plus four 18px body lines at 26px leading normally needs at least 156px including padding.",
+            ],
+            "repair_order": (
+                "First widen/reallocate the region, then rewrite/split content, then reduce "
+                "font size slightly. Never solve fit by pushing text outside the box."
+            ),
+        },
+        "forbidden": [
+            "contradictory Region Plan notes such as final w/h followed by ratio adjustment math",
+            "invented chart axes or ticks used only to fill empty space",
+            "paper figure stretching instead of fit-inside-frame aspect preservation",
+            "paragraph text placed in a narrow right-edge region without a width budget",
+            "bottom cards whose final text baseline falls below the card",
+            "table columns positioned without measuring the longest label/cell",
+        ],
+        "qa_reporting": (
+            "agent_report.json should include layout_qa with whether Region Plans "
+            "were followed, any slides repaired for occupancy/wrapping, and any "
+            "remaining limitation."
+        ),
+    }
+
+
+def _agent_slide_authoring_policy() -> dict[str, Any]:
+    return {
+        "mode": "direct_per_slide_authoring",
+        "required": [
+            "Author each svg_output/slide_###.svg as a separate direct file write or edit.",
+            "Create a concrete, slide-specific Region Plan before authoring that slide.",
+            "Choose the composition from that slide's claim, evidence, and paper figure rather than instantiating a deck-wide page template.",
+            "Keep shared deck tokens limited to documented colors, typography, margins, and recurring chrome.",
+            "Write SVG with direct inline attributes; do not rely on CSS classes or a `<style>` block.",
+        ],
+        "forbidden": [
+            "Any Python, JavaScript, TypeScript, shell, PowerShell, batch, Ruby, or other program that writes more than one slide SVG.",
+            "Loops, slide arrays, maker registries, shared base_svg/title/card rendering functions, or template expansion used to emit multiple slides.",
+            "A single script that writes manuscript.md, design_spec.md, agent_report.json, notes, and the complete slide deck in one run.",
+            "Treating repeated card grids or a shared page skeleton as evidence that the slide was independently designed.",
+            "`<style>` blocks, `class=` attributes, `mask`, `filter`, `clipPath`, `foreignObject`, scripts, event handlers, or remote image/icon URLs in final SVGs.",
+        ],
+        "allowed_tools": [
+            "Scripts for source extraction, research retrieval, read-only SVG inspection, validation, rendering, and PPTX export.",
+            "Direct Write/Edit operations for one explicitly named slide SVG at a time.",
+            "Copying a small amount of shared visual chrome into each slide while keeping the full page composition explicit.",
+        ],
+        "repair": (
+            "If a multi-slide generator is detected, delete it and directly rewrite every "
+            "affected slide SVG one by one. The backend allows one Agent repair turn before "
+            "blocking export."
+        ),
+        "reporting": (
+            "agent_report.json must include slide_authoring with mode=direct_per_slide, "
+            "multi_slide_generator_used=false, and direct_files listing every final slide SVG."
+        ),
+    }
+
+
+def _agent_factual_rendering_policy() -> dict[str, Any]:
+    return {
+        "source_precision_required": True,
+        "rules": [
+            "Do not invent metrics, chart ticks, axes, sample sizes, dates, model settings, or causal claims.",
+            "Preserve the source number and unit exactly unless the slide explicitly shows a transparent derivation.",
+            "Do not compress 12,282,034 into 12.28M, 3,939,754 into 3.94M, or use K/M/B shorthand unless that exact shorthand appears in the source.",
+            "Derived values must be marked as derived and show the source inputs or calculation nearby.",
+            "Evidence cards are private grounding; do not print card ids, retrieval snippets, or provenance plumbing as slide content.",
+        ],
+        "repair_priority": (
+            "Fix factual precision before decorative layout. A balanced slide with a rounded "
+            "or unsupported number is still incorrect."
+        ),
     }
 
 

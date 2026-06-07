@@ -57,6 +57,15 @@ Every page MUST follow this three-region structure. Content area boundary is a *
 20. **Static SVG only**: Do not use SVG/CSS animation, transitions, SMIL elements, keyframes, or animated decorative effects. The browser preview and exported PPTX must show the same static page.
 21. **Chrome consistency**: Page numbers belong in the footer only. Do not add top-left administrative labels such as section counters, chapter counters, or page-number labels unless they are part of a provided template skeleton.
 22. **Respect page roles**: Cover/chapter/ending pages are structural and minimal. Content pages must not use chapter-divider layouts, oversized chapter numerals, or transition-slide treatment.
+23. **Factual rendering**: Visible facts must come from the current page manuscript or supplied page context. Do not add new metrics, dates, percentages, sample sizes, ranks, axis tick values, or rounded values while drawing native SVG visuals.
+24. **Evidence context is private grounding**: Do not print evidence-card IDs, section labels, retrieved snippets, or source-memory blocks as visible slide cards. Synthesize them into the slide's claim, explanation, diagram, or exact cited figure/table reference.
+25. **Native charts without invented numbers**: If drawing a chart from manuscript/context numbers, preserve exact precision. Do not round `90.37%` to `90.4%`, do not create unlabeled scale ticks such as `70%/80%/90%` unless those exact ticks are present in the page inputs, and prefer qualitative bars/flows when exact chart encoding would require invented scale values.
+26. **Layout before drawing**: Instantiate the page's Region Plan first. Place major regions on a shared grid with consistent gutters before placing text, figures, cards, or callouts. Do not improvise free-floating elements outside that plan.
+27. **Balanced occupancy**: Content slides should normally use 65-85% of the content area. Avoid empty quadrants, a lone short bullet list beside a large blank region, or a bottom callout that is detached from the main grid. If content is sparse, enlarge the figure, convert bullets into grouped callouts, or use a simple supported diagram.
+28. **Natural CJK wrapping**: For Chinese body text, target 24-36 CJK characters per line in ordinary paragraphs and 18-30 in cards. Avoid repeated short orphan lines under 10 CJK characters, except labels/legends/final lines. If wrapping is ragged, widen the text box, reduce font size slightly, split into callouts, or rewrite more concisely.
+29. **Image + text balance**: For paper-figure pages, reserve the figure region first and balance it with a text region of comparable visual height. Keep caption, bullets, and callout aligned to the same column/grid; do not leave a large blank band above or below either side.
+30. **Text-capacity preflight**: Before writing any `<text>`, budget the assigned box: heading height + gap + body line count × line-height + caption/source + top/bottom padding. Estimate each visible line width and require `text_right <= region_right - padding`; require the final baseline plus descender space to stay above `region_bottom - padding`. A card is not valid merely because its first line fits.
+31. **Table column preflight**: Measure the longest visible method/label/cell in every column before choosing x positions. Allocate the label column first, right-align numeric columns, and preserve gutters. Never let a long method name collide with the first value column.
 
 ## CJK Text Layout Reference
 
@@ -68,6 +77,7 @@ Every page MUST follow this three-region structure. Content area boundary is a *
 | Card content (with padding) | 360px | 30 | 26 |
 
 Use these values as upper bounds. Shorter lines are acceptable when they keep text inside its local card or column.
+Do not over-wrap Chinese text by using a narrow box when horizontal room exists. If several consecutive lines are under half the local line capacity, reflow to a wider box or reduce unnecessary manual line breaks.
 
 ## Image-Text Layout Formulas
 
@@ -87,6 +97,8 @@ When a page contains images, calculate layout based on the image's original aspe
 ### Boundary Enforcement (Mandatory)
 
 The content area (y=100, h=520) ends at y=620. Every element you place has a y-coordinate and height -- their sum must stay under 620. When stacking multiple images or cards, divide the 520px among them before placing text. If the math does not fit, shrink images or reduce content. Never place anything in the footer region (y=660+) except the page number.
+
+For a local card/region, apply the same rule to every tspan, not only the parent `<text>` baseline. Example: a heading plus four body lines at 18px with 26px leading generally needs about 156px including padding; an 80-100px bottom card cannot hold it.
 
 ## Template Usage (when a Template Skeleton is provided)
 

@@ -89,6 +89,7 @@ MAX_DESIGN_SECTION_CHARS = 1800
 MAX_PAGE_DESIGN_CHARS = 2600
 STRUCTURAL_PAGE_TYPES = frozenset({"cover", "chapter", "toc", "ending"})
 FIGURE_SAFETY_CRITIC_ATTEMPTS = 2
+FACTUAL_SAFETY_CRITIC_ATTEMPTS = 3
 
 CriticMetadata = dict[str, object]
 CriticCallback = Callable[
@@ -223,6 +224,74 @@ def _structural_page_override_block(page_type: str) -> str:
         "question lists, KPI strips, cards/panels, figures, charts, or mini-agendas "
         "on chapter/ending pages."
         f"{consistency}\n"
+    )
+
+
+def _factual_rendering_guardrails(page_type: str) -> str:
+    if page_type in STRUCTURAL_PAGE_TYPES:
+        return (
+            "\n## Factual Rendering Guardrails\n"
+            "- Structural pages must not add metrics, charts, evidence cards, source snippets, "
+            "or retrieved-memory text. Render only title/meta/subtitle-level content.\n"
+        )
+    return (
+        "\n## Factual Rendering Guardrails\n"
+        "- Use only the current page manuscript and Slide Context as visible factual sources.\n"
+        "- Slide Context and evidence anchors are private grounding. Do not print card IDs, "
+        "section headings, raw snippets, or evidence-memory blocks as visible slide cards.\n"
+        "- Do not introduce new visible numbers, dates, percentages, sample sizes, ranks, "
+        "or axis tick values while drawing native SVG visuals.\n"
+        "- Preserve exact numeric precision from the page inputs. Do not round values "
+        "such as 90.37% to 90.4%, and do not invent chart scales like 70%/80%/90% "
+        "unless those exact values appear in the manuscript or Slide Context.\n"
+        "- If an exact chart would need invented ticks or interpolated values, draw a "
+        "qualitative diagram, ranked list, or bar comparison without numeric scale ticks.\n"
+    )
+
+
+def _layout_generation_guardrails(page_type: str, has_paper_figure: bool) -> str:
+    if page_type in STRUCTURAL_PAGE_TYPES:
+        return (
+            "\n## Layout Generation Guardrails\n"
+            "- Structural pages use centered or lightly asymmetric title composition only. "
+            "Do not create dense grids, figure/text splits, or bottom evidence callouts.\n"
+        )
+
+    figure_note = (
+        "- This page has a paper figure assignment: reserve the figure box first, then "
+        "fit text/caption/callout regions around it. Use a balanced image/text split "
+        "such as figure-left/text-right or figure-top/notes-bottom. Keep the figure "
+        "and text regions visually comparable in height; avoid a large blank quadrant.\n"
+        if has_paper_figure
+        else "- If no paper figure is assigned, use a balanced text/diagram/card layout "
+        "rather than a sparse bullet list floating in empty space.\n"
+    )
+    return (
+        "\n## Layout Generation Guardrails\n"
+        "- Build the page from explicit rectangular regions before drawing details. "
+        "If the Page Design Contract includes `Region Plan`, follow those x/y/w/h boxes. "
+        "If it does not, choose one stable family: figure-left-text-right, "
+        "text-left-figure-right, two-column-evidence, three-card-grid, "
+        "process-flow-with-evidence, comparison-table-callout, or "
+        "full-width-chart-with-notes.\n"
+        "- Use shared gutters of 24-40px and align region edges. Content slides should "
+        "meaningfully occupy about 65-85% of the content area without edge crowding.\n"
+        "- Avoid free-floating bullets, detached bottom callouts, and large blank bands. "
+        "A callout should align with the same column or span a clear full-width grid row.\n"
+        f"{figure_note}"
+        "- Chinese wrapping: body text should usually fit 24-36 CJK characters per line "
+        "(18-30 inside cards). Do not insert repeated manual line breaks that create "
+        "short orphan lines under 10 CJK characters. If a paragraph wraps poorly, widen "
+        "the text box, reduce font size by 1-2px, split into grouped callouts, or rewrite "
+        "the sentence more compactly.\n"
+        "- Before drawing text, perform a capacity preflight for every Region Plan box. "
+        "Budget heading height, line count, line-height, caption space, and padding. "
+        "Require every line's estimated right edge and the final baseline plus descender "
+        "space to remain inside the region. Do not use a shallow bottom card whose first "
+        "line fits but later tspans fall below the card.\n"
+        "- For tables, determine column widths from the longest visible label/cell first, "
+        "then place rows. Keep method names separate from numeric columns and right-align "
+        "numbers; never rely on guessed x positions that can overlap.\n"
     )
 
 
@@ -1150,8 +1219,17 @@ def _generation_static_report(
     used_paper_figures: dict[str, int],
     required_icon: str | None,
     include_general_svg_checks: bool,
+    factual_number_context: str = "",
+    page_num: int | None = None,
+    total_pages: int | None = None,
 ) -> CriticReport:
     reports = [
+        _validate_factual_numbers(
+            svg_content,
+            factual_number_context=factual_number_context,
+            page_num=page_num,
+            total_pages=total_pages,
+        ),
         _validate_paper_figure_refs(
             svg_content,
             allowed_figures=allowed_figures,
@@ -1166,6 +1244,179 @@ def _generation_static_report(
     if include_general_svg_checks:
         reports.insert(0, check_svg(svg_content, critic_config))
     return _merge_reports(*reports)
+
+
+def _static_attempt_limit_for_report(
+    max_critic_attempts: int,
+    report: CriticReport | None,
+) -> int:
+    if max_critic_attempts > 0:
+        return max_critic_attempts
+    limit = FIGURE_SAFETY_CRITIC_ATTEMPTS
+    if report is not None and any(
+        violation.rule == "unsupported_visible_number"
+        for violation in report.violations
+    ):
+        limit = max(limit, FACTUAL_SAFETY_CRITIC_ATTEMPTS)
+    return limit
+
+
+def _repair_focus_guidance(report: CriticReport) -> str:
+    if any(violation.rule == "unsupported_visible_number" for violation in report.violations):
+        return (
+            "\n\nWhen fixing unsupported visible numbers, do not approximate or invent a "
+            "replacement. Replace the visible number only with the exact source value "
+            "already present in this page's manuscript or Slide Context, including the "
+            "same precision and unit; if no exact value is available in the page input, "
+            "remove the numeric label or rewrite it qualitatively. Do not add chart "
+            "ticks, rounded labels, shorthand units, or opaque derived percentages. "
+            "A derived percentage is acceptable only when the slide visibly shows the "
+            "source inputs and calculation."
+        )
+    return ""
+
+
+_FACTUAL_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])[-+]?\d+(?:[.,]\d+)*(?:%|pp|×|x|X)?"
+    r"(?![A-Za-z0-9_.])"
+)
+
+
+def _normalize_factual_number_token(value: str) -> str:
+    token = (value or "").strip().replace(",", "").lower()
+    if not token:
+        return ""
+    suffix = ""
+    for candidate in ("pp", "%", "×", "x"):
+        if token.endswith(candidate):
+            suffix = candidate
+            token = token[: -len(candidate)]
+            break
+    try:
+        if "." in token:
+            token = f"{float(token):.12f}".rstrip("0").rstrip(".")
+        else:
+            token = str(int(token))
+    except ValueError:
+        pass
+    return token + suffix
+
+
+def _factual_numbers(text: str) -> set[str]:
+    values: set[str] = set()
+    for match in _FACTUAL_NUMBER_RE.finditer(text or ""):
+        normalized = _normalize_factual_number_token(match.group(0))
+        if normalized and normalized not in {"0", "1"}:
+            values.add(normalized)
+    return values
+
+
+_PERCENT_DERIVATION_PATTERNS = (
+    re.compile(
+        r"(?P<result>\d+(?:\.\d+)?)\s*%\s*(?:=|≈|约等于|等于)\s*"
+        r"(?P<left>\d+(?:\.\d+)?)\s*%\s*(?P<op>[+-])\s*"
+        r"(?P<right>\d+(?:\.\d+)?)\s*%"
+    ),
+    re.compile(
+        r"(?P<left>\d+(?:\.\d+)?)\s*%\s*(?P<op>[+-])\s*"
+        r"(?P<right>\d+(?:\.\d+)?)\s*%\s*(?:=|≈|约等于|等于)\s*"
+        r"(?P<result>\d+(?:\.\d+)?)\s*%"
+    ),
+)
+
+
+def _normalize_percent_literal(value: str) -> str:
+    try:
+        return f"{float(value):.12f}".rstrip("0").rstrip(".")
+    except ValueError:
+        return value.strip()
+
+
+def _percent_literal_is_supported(value: str, allowed: set[str]) -> bool:
+    normalized = _normalize_percent_literal(value)
+    return normalized in {"0", "100"} or normalized in allowed or f"{normalized}%" in allowed
+
+
+def _transparent_derived_factual_numbers(
+    visible_text: str,
+    allowed: set[str],
+) -> set[str]:
+    derived: set[str] = set()
+    for pattern in _PERCENT_DERIVATION_PATTERNS:
+        for match in pattern.finditer(visible_text or ""):
+            left = float(match.group("left"))
+            right = float(match.group("right"))
+            result = float(match.group("result"))
+            if not _percent_literal_is_supported(match.group("left"), allowed):
+                continue
+            if not _percent_literal_is_supported(match.group("right"), allowed):
+                continue
+            calculated = left + right if match.group("op") == "+" else left - right
+            if abs(calculated - result) > 0.005:
+                continue
+            for group_name in ("left", "right", "result"):
+                normalized = _normalize_percent_literal(match.group(group_name))
+                if normalized not in {"0", "1"}:
+                    derived.add(f"{normalized}%")
+    return derived
+
+
+def _svg_visible_text_content(svg_content: str) -> str:
+    try:
+        root = ET.fromstring(svg_content)
+    except ET.ParseError:
+        return ""
+    lines: list[str] = []
+    for elem in root.iter():
+        if _local_tag(elem.tag) != "text":
+            continue
+        text = re.sub(r"\s+", " ", "".join(elem.itertext())).strip()
+        if text:
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def _validate_factual_numbers(
+    svg_content: str,
+    *,
+    factual_number_context: str,
+    page_num: int | None,
+    total_pages: int | None,
+) -> CriticReport:
+    if not factual_number_context.strip():
+        return CriticReport(passed=True, violations=[])
+
+    allowed = _factual_numbers(factual_number_context)
+    if page_num is not None:
+        allowed.add(str(page_num))
+    if total_pages is not None:
+        allowed.add(str(total_pages))
+
+    visible_text = _svg_visible_text_content(svg_content)
+    visible = _factual_numbers(visible_text)
+    transparent_derived = _transparent_derived_factual_numbers(visible_text, allowed)
+    missing = sorted(visible - allowed - transparent_derived)
+    if not missing:
+        return CriticReport(passed=True, violations=[])
+
+    detail_numbers = ", ".join(missing[:12])
+    sample = re.sub(r"\s+", " ", visible_text).strip()[:500]
+    return CriticReport(
+        passed=False,
+        violations=[
+            Violation(
+                rule="unsupported_visible_number",
+                severity="error",
+                detail=(
+                    "Visible SVG text contains number(s) not present in the current "
+                    f"page manuscript/slide context/page numbering: {detail_numbers}. "
+                    "Remove invented chart ticks, rounded values, derived labels, or "
+                    "shorthand units; preserve exact source precision. Visible text "
+                    f"sample: {sample}"
+                ),
+            )
+        ],
+    )
 
 
 def _pseudo_icon_badge_violations(svg_content: str) -> list[Violation]:
@@ -1522,6 +1773,11 @@ async def generate_svg_pages(
         img_layout = _figure_layout_guidance(used_figures)
         page_role_guidance = _page_role_guidance(page_type)
         structural_override = _structural_page_override_block(page_type)
+        factual_guardrails = _factual_rendering_guardrails(page_type)
+        layout_guardrails = _layout_generation_guardrails(
+            page_type,
+            has_paper_figure=bool(used_figures),
+        )
         structural_figure_policy = (
             "\n- Structural page paper-figure policy: do not place extracted "
             "paper figures (`../sources/images/fig_*.png`) on cover, chapter, "
@@ -1564,6 +1820,14 @@ async def generate_svg_pages(
             if slide_memory
             else "\n\n"
         )
+        factual_number_context = "\n".join(
+            part
+            for part in (
+                rewritten_content,
+                slide_memory,
+            )
+            if part
+        )
         conversation.append(
             LLMMessage.user(
                 f"## Current Structured Slide Plan\n\n{slide_plan_block}\n\n"
@@ -1579,6 +1843,8 @@ async def generate_svg_pages(
                 f"- Keep all visible text in the requested language.\n"
                 f"{page_role_guidance}\n"
                 f"{structural_override}"
+                f"{factual_guardrails}"
+                f"{layout_guardrails}"
                 f"- {char_budget}"
                 f"{structural_figure_policy}\n\n"
                 f"{figure_guidance}\n\n"
@@ -1654,10 +1920,9 @@ async def generate_svg_pages(
             best_svg = svg_content
             visual_attempts = 0
             critic_attempt = 1
-            static_attempt_limit = (
-                max_critic_attempts
-                if max_critic_attempts > 0
-                else FIGURE_SAFETY_CRITIC_ATTEMPTS
+            static_attempt_limit = _static_attempt_limit_for_report(
+                max_critic_attempts,
+                None,
             )
             while True:
                 report: CriticReport | None = None
@@ -1672,6 +1937,13 @@ async def generate_svg_pages(
                         used_paper_figures=used_paper_figures,
                         required_icon=required_icon,
                         include_general_svg_checks=max_critic_attempts > 0,
+                        factual_number_context=factual_number_context,
+                        page_num=page_num,
+                        total_pages=len(pages),
+                    )
+                    static_attempt_limit = _static_attempt_limit_for_report(
+                        max_critic_attempts,
+                        report,
                     )
                     if report.passed and max_critic_attempts <= 0:
                         report = None
@@ -1774,6 +2046,7 @@ async def generate_svg_pages(
 
                 repair_prompt_text = (
                     report.to_prompt_block()
+                    + _repair_focus_guidance(report)
                     + "\n\nWhen fixing paper-figure violations, resize the image "
                     "to the visible frame, preserve the source aspect ratio, keep "
                     "the full rendered image inside x=0..1260 and y=80..640, and "
@@ -1859,10 +2132,44 @@ async def generate_svg_pages(
             yield page_num, best_svg
         else:
             conversation.append(LLMMessage.assistant(response.content))
-            raise RuntimeError(
+            failure_message = (
                 f"Failed to generate parseable SVG for page {page_num}/{len(pages)} "
                 f"({page_name}) after {MAX_SVG_EXTRACTION_ATTEMPTS} attempts"
             )
+            fallback_svg = _fallback_svg_for_page(
+                page_num,
+                len(pages),
+                page_content,
+                page_name,
+                failure_message,
+            )
+            archive_rel = _archive_repair_svg(
+                repair_archive_dir,
+                page_num=page_num,
+                attempt=MAX_SVG_EXTRACTION_ATTEMPTS,
+                label="fallback",
+                svg_content=fallback_svg,
+            )
+            await _emit_critic(
+                on_critic,
+                page_num,
+                MAX_SVG_EXTRACTION_ATTEMPTS,
+                _fallback_critic_report(failure_message),
+                None,
+                archive_rel,
+                {
+                    "source": "fallback",
+                    "fallback": True,
+                    "reason": failure_message,
+                    "archive_path": archive_rel,
+                },
+            )
+            svg_path = svg_output_dir / f"{page_num:02d}_{page_name}.svg"
+            svg_path.write_text(fallback_svg, encoding="utf-8")
+            conversation.append(LLMMessage.assistant(f"```svg\n{fallback_svg}\n```"))
+            if on_svg_update is not None:
+                await on_svg_update(page_num, fallback_svg)
+            yield page_num, fallback_svg
 
 
 def _extract_design_section(design_spec: str, roman: str) -> str:
@@ -2644,6 +2951,11 @@ async def _generate_parallel_page(
     img_layout = _figure_layout_guidance(used_figures)
     page_role_guidance = _page_role_guidance(page_type)
     structural_override = _structural_page_override_block(page_type)
+    factual_guardrails = _factual_rendering_guardrails(page_type)
+    layout_guardrails = _layout_generation_guardrails(
+        page_type,
+        has_paper_figure=bool(used_figures),
+    )
     structural_figure_policy = (
         "\n- Structural page paper-figure policy: do not place extracted "
         "paper figures (`../sources/images/fig_*.png`) on cover, chapter, "
@@ -2691,6 +3003,14 @@ async def _generate_parallel_page(
         if previous_layout_style
         else ""
     )
+    factual_number_context = "\n".join(
+        part
+        for part in (
+            rewritten_content,
+            slide_context,
+        )
+        if part
+    )
     extra_block = f"\n\n{extra_instruction}" if extra_instruction else ""
     conversation: list[LLMMessage] = [
         LLMMessage.system(system_prompt),
@@ -2719,6 +3039,8 @@ async def _generate_parallel_page(
             f"- Keep all visible text in the requested language.\n"
             f"{page_role_guidance}\n"
             f"{structural_override}"
+            f"{factual_guardrails}"
+            f"{layout_guardrails}"
             f"- {char_budget}"
             f"{structural_figure_policy}\n\n"
             f"{figure_guidance}\n\n"
@@ -2795,10 +3117,41 @@ async def _generate_parallel_page(
 
     if not svg_content:
         conversation.append(LLMMessage.assistant(response.content))
-        raise RuntimeError(
+        failure_message = (
             f"Failed to generate parseable SVG for page {page_num}/{total_pages} "
             f"({page_name}) after {MAX_SVG_EXTRACTION_ATTEMPTS} attempts"
         )
+        fallback_svg = _fallback_svg_for_page(
+            page_num,
+            total_pages,
+            str(page_input["page_content"]),
+            page_name,
+            failure_message,
+        )
+        archive_rel = _archive_repair_svg(
+            repair_archive_dir,
+            page_num=page_num,
+            attempt=MAX_SVG_EXTRACTION_ATTEMPTS,
+            label="fallback",
+            svg_content=fallback_svg,
+        )
+        await _emit_critic(
+            on_critic,
+            page_num,
+            MAX_SVG_EXTRACTION_ATTEMPTS,
+            _fallback_critic_report(failure_message),
+            None,
+            archive_rel,
+            {
+                "source": "fallback",
+                "fallback": True,
+                "reason": failure_message,
+                "archive_path": archive_rel,
+            },
+        )
+        if on_svg_update is not None:
+            await on_svg_update(page_num, fallback_svg)
+        return page_num, fallback_svg
 
     conversation.append(LLMMessage.assistant(f"```svg\n{svg_content}\n```"))
 
@@ -2807,10 +3160,9 @@ async def _generate_parallel_page(
     critic_attempt = 1
     max_critic_attempts = max(0, int(max_critic_attempts))
     visual_qa_max_attempts = max(0, int(visual_qa_max_attempts or 0))
-    static_attempt_limit = (
-        max_critic_attempts
-        if max_critic_attempts > 0
-        else FIGURE_SAFETY_CRITIC_ATTEMPTS
+    static_attempt_limit = _static_attempt_limit_for_report(
+        max_critic_attempts,
+        None,
     )
 
     while True:
@@ -2826,6 +3178,13 @@ async def _generate_parallel_page(
                 used_paper_figures={},
                 required_icon=required_icon,
                 include_general_svg_checks=max_critic_attempts > 0,
+                factual_number_context=factual_number_context,
+                page_num=page_num,
+                total_pages=total_pages,
+            )
+            static_attempt_limit = _static_attempt_limit_for_report(
+                max_critic_attempts,
+                report,
             )
             if report.passed and max_critic_attempts <= 0:
                 report = None
@@ -2919,6 +3278,7 @@ async def _generate_parallel_page(
         )
         repair_prompt_text = (
             report.to_prompt_block()
+            + _repair_focus_guidance(report)
             + "\n\nWhen fixing paper-figure violations, resize the image "
             "to the visible frame, preserve the source aspect ratio, keep "
             "the full rendered image inside x=0..1260 and y=80..640, and "
@@ -3227,6 +3587,152 @@ def _extract_svg(text: str) -> str | None:
         return match.group(1).strip()
 
     return None
+
+
+def _fallback_critic_report(reason: str) -> CriticReport:
+    return CriticReport(
+        passed=False,
+        violations=[
+            Violation(
+                rule="svg_extraction_failed_fallback",
+                severity="warning",
+                detail=(
+                    "The model did not return parseable SVG after bounded retries; "
+                    f"a conservative editable fallback slide was generated. {reason}"
+                ),
+            )
+        ],
+        canvas=(1280.0, 720.0),
+    )
+
+
+def _fallback_svg_for_page(
+    page_num: int,
+    total_pages: int,
+    page_content: str,
+    page_name: str,
+    reason: str,
+) -> str:
+    visible = strip_page_type_metadata(page_content)
+    title, subtitle = _extract_page_title_parts(visible)
+    title = title or page_name.replace("_", " ").title() or f"Page {page_num}"
+    bullets = _fallback_bullets(visible, title, subtitle)
+    title_lines = _wrap_svg_text(title, 24)
+    subtitle_lines = _wrap_svg_text(subtitle, 52) if subtitle else []
+    bullet_lines: list[list[str]] = [
+        _wrap_svg_text(bullet, 60)[:2] for bullet in bullets[:5]
+    ]
+
+    parts = [
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1280 720\">",
+        "  <rect width=\"1280\" height=\"720\" fill=\"#FFFFFF\"/>",
+        "  <rect x=\"40\" y=\"36\" width=\"220\" height=\"4\" rx=\"2\" fill=\"#2B6CB0\"/>",
+        "  <text x=\"1180\" y=\"54\" text-anchor=\"end\" font-family=\"Microsoft YaHei, Arial, sans-serif\" font-size=\"13\" fill=\"#A0AEC0\">自动降级页</text>",
+    ]
+    y = 105
+    for line in title_lines[:2]:
+        parts.append(
+            f"  <text x=\"60\" y=\"{y}\" font-family=\"Microsoft YaHei, Arial, sans-serif\" "
+            f"font-size=\"30\" font-weight=\"700\" fill=\"#1A365D\">{html_escape(line)}</text>"
+        )
+        y += 38
+    for line in subtitle_lines[:2]:
+        parts.append(
+            f"  <text x=\"60\" y=\"{y + 8}\" font-family=\"Microsoft YaHei, Arial, sans-serif\" "
+            f"font-size=\"18\" fill=\"#718096\">{html_escape(line)}</text>"
+        )
+        y += 26
+    y = max(y + 24, 205)
+    parts.append(
+        "  <rect x=\"60\" y=\"176\" width=\"1100\" height=\"1\" fill=\"#E2E8F0\"/>"
+    )
+    if not bullet_lines:
+        bullet_lines = [[
+            "该页原始模型输出不可解析；已保留标题并生成可编辑占位内容，建议后续单页重试。"
+        ]]
+    for idx, lines in enumerate(bullet_lines, start=1):
+        if y > 585:
+            break
+        parts.append(f"  <circle cx=\"72\" cy=\"{y - 5}\" r=\"4\" fill=\"#2B6CB0\"/>")
+        for line_idx, line in enumerate(lines):
+            x = 92
+            parts.append(
+                f"  <text x=\"{x}\" y=\"{y + line_idx * 24}\" "
+                f"font-family=\"Microsoft YaHei, Arial, sans-serif\" font-size=\"18\" "
+                f"fill=\"#2D3748\">{html_escape(line)}</text>"
+            )
+        y += 58 if len(lines) > 1 else 38
+    safe_reason = _wrap_svg_text(reason, 92)[:2]
+    parts.append(
+        "  <rect x=\"60\" y=\"600\" width=\"1100\" height=\"34\" rx=\"4\" fill=\"#F7FAFC\" stroke=\"#E2E8F0\"/>"
+    )
+    for idx, line in enumerate(safe_reason):
+        parts.append(
+            f"  <text x=\"76\" y=\"{621 + idx * 16}\" font-family=\"Arial, sans-serif\" "
+            f"font-size=\"11\" fill=\"#718096\">{html_escape(line)}</text>"
+        )
+    parts.extend(
+        [
+            "  <rect x=\"40\" y=\"660\" width=\"1200\" height=\"1\" fill=\"#E2E8F0\"/>",
+            f"  <text x=\"1240\" y=\"690\" text-anchor=\"end\" font-family=\"Arial, sans-serif\" font-size=\"14\" fill=\"#A0AEC0\">{page_num} / {total_pages}</text>",
+            "</svg>",
+        ]
+    )
+    return "\n".join(parts)
+
+
+def _fallback_bullets(
+    visible_page_content: str,
+    title: str,
+    subtitle: str,
+) -> list[str]:
+    candidates: list[str] = []
+    for raw_line in visible_page_content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#") or line.startswith("[[FIG:"):
+            continue
+        line = re.sub(r"^\s*(?:[-*•]|\d+[\.)、])\s*", "", line).strip()
+        line = re.sub(r"^\*\*(.*?)\*\*$", r"\1", line).strip()
+        if not line or line == title or line == subtitle:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            continue
+        candidates.append(line)
+    return candidates
+
+
+def _wrap_svg_text(text: str, max_chars: int) -> list[str]:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+    lines: list[str] = []
+    current = ""
+    for token in re.split(r"(\s+)", text):
+        if not token:
+            continue
+        trial = current + token
+        if len(trial.strip()) <= max_chars:
+            current = trial
+            continue
+        if current.strip():
+            lines.append(current.strip())
+        current = token
+    if current.strip():
+        lines.append(current.strip())
+    expanded: list[str] = []
+    for line in lines:
+        if len(line) <= max_chars:
+            expanded.append(line)
+        else:
+            expanded.extend(
+                line[index : index + max_chars]
+                for index in range(0, len(line), max_chars)
+            )
+    return expanded
 
 
 def _build_svg_extraction_retry_prompt(

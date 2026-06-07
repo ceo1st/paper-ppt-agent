@@ -77,11 +77,16 @@ class OpenAIProvider(LLMProvider):
         # retry/backoff, so leaving the SDK's default 2 internal retries on
         # would double-retry and, combined with the 600s default timeout,
         # let a hung upstream block a single call for up to 30 min.
+        http_client = httpx.AsyncClient(
+            timeout=settings.llm_request_timeout,
+            trust_env=False,
+        )
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=normalized_base_url,
             timeout=settings.llm_request_timeout,
             max_retries=0,
+            http_client=http_client,
         )
         self._api_key = api_key
         self._provider_name = provider_name
@@ -374,7 +379,7 @@ class OpenAIProvider(LLMProvider):
         async def attempt():
             last_error: BaseException | None = None
             timeout = httpx.Timeout(120.0, connect=30.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
                 for endpoint in endpoints:
                     endpoint_retryable_error: _RetryableRawChatError | None = None
                     for payload in payloads:

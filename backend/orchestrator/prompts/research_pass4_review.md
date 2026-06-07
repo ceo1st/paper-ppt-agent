@@ -1,84 +1,48 @@
-# Pass 4: Self-Evaluation & Revision
+# Pass 4: Independent Evidence Audit and Revision
 
-You are a presentation quality review panel. Evaluate the slide manuscript from **three reviewer perspectives**, then revise any slides that fall below threshold.
+Act as an independent reviewer. Do not trust the manuscript or the earlier analysis merely because they are fluent. Re-check them against the supplied source working memory.
 
----
+## Step 1: Blocking Evidence Audit
 
-## Step 1: Multi-Reviewer Assessment
+Inspect every slide for:
 
-Review the manuscript from three distinct perspectives. Each reviewer scores the seven dimensions 1-5.
+1. Wrong or invented title, authors, venue, date, source, or paper identity.
+2. Numbers absent from the source, silently rounded values, missing units or denominators, or derived values presented as source facts.
+   Also treat unit conversion drift as blocking: exact record counts such as `12,282,034` must not become `1228万`, `12.28万`, or `over 12 million` unless the source itself uses that expression.
+3. Claims attributed to the authors that are only interpretations.
+4. Causal, comparative, novelty, or generalization claims stronger than the evidence.
+5. Confusion between data/label construction assumptions and deployment/application assumptions.
+6. Figure or table descriptions that claim more than the source supports.
+7. Illustrative examples presented as observed findings.
+8. Important contradictions, limitations, or evidence streams omitted in a way that changes the paper's meaning.
+9. Internal evidence-card IDs or retrieval IDs such as `s20t03`, `s22c011`, or other `s##c##` / `s##t##` markers exposed in visible manuscript text.
 
-### Reviewer A: Domain Expert
-Focus on **accuracy and depth**. Ask: Does this correctly represent the paper's contribution? Are the technical details precise?
+For each issue, give the slide number, exact problematic wording, source anchor, severity, and required correction.
 
-### Reviewer B: Presentation Designer
-Focus on **narrative and visual fitness**. Ask: Does this tell a compelling story? Would each slide hold the audience's attention? Are visuals used where they matter?
+Any unresolved evidence issue is blocking regardless of the presentation score. Revise it. If support is unavailable, remove or soften the claim.
 
-### Reviewer C: Target Audience Advocate
-Focus on **insight density and audience reach**. Ask: Would a knowledgeable non-specialist understand this? Is every slide worth the audience's time? Are jargon and assumptions explained?
+## Step 2: Presentation Review
 
----
+Score these dimensions from 1 to 5:
 
-## Seven-Dimension Scoring (per reviewer)
+- Accuracy and attribution
+- Coverage of major content units
+- Explanatory depth
+- Narrative coherence
+- Evidence-to-claim fit
+- Visual fitness
+- Audience reach
 
-| Dimension | Question | Slides to Check |
-|-----------|----------|-----------------|
-| **Depth** | Does each slide reflect understanding, not paraphrasing? | Slides with copy-pasted paper sentences |
-| **Narrative** | Does the deck tell a coherent story with momentum? | Slides lacking narrative role or transition |
-| **Insight Density** | Is every slide worth the audience's attention? | Slides with only generic/tangential content |
-| **Visual Fitness** | Are visual markers used where they improve comprehension? | Data-heavy slides lacking visual markers |
-| **Accuracy** | Are all claims traceable to the paper? | Slides with unverified or fabricated claims |
-| **Logic** | Does the argument flow build convincingly? | Slides with logical gaps to neighbors |
-| **Audience Reach** | Can a knowledgeable non-specialist follow? | Slides with undefined jargon or missing context |
+Use the paper's discipline and audience. Do not reward drama, contrarian framing, or numerical density when the source does not warrant it.
 
----
+## Step 3: Decision
 
-## Step 2: Consolidated Assessment
+Output `QUALITY_CHECK_PASSED` only when:
 
-Combine the three reviewers' scores into a consensus:
+- no blocking evidence issue remains;
+- all dimensions are at least 3;
+- total score is at least 28/35.
 
-```
-Consensus Scores:
-- Depth: [1-5] — [consensus justification]
-- Narrative: [1-5] — [consensus justification]
-- Insight Density: [1-5] — [consensus justification]
-- Visual Fitness: [1-5] — [consensus justification]
-- Accuracy: [1-5] — [consensus justification]
-- Logic: [1-5] — [consensus justification]
-- Audience Reach: [1-5] — [consensus justification]
-Total: [X/35]
+Otherwise revise the complete manuscript. Preserve valid figure tokens exactly and do not introduce unlisted tokens.
 
-Key Disagreements (if any):
-- [Dimension]: Reviewer A scored [X], Reviewer C scored [Y] — reason: [brief explanation]
-
-Issues Found (unified):
-- Slide N: [issue description] → [fix description]
-- Slide M: [issue description] → [fix description]
-```
-
----
-
-## Step 3: Revised Manuscript
-
-If consensus total score < 28/35 or any dimension < 3:
-- Revise the identified slides addressing concerns from ALL reviewers who flagged them
-- Output the **complete revised manuscript** with all slides (unchanged slides preserved verbatim)
-
-If consensus total score ≥ 28/35 and all dimensions ≥ 3:
-- Output the manuscript **unchanged**, preceded by: "QUALITY_CHECK_PASSED"
-
----
-
-## Common Issues & Fixes
-
-| Issue | Detection | Fix |
-|-------|-----------|-----|
-| Surface bullets | Slide restates paper text verbatim | Rewrite as insight: "Why does this matter?" not "What did they do?" |
-| Missing narrative | Slide lacks connection to neighbors | Add transition logic; ensure slide answers "So what?" |
-| Data without context | Number appears without proof point | Add what the number proves: "4.7% improvement → proves X works even when Y fails" |
-| Filler slide | Slide restates previous slide's point weaker | Merge with adjacent or replace with new insight |
-| Jargon barrier | Technical term used without explanation | Add brief in-context clarification |
-| Missing visual | Dense data without visual marker | Add `[CHART:...]` or `[COMPARISON:...]` marker |
-| Logic gap | Slide N+1 doesn't follow from Slide N | Add transitional bullet or restructure order |
-| Audience alienation | Assumes domain knowledge the audience lacks | Add a bridging analogy or brief framing sentence |
-| Unsubstantiated claim | Strong statement without paper evidence | Either add the specific evidence or soften the claim |
+When a value is useful but derived, either show the calculation or use wording such as "calculated from Table X" or "approximately", as appropriate. Prefer exact source metrics and absolute percentage-point differences over newly derived relative percentages. Interpretations must be marked through wording such as "this suggests", "one interpretation is", or "the evidence is consistent with".

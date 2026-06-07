@@ -40,7 +40,11 @@ def normalize_manuscript_slide_delimiters(manuscript: str) -> str:
         return text
 
     delimiter_pages = [page.strip() for page in _SLIDE_DELIMITER_RE.split(text) if page.strip()]
-    if len(delimiter_pages) >= len(markers):
+    delimiters_already_valid = (
+        len(delimiter_pages) == len(markers)
+        and all(_PAGE_TYPE_RE.search(page) for page in delimiter_pages)
+    )
+    if delimiters_already_valid:
         return text
 
     prefix = text[: markers[0].start()].strip()
@@ -142,6 +146,7 @@ def page_type_budget_guidance(
             f"{lead}\n"
             "- Planning: use chapter/transition slides only when they help the narrative; usually 2-5, or the user-requested chapter count if specified. Do not force a fixed chapter count.\n"
             "- Put `<!-- page_type: cover|chapter|content|ending -->` at the top of every slide.\n"
+            "- Never put a `---` delimiter immediately after a page_type metadata line; the slide content must follow the metadata line, and `---` appears only between complete slides.\n"
             "- Cover, chapter/transition, and ending pages are real slides, not styling guesses.\n"
             "- Cover pages are lightweight title/meta slides: title, optional subtitle, paper metadata (authors/source/venue/date when available), and a few short context or thesis lines. Do not insert paper figures or turn the cover into a detailed content slide.\n"
             "- Chapter/ending pages are minimal structural slides: no bullets, numbered question lists, metrics/KPI blocks, paper figures, or labeled blocks such as `核心问题` / `本章看点`.\n"
@@ -152,9 +157,11 @@ def page_type_budget_guidance(
         )
     return (
         f"{lead}\n"
-        f"- Suggested structure: cover {budget['cover']}, about {budget['chapter']} chapter/transition slide(s), "
-        f"content about {budget['content']}, ending {budget['ending']}. Treat chapter count as a planning hint; follow any user-requested chapter count when specified.\n"
+        f"- Planning budget: cover {budget['cover']}, about {budget['chapter']} chapter/transition slide(s), "
+        f"content about {budget['content']}, ending {budget['ending']}. Keep the total exactly {num_pages} slides, "
+        "but do not force a chapter divider when the paper's actual structure would make it shallow or redundant.\n"
         "- Put `<!-- page_type: cover|chapter|content|ending -->` at the top of every slide.\n"
+        "- Never put a `---` delimiter immediately after a page_type metadata line; the slide content must follow the metadata line, and `---` appears only between complete slides.\n"
         "- Cover, chapter/transition, and ending pages are real slides, not styling guesses.\n"
         "- Cover pages are lightweight title/meta slides: title, optional subtitle, paper metadata (authors/source/venue/date when available), and a few short context or thesis lines. Do not insert paper figures or turn the cover into a detailed content slide.\n"
         "- Chapter/ending pages are minimal structural slides: no bullets, numbered question lists, metrics/KPI blocks, paper figures, or labeled blocks such as `核心问题` / `本章看点`.\n"
