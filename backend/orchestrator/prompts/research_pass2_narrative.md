@@ -53,21 +53,24 @@ Every presentation needs these narrative beats. Design each:
 ## Step 3: Assign Content per Slide
 
 Before listing slides, internally group the deck into chapters. A `chapter` /
-transition slide is only valid when it introduces at least **two** following
-`content` slides. If a topic would have only one content slide, merge it into a
-neighboring chapter and mark that topic slide as `content` instead of creating a
-standalone divider.
+transition slide should be generated from your understanding of the paper's
+content logic, not from a fixed template. Chapter titles should reflect the
+paper's real conceptual blocks, argument stages, mechanisms, evidence clusters,
+or contribution logic. Slide 2 is a mandatory table of contents whose chapter
+titles must match the final chapter plan. Use a chapter divider only when it
+clarifies the narrative; if a topic is better handled as a single pivot, make it
+a `content` slide with a clear section label instead of a divider-only page.
 
 For each slide, specify in this exact format:
 
 ```
 Slide N: [Title]
-  Page type: [cover/chapter/content/ending]
+  Page type: [cover/toc/chapter/content/ending]
   Narrative role: [Hook/Tension/Core Insight/Mechanism/Evidence/Implications/Coda]
   Core insight: [The one thing the audience must remember]
   Key evidence: [Data point, figure, or argument that supports the insight]
   Visual strategy: [How to present — comparison, flow diagram, data table, before/after, etc.]
-  Detail density: [light/normal/rich — how much content this slide should carry]
+  Detail density: [page-derived — how much this particular slide should carry]
 ```
 
 ---
@@ -75,8 +78,9 @@ Slide N: [Title]
 ## Design Guidelines
 
 - **No filler slides**: Every slide must earn its place. If a slide doesn't advance understanding, merge it or cut it.
-- **Structural budget**: Cover, chapter/transition, content, and ending pages are counted slides. Keep the requested budget stable.
-- **Chapter grouping**: Do not create orphan or thin chapters. Every chapter divider must be followed by at least 2 content slides before the next chapter/ending page.
+- **Structural budget**: Cover, table-of-contents, chapter/transition, content, and ending pages are counted slides. Keep the requested budget stable.
+- **Mandatory TOC**: Slide 2 is always a table of contents and mirrors the final chapter titles.
+- **Chapter grouping**: Do not create dividers merely to announce a shallow topic. Let the paper's logic decide where dividers help.
 - **Minimal dividers**: Chapter slides are only title/subtitle/orientation slides. Detailed labels such as `核心问题` / `本章看点`, bullets, figures, metrics, and evidence must be assigned to content slides.
 - **Ending page**: Use it as a closing/thanks page, not a final content summary.
 - **Narrative momentum**: Each slide should create anticipation for the next. The audience should always wonder "and then what?"

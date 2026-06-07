@@ -61,6 +61,7 @@ The paper content lists available figures with stable tokens `[[FIG:fig_id]]`. W
 
 Before writing the Markdown, internally verify the chapter plan from Pass 2:
 
+- Chapter titles and boundaries should come from the paper's real content logic as understood in Pass 2, not from a fixed template.
 - Every `chapter` slide must introduce at least **two** following `content` slides before the next chapter or ending page.
 - If a planned chapter would cover only one content slide, merge it into a neighboring chapter and write that slide as `content`.
 - If a slide needs bullets, figures, metrics, labeled blocks such as `核心问题` / `本章看点`, or evidence, it is a `content` slide, not a `chapter` slide.
@@ -83,22 +84,25 @@ Produce Markdown with `---` separating each slide. Each slide:
 — Brief note about what this figure shows
 ```
 
-Use one page type per slide. Match the target slide budget. The ending page should be a closing/thanks page.
+Use one page type per slide. Match the target slide budget. Slide 2 must be a
+mandatory table of contents whose entries match the final chapter titles. The
+ending page should be a closing/thanks page.
 For `cover`, `chapter`, and `ending` slides, the Structural Page Rules below override the generic example format.
 
 ### Structural Page Rules
 
 - `cover` is a lightweight title/meta slide: title, optional subtitle, authors/source/venue/date if available, and a few short context or thesis lines. Do not include paper figures or turn it into a detailed research-background, contribution, metric, or results slide.
+- `toc` is the mandatory table-of-contents slide immediately after the cover. It lists the final chapter titles in narrative order and does not introduce new evidence.
 - `chapter` is a transition/divider slide: chapter title, optional short subtitle, and at most 1-2 brief orientation phrases. Do not include detailed metrics, evidence bullets, numbered question lists, charts, diagrams, paper figures, or labeled content blocks such as `核心问题` / `本章看点`.
 - All `chapter` slides must keep the same manuscript shape and visual intent across the deck: same title/subtitle pattern, no ad-hoc cards, no per-chapter mini-outline grids. Put detailed questions and preview bullets on the following `content` slides.
-- A chapter divider should normally introduce a real multi-slide section. If a topic would have only 1 shallow content slide, merge it into a neighboring chapter instead of creating a standalone divider; if the paper genuinely has a major single-slide pivot, use a `content` slide with a clear section label instead of a divider-only page.
+- A chapter divider should introduce a real narrative section. If the paper genuinely has a major single-slide pivot, use a `content` slide with a clear section label instead of a divider-only page.
 - `content` slides carry the actual evidence, mechanisms, figures, and detailed bullets. Do not style content slides as chapter dividers.
 
-### Density Guidelines
+### Page-Derived Density
 
-- **Normal**: 2-4 information-bearing bullets per content slide
-- **High**: 3-5 bullets, moderate density, surface reasoning chains
-- **Very High**: 4-6 bullets, analytically rich, cover mechanism + evidence + implication
+Choose each content slide's density from that slide's argument, evidence shape,
+figure needs, and readability. Do not use a global detail selector to decide how
+many bullets, evidence points, or visual blocks a page must carry.
 
 ---
 
@@ -115,5 +119,6 @@ For `cover`, `chapter`, and `ending` slides, the Structural Page Rules below ove
 - [ ] No filler slides — every slide earns its place
 - [ ] Interpretive insights from Pass 1 remain clearly distinguished from source claims
 - [ ] Each slide answers "So what?" — not just "What?"
-- [ ] No chapter divider exists only to announce a shallow one-slide topic
+- [ ] Slide 2 is a table of contents and matches the final chapter plan
+- [ ] No chapter divider exists only to announce a shallow topic
 - [ ] No chapter slide contains content-block labels, bullets, figures, metrics, or evidence

@@ -86,63 +86,27 @@ async def _search_icons_rag(
     return candidates
 
 
-# ── Offline concept-to-icon mapping ────────────────────────────────────────
-
-OFFLINE_ICON_PALETTE: list[tuple[str, list[str]]] = [
-    ("warning|risk|danger|failure|error|limitation", ["alert-triangle", "circle-exclamation", "alert-circle", "ban", "bug"]),
-    ("insight|idea|key|thesis|turning point|contribution", ["lightbulb", "sparkles", "bulb", "brain"]),
-    ("framework|architecture|model|module|system|pipeline", ["puzzle", "component", "cube", "layers", "stack"]),
-    ("method|process|approach|stage|step|algorithm", ["route", "git-branch", "arrow-right", "settings", "cog"]),
-    ("result|metric|performance|score|evaluation|experiment", ["chart-bar", "chart-line", "chart-pie", "activity", "target"]),
-    ("evidence|data|dataset|ablation|table", ["flask", "microscope", "clipboard", "database"]),
-    ("vision|perception|observation|attention|detection", ["eye", "search", "crosshairs"]),
-    ("safety|robust|protection|security|reliability", ["shield", "lock", "key"]),
-    ("people|user|human|team|collaboration", ["users", "user", "accessibility"]),
-    ("future|next|direction|implication|conclusion", ["rocket", "flag", "trophy", "book", "file-text"]),
-    ("growth|increase|improve|gain|rise", ["arrow-trend-up", "chart-line"]),
-    ("decline|decrease|reduce|loss|drop", ["arrow-trend-down"]),
-    ("success|complete|achieve|check|done", ["circle-checkmark", "circle-check", "badge-check"]),
-    ("efficiency|speed|fast|optimize|performance", ["bolt", "zap", "gauge"]),
-    ("communication|message|chat|feedback", ["comment", "message", "mail"]),
-    ("global|world|international|region", ["globe", "world", "map-pin"]),
-    ("time|deadline|schedule|clock|duration", ["clock", "calendar", "hourglass"]),
-    ("money|finance|cost|budget|price", ["dollar", "currency-dollar", "coin"]),
-]
-
-
 def _search_icons_offline(
     page_info: dict,
     lib: str,
 ) -> list[dict]:
-    """Match page title/purpose against concept patterns to find icons."""
-    text = " ".join(
-        [
-            str(page_info.get("title", "")),
-            str(page_info.get("purpose", "")),
-            str(page_info.get("excerpt", "")),
-        ]
-    ).lower()
+    """Search pre-built icon metadata on demand without reading SVG files."""
+    index = get_icon_index()
+    if not index.metadata_available:
+        return []
+
     seen: set[str] = set()
     candidates: list[dict] = []
-
-    for pattern, names in OFFLINE_ICON_PALETTE:
-        if not any(kw in text for kw in pattern.split("|")):
-            continue
-        for name in names:
-            path = f"{lib}/{name}"
+    for query in _page_icon_queries(page_info):
+        for result in index.search_metadata(query, lib=lib, k=ICON_RAG_CANDIDATES_PER_QUERY):
+            path = str(result.get("path") or "")
             if path in seen or not _icon_asset_exists(path):
                 continue
             seen.add(path)
-            candidates.append({
-                "path": path,
-                "name": name,
-                "lib": lib,
-                "category": pattern.split("|")[0],
-                "tags": [],
-                "score": 0.5,
-            })
-
-    return candidates
+            result["query"] = query
+            candidates.append(result)
+    candidates.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+    return candidates[:8]
 
 
 # ── Page info parsing ───────────────────────────────────────────────────────
@@ -305,55 +269,9 @@ def _format_candidates_table(
                 score_text = f"{float(score):.3f}" if isinstance(score, (int, float)) else "-"
                 lines.append(f"| `{c['path']}` | {cat} | {query} | {score_text} |")
         else:
-            lines.append("*(no strong shortlist candidates; use None unless the full catalog has a clearly better structural match)*")
+            lines.append("*(no strong shortlist candidates; use None)*")
         lines.append("")
 
-    return "\n".join(lines)
-
-
-def _collect_icon_catalog(lib: str) -> list[dict]:
-    index = get_icon_index()
-    icons: list[dict] = []
-    if index.is_available:
-        icons = index.get_all_icons(lib)
-    if icons:
-        return icons
-
-    lib_dir = settings.icons_dir / lib
-    if not lib_dir.exists():
-        return []
-    return [
-        {
-            "path": f"{lib}/{svg.stem}",
-            "name": svg.stem,
-            "lib": lib,
-            "category": "",
-            "tags": [],
-        }
-        for svg in sorted(lib_dir.glob("*.svg"))
-    ]
-
-
-def _format_full_icon_catalog(lib: str) -> str:
-    """Format the selected library as a compact exact-path catalog.
-
-    This is intentionally a plain list: the icon round is already isolated
-    from manuscript/layout generation, so it can spend attention on the icon
-    inventory without distracting the main strategist prompt.
-    """
-    icons = _collect_icon_catalog(lib)
-    if not icons:
-        return f"## Full Selectable Icon Catalog\n\nNo local icons found for `{lib}`."
-
-    paths = [f"`{icon['path']}`" for icon in icons if icon.get("path")]
-    lines = [
-        f"## Full Selectable Icon Catalog ({lib}, {len(paths)} icons)",
-        "",
-        "Use exact paths from this catalog. Prefer the per-page shortlist when it is semantically strong; use the full catalog when the shortlist misses a better natural metaphor.",
-        "",
-    ]
-    for i in range(0, len(paths), 8):
-        lines.append(", ".join(paths[i : i + 8]))
     return "\n".join(lines)
 
 
@@ -638,7 +556,6 @@ async def run_icon_round(
     prompt_text = (
         prompt_template
         .replace("{per_page_candidates_table}", candidates_table)
-        .replace("{full_icon_catalog}", _format_full_icon_catalog(icon_library))
     )
 
     messages = [

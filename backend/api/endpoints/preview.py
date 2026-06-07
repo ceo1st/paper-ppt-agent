@@ -240,6 +240,7 @@ async def export_pptist_preview_deck(job_id: str, file: UploadFile = File(...)) 
             detail=f"Exported PPTX is invalid after sanitizing: {'; '.join(validation_issues[:3])}",
         )
     exports_dir = project_dir / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     export_path = exports_dir / f"presentation_pptist_{timestamp}.pptx"
     await awrite_bytes(export_path, data)

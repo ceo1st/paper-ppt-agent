@@ -22,13 +22,14 @@ Layout:
 - Use 24-40px gutters between major regions and align edges across repeated layout families.
 - For figure slides, reserve the figure frame first and fit the image inside that frame preserving aspect ratio. Do not stretch the paper figure to fill a convenient box.
 - If content is sparse, fill space with a supported visual explanation: enlarge the paper figure, split bullets into labeled callouts, add a mechanism/process diagram grounded in the paper, or use a comparison strip. Do not invent data, axes, or decorative mini charts.
-- Before writing markup, calculate text capacity for each box. At minimum, check `text_right <= box_right - padding` and `last_baseline + font_size*0.25 <= box_bottom - padding`.
+- Before writing markup, check actual text geometry for each box. At minimum, require `text_right <= box_right - padding` and `last_baseline + font_size*0.25 <= box_bottom - padding`.
 - Reserve vertical space explicitly: heading, heading-to-body gap, `line_count * line_height`, caption/source, and bottom padding. Do not use an 80px card for a heading plus two body lines merely because the first baseline fits.
 - For tables, measure the longest visible cell in each column, assign column widths first, and right-align numeric columns. Do not position rows by guessed x coordinates that let labels and values overlap.
 
 Icons:
 
-- Search the configured local icon path before placing an icon. Useful commands include `rg --files <icons_path>`, `rg -i "<concept>" <icons_path>`, or a recursive SVG listing.
+- Search only after identifying a concrete icon need. Use `skills/paper-ppt-generate/scripts/search_icons.py --task agent_task.json --query "<short English concept>" --limit 8`.
+- The search helper reads pre-built metadata only. Do not enumerate icon directories or read SVG contents while choosing an icon.
 - Allowed icons are existing local SVG/icon files or template-provided vector assets that actually exist.
 - Do not use letters, initials, ASCII characters, Unicode symbols, dingbats, stars, checkmarks, arrows, pictographs, or emoji as icon substitutes.
 - If no suitable local icon exists, omit the icon or use a neutral non-icon shape/accent. Never fake an icon with text such as `P`, `F`, `A`, or a star glyph.
@@ -39,9 +40,9 @@ Text:
 - Use normal SVG `<text>` elements.
 - Avoid excessive nested `tspan` complexity.
 - Do not use `foreignObject`, `<style>`, CSS classes, masks, filters, clip paths, scripts, event handlers, or remote URLs.
-- Keep line lengths short enough for the slide.
-- For Chinese body copy, target about 24-36 CJK characters per line in ordinary paragraphs and 18-30 in cards. Avoid several consecutive visible lines under 10 CJK characters except labels, legends, or final paragraph lines.
-- If wrapping looks ragged, fix the layout or copy before finishing: widen the text box, reduce font size slightly, split the sentence into callouts, or rewrite more concisely. Do not accept huge blank bands caused by narrow text boxes.
+- Wrap against each text box's actual width and font size.
+- For Chinese body copy, let ordinary non-final lines use most of the available width, break at semantic boundaries, and allow light raggedness. Do not force a fixed characters-per-line target.
+- If wrapping is clearly wasteful or clips, widen or reallocate the text region, tune gaps, or adjust typography. Do not create huge blank bands with unnecessarily narrow text boxes.
 - Preserve exact source numbers and units. Do not use K/M/B shorthand, reduce decimal precision, or manufacture chart ticks unless the source itself does so. Put transparent derivations and their inputs on the same slide.
 
 Images:
@@ -58,6 +59,7 @@ Consistency:
 
 - Write `design_spec.md` before drafting many slides.
 - For parallel slide authoring, treat `design_spec.md` as the single source of visual truth.
+- For a chapter slide, inspect at most the two latest earlier chapter-slide SVGs. For a content slide, inspect at most the two latest earlier content-slide SVGs, skipping structural pages.
 - Structural slides (cover, TOC, chapter, ending) should be sparse.
 - Content slides should prioritize method, evidence, results, and takeaways.
 - Consistency means common visual rules, not identical page construction. Select each content slide's layout from its own evidence shape: figure, process, comparison, table, equation, or argument.

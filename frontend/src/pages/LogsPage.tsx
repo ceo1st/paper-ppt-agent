@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Layout } from "../components/layout/Layout";
 import { useLocale } from "../i18n";
-import { fetchUsageSnapshot } from "../lib/api";
+import { fetchUsageRecords, fetchUsageSnapshot } from "../lib/api";
 import { translateStageStatus } from "../lib/i18nStatus";
 import { openUsageSocket } from "../lib/ws";
 import { Button } from "../components/ui/button";
@@ -48,6 +49,9 @@ interface UsageRecord {
   page: number | null;
   attempt: number;
   duration_ms: number;
+  reasoning_tokens: number;
+  finish_reason: string | null;
+  output_chars: number;
 }
 
 interface Summary {
@@ -63,9 +67,16 @@ const EMPTY_SUMMARY: Summary = {
   total_completion: 0,
   total_tokens: 0,
 };
+const RECORDS_PAGE_SIZE = 100;
 
 function formatNumber(n: number): string {
   return new Intl.NumberFormat().format(n);
+}
+
+function toUtcFilterTimestamp(value: string): string | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
 function usageRecordKey(record: UsageRecord): string {
@@ -92,12 +103,18 @@ export function LogsPage() {
   const [records, setRecords] = useState<UsageRecord[]>([]);
   const [connected, setConnected] = useState(false);
   const [chartRevision, setChartRevision] = useState(0);
+  const [recordsRevision, setRecordsRevision] = useState(0);
+  const [recordsTotal, setRecordsTotal] = useState(0);
+  const [recordsPage, setRecordsPage] = useState(0);
+  const [recordsLoading, setRecordsLoading] = useState(false);
 
   // Filters
   const [filterStage, setFilterStage] = useState("");
   const [filterModel, setFilterModel] = useState("");
   const [filterPage, setFilterPage] = useState("");
   const [filterJob, setFilterJob] = useState("");
+  const [filterStart, setFilterStart] = useState("");
+  const [filterEnd, setFilterEnd] = useState("");
   const [selectedRecord, setSelectedRecord] = useState<UsageRecord | null>(null);
 
   useEffect(() => {
@@ -118,35 +135,58 @@ export function LogsPage() {
     let disposed = false;
     let hydratedFromSocket = false;
 
-    fetchUsageSnapshot()
-      .then((snapshot) => {
-        if (disposed || hydratedFromSocket) {
-          return;
-        }
-        setSummary(snapshot.summary ?? EMPTY_SUMMARY);
-        setDaily(snapshot.daily ?? []);
-        setByModel(snapshot.by_model ?? []);
-        setByStage(snapshot.by_stage ?? []);
-        setRecords(snapshot.recent ?? []);
-      })
-      .catch(() => {
-        // Keep the page usable even if the realtime socket is unavailable.
-      });
+    const applySnapshot = (snapshot: {
+      summary?: Summary;
+      daily?: DailyRow[];
+      by_model?: ModelRow[];
+      by_stage?: StageRow[];
+      recent?: UsageRecord[];
+    }) => {
+      if (disposed) return;
+      setSummary(snapshot.summary ?? EMPTY_SUMMARY);
+      setDaily(snapshot.daily ?? []);
+      setByModel(snapshot.by_model ?? []);
+      setByStage(snapshot.by_stage ?? []);
+    };
+
+    const refreshSnapshot = (allowSocketSkip: boolean) => {
+      fetchUsageSnapshot()
+        .then((snapshot) => {
+          if (disposed || (allowSocketSkip && hydratedFromSocket)) {
+            return;
+          }
+          applySnapshot(snapshot);
+        })
+        .catch(() => {
+          // Keep the page usable even if the realtime socket is unavailable.
+        });
+    };
+
+    refreshSnapshot(true);
+    const pollTimer = window.setInterval(() => {
+      // Generation workers append usage from a separate process; polling lets
+      // the API reconcile the JSONL log even when no in-process event fires.
+      hydratedFromSocket = false;
+      refreshSnapshot(false);
+      setRecordsRevision((current) => current + 1);
+    }, 3000);
 
     const socket = openUsageSocket(
       (event) => {
         if (event.type === "snapshot") {
           hydratedFromSocket = true;
-          setSummary((event.summary as Summary) ?? EMPTY_SUMMARY);
-          setDaily((event.daily as DailyRow[]) ?? []);
-          setByModel((event.by_model as ModelRow[]) ?? []);
-          setByStage((event.by_stage as StageRow[]) ?? []);
-          setRecords((event.recent as UsageRecord[]) ?? []);
+          applySnapshot({
+            summary: event.summary as Summary,
+            daily: event.daily as DailyRow[],
+            by_model: event.by_model as ModelRow[],
+            by_stage: event.by_stage as StageRow[],
+            recent: event.recent as UsageRecord[],
+          });
           return;
         }
         if (event.type === "usage") {
           const rec = event.record as UsageRecord;
-          setRecords((prev) => [rec, ...prev].slice(0, 200));
+          setRecordsRevision((current) => current + 1);
           setSummary((prev) => ({
             total_calls: prev.total_calls + 1,
             total_prompt: prev.total_prompt + rec.prompt_tokens,
@@ -166,9 +206,55 @@ export function LogsPage() {
 
     return () => {
       disposed = true;
+      window.clearInterval(pollTimer);
       socket.close();
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    setRecordsLoading(true);
+    fetchUsageRecords({
+      stage: filterStage || undefined,
+      model: filterModel || undefined,
+      page: filterPage || undefined,
+      jobId: filterJob.trim() || undefined,
+      start: toUtcFilterTimestamp(filterStart),
+      end: toUtcFilterTimestamp(filterEnd),
+      offset: recordsPage * RECORDS_PAGE_SIZE,
+      limit: RECORDS_PAGE_SIZE,
+    })
+      .then((result) => {
+        if (disposed) return;
+        setRecords(result.rows ?? []);
+        setRecordsTotal(result.total ?? 0);
+        setSelectedRecord(null);
+      })
+      .catch(() => {
+        if (disposed) return;
+        setRecords([]);
+        setRecordsTotal(0);
+      })
+      .finally(() => {
+        if (!disposed) setRecordsLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [
+    filterEnd,
+    filterJob,
+    filterModel,
+    filterPage,
+    filterStage,
+    filterStart,
+    recordsPage,
+    recordsRevision,
+  ]);
+
+  useEffect(() => {
+    setRecordsPage(0);
+  }, [filterEnd, filterJob, filterModel, filterPage, filterStage, filterStart]);
 
   const dailyRows = useMemo(
     () => [...daily].sort((left, right) => left.day.localeCompare(right.day)),
@@ -188,29 +274,23 @@ export function LogsPage() {
   );
 
   const uniqueStages = useMemo(() => {
-    const set = new Set(records.map((r) => r.stage).filter(Boolean));
+    const set = new Set(byStage.map((row) => row.stage).filter((stage) => stage && stage !== "(unknown)"));
     return Array.from(set).sort() as string[];
-  }, [records]);
+  }, [byStage]);
   const uniqueModels = useMemo(() => {
-    const set = new Set(records.map((r) => r.model));
+    const set = new Set(byModel.map((row) => row.model));
     return Array.from(set).sort();
-  }, [records]);
-
-  const filteredRecords = useMemo(() => {
-    let items = records;
-    if (filterStage) items = items.filter((r) => r.stage === filterStage);
-    if (filterModel) items = items.filter((r) => r.model === filterModel);
-    if (filterPage) items = items.filter((r) => r.page != null && String(r.page) === filterPage);
-    if (filterJob) items = items.filter((r) => r.job_id?.startsWith(filterJob));
-    return items;
-  }, [records, filterStage, filterModel, filterPage, filterJob]);
+  }, [byModel]);
   const selectedRecordKey = selectedRecord ? usageRecordKey(selectedRecord) : "";
+  const recordsPageCount = Math.max(1, Math.ceil(recordsTotal / RECORDS_PAGE_SIZE));
 
   const clearFilters = useCallback(() => {
     setFilterStage("");
     setFilterModel("");
     setFilterPage("");
     setFilterJob("");
+    setFilterStart("");
+    setFilterEnd("");
   }, []);
 
   const formatter = new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
@@ -522,8 +602,29 @@ export function LogsPage() {
 
         <section className="logs-card">
           <div className="logs-table-header">
-            <h2>{t("logs.recent")}</h2>
+            <h2>
+              {t("logs.allCalls")}
+              <span className="logs-record-count">{formatNumber(recordsTotal)}</span>
+            </h2>
             <div className="logs-filters">
+              <label className="logs-date-filter">
+                <span>{t("logs.startTime")}</span>
+                <Input
+                  className="logs-filter-input logs-filter-date"
+                  type="datetime-local"
+                  value={filterStart}
+                  onChange={(event) => setFilterStart(event.target.value)}
+                />
+              </label>
+              <label className="logs-date-filter">
+                <span>{t("logs.endTime")}</span>
+                <Input
+                  className="logs-filter-input logs-filter-date"
+                  type="datetime-local"
+                  value={filterEnd}
+                  onChange={(event) => setFilterEnd(event.target.value)}
+                />
+              </label>
               <Select value={filterStage || "__all__"} onValueChange={(value) => setFilterStage(value === "__all__" ? "" : value)}>
                 <SelectTrigger className="logs-filter-select">
                   <SelectValue />
@@ -560,7 +661,7 @@ export function LogsPage() {
                 value={filterJob}
                 onChange={(e) => setFilterJob(e.target.value)}
               />
-              {(filterStage || filterModel || filterPage || filterJob) ? (
+              {(filterStage || filterModel || filterPage || filterJob || filterStart || filterEnd) ? (
                 <Button type="button" variant="outline" size="sm" className="logs-filter-clear" onClick={clearFilters}>
                   {t("logs.clearFilters")}
                 </Button>
@@ -585,7 +686,7 @@ export function LogsPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredRecords.map((r) => {
+                {records.map((r) => {
                   const recordKey = usageRecordKey(r);
                   const isSelected = selectedRecordKey === recordKey;
                   return (
@@ -612,8 +713,44 @@ export function LogsPage() {
                   </tr>
                   );
                 })}
+                {!recordsLoading && records.length === 0 ? (
+                  <tr>
+                    <td className="logs-table-empty" colSpan={11}>{t("logs.noMatchingRecords")}</td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
+          </div>
+          <div className="logs-pagination">
+            <span>
+              {t("logs.pageRange")
+                .replace("{current}", String(recordsPage + 1))
+                .replace("{total}", String(recordsPageCount))}
+            </span>
+            <div className="logs-pagination-actions">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label={t("logs.previousPage")}
+                title={t("logs.previousPage")}
+                disabled={recordsPage === 0 || recordsLoading}
+                onClick={() => setRecordsPage((page) => Math.max(0, page - 1))}
+              >
+                <ChevronLeft size={16} />
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label={t("logs.nextPage")}
+                title={t("logs.nextPage")}
+                disabled={recordsPage + 1 >= recordsPageCount || recordsLoading}
+                onClick={() => setRecordsPage((page) => Math.min(recordsPageCount - 1, page + 1))}
+              >
+                <ChevronRight size={16} />
+              </Button>
+            </div>
           </div>
           {selectedRecord ? (
             <div className="logs-detail-panel">
@@ -661,6 +798,18 @@ export function LogsPage() {
                 <div className="logs-detail-item">
                   <span className="logs-detail-label">{t("logs.completionTokens")}</span>
                   <span className="logs-detail-value">{formatNumber(selectedRecord.completion_tokens)}</span>
+                </div>
+                <div className="logs-detail-item">
+                  <span className="logs-detail-label">{t("logs.reasoningTokens")}</span>
+                  <span className="logs-detail-value">{formatNumber(selectedRecord.reasoning_tokens ?? 0)}</span>
+                </div>
+                <div className="logs-detail-item">
+                  <span className="logs-detail-label">{t("logs.finishReason")}</span>
+                  <span className="logs-detail-value">{selectedRecord.finish_reason ?? "-"}</span>
+                </div>
+                <div className="logs-detail-item">
+                  <span className="logs-detail-label">{t("logs.outputChars")}</span>
+                  <span className="logs-detail-value">{formatNumber(selectedRecord.output_chars ?? 0)}</span>
                 </div>
                 <div className="logs-detail-item">
                   <span className="logs-detail-label">{t("logs.totalTokens")}</span>

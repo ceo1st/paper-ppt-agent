@@ -2533,6 +2533,7 @@ async def _generate_design_spec_for_template(
         cfg["provider"],
         cfg["api_key"],
         base_url=cfg.get("base_url"),
+        artifact_thinking_mode=cfg.get("artifact_thinking_mode", "disabled"),
         deepseek_settings=cfg.get("deepseek_settings"),
         openai_settings=cfg.get("openai_settings"),
     )
@@ -2602,6 +2603,7 @@ async def _generate_design_spec_for_import(
         cfg["provider"],
         cfg["api_key"],
         base_url=cfg.get("base_url"),
+        artifact_thinking_mode=cfg.get("artifact_thinking_mode", "disabled"),
         deepseek_settings=cfg.get("deepseek_settings"),
         openai_settings=cfg.get("openai_settings"),
     )

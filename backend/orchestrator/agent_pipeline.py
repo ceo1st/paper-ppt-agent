@@ -1104,12 +1104,8 @@ def _agent_generation_contract_violations(
 ) -> list[str]:
     preflight_violations: list[str] = []
     try:
-        _ensure_recoverable_agent_report(project_dir, svg_files)
+        _require_agent_report(project_dir)
     except RuntimeError as exc:
-        # Deep/external runs still require the Agent to write its own report,
-        # and generator-script detections should go through the normal repair
-        # turn. Normal runs with directly authored slides can be recovered here
-        # so we do not spend another Agent turn just to fill report metadata.
         preflight_violations.append(str(exc))
     authorship_violations = _agent_slide_authorship_violations(
         project_dir,
@@ -1473,6 +1469,7 @@ async def run_agent_pipeline(request: Any):
         notes = get_notes(project_dir, final_svg_files)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pptx_path = project_dir / "exports" / f"presentation_{timestamp}.pptx"
+        pptx_path.parent.mkdir(parents=True, exist_ok=True)
         async with heavy_stage_slot():
             await aoffload(
                 create_pptx,
@@ -1668,6 +1665,7 @@ async def run_agent_feedback_pipeline(
     notes = get_notes(project_dir, final_svg_files)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     pptx_path = project_dir / "exports" / f"presentation_agent_feedback_{timestamp}.pptx"
+    pptx_path.parent.mkdir(parents=True, exist_ok=True)
     async with heavy_stage_slot():
         await aoffload(
             create_pptx,
@@ -1828,6 +1826,7 @@ def _copy_template_reference_for_agent(template: Any, project_dir: Path) -> None
         return
 
     dest = project_dir / "templates" / str(template_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(src, dest)
@@ -1879,8 +1878,8 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "height": fmt["height"],
             "language": request.language,
             "target_pages": request.num_pages,
-            "detail_level": request.detail_level,
             "style": request.style,
+            "icon_library": getattr(request, "icon_library", "chunk"),
             "template_id": request.template_id,
             "user_instruction": request.instruction,
             "style_overrides": request.style_overrides,
@@ -1906,7 +1905,7 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
                 ),
             },
             "do_not_call_backend_provider_models": True,
-            "icons_default_enabled": True,
+            "icons_optional": True,
             "generate_slides_in_parallel_when_useful": True,
             "allow_external_research": bool(agent_config.get("allow_external_research")),
             "allow_deep_research": bool(agent_config.get("allow_deep_research")),
@@ -1946,6 +1945,7 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "selected_template": f"templates/{request.template_id}" if request.template_id else None,
             "source_assets": "source_assets",
             "source_asset_extractor": f"skills/{_AGENT_SKILL_NAME}/scripts/extract_paper_assets.py",
+            "icon_search": f"skills/{_AGENT_SKILL_NAME}/scripts/search_icons.py",
             "source_paper_markdown": "source_assets/paper.md",
             "source_figures_json": "source_assets/figures.json",
             "source_figures_markdown": "source_assets/figures.md",
@@ -2669,7 +2669,7 @@ def _validate_agent_artifacts(project_dir: Path, svg_files: list[Path], total_sl
         )
     for svg_path in svg_files:
         _validate_single_svg(svg_path, svg_path.read_text(encoding="utf-8"))
-    report_path = _ensure_recoverable_agent_report(project_dir, svg_files)
+    report_path = _require_agent_report(project_dir)
     authorship_violations = _agent_slide_authorship_violations(
         project_dir,
         svg_files=svg_files,
@@ -2691,84 +2691,15 @@ def _validate_agent_artifacts(project_dir: Path, svg_files: list[Path], total_sl
     _validate_agent_report(project_dir, report_path)
 
 
-def _ensure_recoverable_agent_report(
-    project_dir: Path,
-    svg_files: list[Path],
-) -> Path:
+def _require_agent_report(project_dir: Path) -> Path:
     report_path = project_dir / "agent_report.json"
     if report_path.exists():
         return report_path
 
-    task = _read_agent_task(project_dir)
-    policy = task.get("agent_policy") if isinstance(task.get("agent_policy"), dict) else {}
-    if policy.get("allow_external_research") or policy.get("allow_deep_research"):
-        raise RuntimeError(
-            "Agent mode requires agent_report.json when external or deep research is enabled."
-        )
-
-    generator_violations: list[str] = []
-    for path in _agent_authored_script_paths(project_dir):
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if _script_writes_multiple_slide_svgs(content):
-            generator_violations.append(_rel(project_dir, path))
-    if generator_violations:
-        raise RuntimeError(
-            "Agent omitted agent_report.json and a multi-slide generator was detected: "
-            + ", ".join(generator_violations)
-        )
-
-    presentation = (
-        task.get("presentation")
-        if isinstance(task.get("presentation"), dict)
-        else {}
+    raise RuntimeError(
+        "Agent mode requires agent_report.json. "
+        "The backend will not infer or synthesize missing Agent artifacts."
     )
-    direct_files = [path.name for path in svg_files]
-    report_path.write_text(
-        json.dumps(
-            {
-                "status": "completed_with_backend_recovery_report",
-                "slides": len(svg_files),
-                "language": presentation.get("language"),
-                "external_research_used": False,
-                "deep_research_used": False,
-                "report_provenance": {
-                    "source": "backend_inferred_recovery",
-                    "reason": (
-                        "The Agent completed the slide files but its turn ended "
-                        "before writing agent_report.json."
-                    ),
-                    "claims_limited_to_observable_workspace_evidence": True,
-                },
-                "slide_authoring": {
-                    "mode": "direct_per_slide",
-                    "multi_slide_generator_used": False,
-                    "direct_files": direct_files,
-                    "notes": (
-                        "Backend recovery inference: every final slide exists as an "
-                        "explicit file and no Agent-authored multi-slide generator "
-                        "was found in the workspace."
-                    ),
-                },
-                "layout_qa": {
-                    "region_plans_followed": None,
-                    "text_capacity_preflight": None,
-                    "occupancy_or_wrapping_repairs": [],
-                    "remaining_limitations": _agent_layout_contract_violations(svg_files),
-                },
-                "visual_qa": "skipped",
-                "notes": [
-                    "This recovery report records only facts observable in the workspace."
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return report_path
 
 
 def _agent_authored_script_paths(project_dir: Path) -> list[Path]:
@@ -3528,7 +3459,10 @@ def _build_runtime_prompt(project_dir: Path, request: Any, agent_config: dict[st
     deep = "enabled" if agent_config.get("allow_deep_research") else "disabled"
     external = "enabled" if agent_config.get("allow_external_research") else "disabled"
     review = "enabled" if agent_config.get("enable_visual_qa", True) else "disabled"
-    detail_profile = _agent_detail_profile(getattr(request, "detail_level", "normal"), getattr(request, "num_pages", None))
+    detail_profile = _agent_detail_profile(
+        getattr(request, "detail_level", "normal"),
+        getattr(request, "num_pages", None),
+    )
     skill_path = str(project_dir / "skills" / _AGENT_SKILL_NAME / "SKILL.md")
     extractor_path = f"skills/{_AGENT_SKILL_NAME}/scripts/extract_paper_assets.py"
     return f"""Use the `{_AGENT_SKILL_NAME}` skill to generate the full PowerPoint deck.
@@ -3540,12 +3474,14 @@ Workspace contract:
 - User intent priority: `agent_task.json.presentation.user_instruction` is the highest product requirement after hard export validity. The SVG/PPTX output files are a technical wrapper for this app, not a reason to override the user's requested visual direction. If the user asks for no SVG, image-only, GPT-image-style, or "more beautiful", preserve that goal by making an image-led, polished deck inside valid SVG slide wrappers; do not reply that the output contract wins over the user.
 - Use subagents/parallel work when the runtime supports it. When deep research is enabled, SubAgents are required unless the Task/SubAgent tool is unavailable or fails.
 - External research: {external}. Deep research: {deep}. Agent post-generation review: {review}.
-- Detail contract: {detail_profile["label"]}; {detail_profile["slide_count_guidance"]} Content slides should carry {detail_profile["evidence_points_per_content_slide"]} concrete evidence point(s), {detail_profile["bullets_per_content_slide"]} bullets/claims, and {detail_profile["visuals_per_content_slide"]} visual argument(s) each when the paper supports it.
+- Deck budget contract: {detail_profile["slide_count_guidance"]} The detail selector affects only slide count and source/summary retrieval budgets. It does not set per-slide density, bullet count, evidence count, typography, or layout.
+- Structural contract: slide 1 is the cover and slide 2 is a mandatory table of contents whose chapter titles match the final chapter plan.
 - Per-slide authoring contract: author every `svg_output/slide_###.svg` directly as a separate file. Do not create or run a Python/JavaScript/TypeScript/shell/PowerShell/batch/Ruby program that generates multiple slides. Do not use loops, a `SLIDES`/maker registry, shared `base_svg`/`title`/card rendering functions, or template expansion to emit the deck. Shared palette, typography, margins, and recurring chrome may be documented, but each slide must have an explicit slide-specific Region Plan and explicit SVG markup chosen from that slide's claim and evidence. Read-only validation/render/export scripts remain allowed.
-- Layout contract: before writing SVG, put concrete Region Plans in `design_spec.md` for every content slide. Build from aligned rectangular regions first; content slides should normally occupy 65-85% of the content area, avoid empty quadrants or detached bottom callouts, and wrap Chinese body text into natural 24-36 CJK-character lines (18-30 inside cards). If a paper figure is used, reserve the figure frame first and fit it inside the frame preserving aspect ratio. Before drawing, perform a text-capacity preflight for every region: estimate line width, line count, line-height, heading/caption space, and padding; require every line and final baseline to remain inside its Region Plan. Size table columns from their longest visible cells.
+- Layout contract: before writing SVG, put concrete Region Plans in `design_spec.md` for every content slide. Build from aligned rectangular regions first; content slides should normally occupy 65-85% of the content area and avoid empty quadrants or detached bottom callouts. Wrap dynamically from each region's actual width, font size, visual share, and content density; avoid conservative early breaks and allow light raggedness. Check actual line edges, baselines, captions, and padding against the final boxes. Size table columns from their longest visible cells.
+- Continuity contract: before writing a chapter slide, read at most the two most recent earlier chapter-slide SVGs. Before writing a content slide, read at most the two most recent earlier content-slide SVGs, skipping cover, TOC, chapter, and ending slides. Use them for style continuity only; the current manuscript and Region Plan remain authoritative.
 - Factual rendering contract: preserve exact source numbers and units. Do not abbreviate values into K/M/B shorthand unless the paper itself uses that shorthand; for example, keep `12,282,034` rather than `12.28M`. Do not invent or round metrics, chart axes, ticks, dates, sample sizes, or settings. Mark derived values explicitly and show their source inputs/calculation nearby. Evidence-card ids and retrieval snippets are private grounding, not visible slide copy.
 - Icon contract: icons are optional visual aids, not decoration. Use them only when they clarify repeated semantic labels, process steps, comparison dimensions, legends, or diagram nodes. Before using icons, define a small vocabulary in `design_spec.md` (concept -> existing local file -> size/style/color), search `agent_task.json.paths.icons`, reuse the same icon for the same concept, keep to one icon family/style, and color icons with the template/deck palette. Avoid scattering one-off icons or multi-color icon accents across unrelated slides. Never use letters, initials, ASCII/Unicode symbols, emoji, dingbats, or decorative characters as icon substitutes; omit the icon or use a non-icon shape if no matching asset exists.
-- SubAgent contract: do not split work just to satisfy ordinary slide count or detail level. When deep research is enabled, launch focused research SubAgents if the Task tool is available; use separate readers for background/related work, method, experiments, and critique when the paper is complex. When Agent review is enabled, run one focused review SubAgent after the first full deck is drafted; it should review the whole deck for layout overflow, missing assets, icon-policy violations, and narrative gaps instead of checking pages one by one. If you skip a required deep-research or review SubAgent, write a concrete reason in `agent_report.json.subagents`; the main Agent must merge results and keep final narrative/design consistency.
+- SubAgent contract: do not split work just to satisfy ordinary slide count or budget selection. When deep research is enabled, launch focused research SubAgents if the Task tool is available; use separate readers for background/related work, method, experiments, and critique when the paper is complex. When Agent review is enabled, run one focused review SubAgent after the first full deck is drafted; it should review the whole deck for layout overflow, missing assets, icon-policy violations, and narrative gaps instead of checking pages one by one. If you skip a required deep-research or review SubAgent, write a concrete reason in `agent_report.json.subagents`; the main Agent must merge results and keep final narrative/design consistency.
 - External research contract: if external research is enabled, use the `{_RESEARCH_SKILL_NAME}` skill after reading the paper. You, not the backend, must choose search queries from paper understanding before calling its script/API helpers. It is mandatory to produce `research/raw_external_results.json`, `research/sources.json`, and `research/brief.md` before writing any manuscript, design specification, notes, report, or slide SVG. Read `research/external_search_summary.json` before sampling raw results. Sparse or zero directly relevant external results are acceptable when `research/sources.json` records a concrete limitation; do not repeat searches merely to satisfy the gate or increase counts. For web results, open/read relevant pages deeply enough to understand the source; do not cite titles/snippets alone.
 - Deep research contract: if deep research is enabled, use the `{_DEEP_RESEARCH_SKILL_NAME}` skill for focused paper-reading passes, SubAgent/task decomposition, and slide-ready synthesis. It is mandatory to produce `research/deep/notes_index.json` and `research/deep/brief.md` before writing any manuscript, design specification, notes, report, or slide SVG.
 - Source asset contract: before writing `manuscript.md`, read `source_assets/paper.md` and `source_assets/figures.md`/`figures.json` if they exist. If they are missing or stale, run `{extractor_path}` with `agent_task.json.paths.python`. Pick paper figures by caption/page/context/dimensions and put them into SVG using the exact `href` values from the manifest, usually `../source_assets/images/<file>`.
@@ -3630,64 +3566,27 @@ def _agent_detail_profile(detail_level: str | None, num_pages: int | None) -> di
     slide_count_guidance = page_type_budget_guidance(num_pages, normalized)
     base: dict[str, dict[str, Any]] = {
         "normal": {
-            "label": "normal detail",
-            "bullets_per_content_slide": "3-4",
-            "evidence_points_per_content_slide": "1-2",
-            "visuals_per_content_slide": "1",
-            "speaker_notes": "optional, 2-4 short sentences per content slide",
-            "paper_coverage": [
-                "problem and motivation",
-                "core method or architecture",
-                "main experiments and key metrics",
-                "limitations or implications when relevant",
-            ],
-            "depth_checks": [
-                "Each content slide must include at least one concrete paper fact, metric, equation, figure/table reference, or mechanism.",
-                "Avoid dumping full paragraphs; compress into slide-ready claims.",
-            ],
+            "paper_input_char_budget": 36000,
+            "summary_token_budget": 8192,
+            "evidence_cards_per_page": 3,
+            "source_sections_per_page": 1,
         },
         "high": {
-            "label": "high detail",
-            "bullets_per_content_slide": "4-5",
-            "evidence_points_per_content_slide": "2-3",
-            "visuals_per_content_slide": "1-2",
-            "speaker_notes": "recommended, 4-6 sentences per content slide",
-            "paper_coverage": [
-                "problem framing and research gap",
-                "method internals with mechanism-level explanation",
-                "training/data/evaluation setup when present",
-                "main, ablation, and comparison results",
-                "limitations, assumptions, and practical implications",
-            ],
-            "depth_checks": [
-                "Method/result slides must include numbers, named components, datasets, equations, or figure/table anchors when available.",
-                "Use enough slides to separate architecture, evidence, and takeaway instead of overcrowding one page.",
-            ],
+            "paper_input_char_budget": 52000,
+            "summary_token_budget": 12288,
+            "evidence_cards_per_page": 4,
+            "source_sections_per_page": 2,
         },
         "very_high": {
-            "label": "very high detail",
-            "bullets_per_content_slide": "5-6",
-            "evidence_points_per_content_slide": "3-4",
-            "visuals_per_content_slide": "1-2",
-            "speaker_notes": "expected, 5-8 sentences per content slide with technical explanation",
-            "paper_coverage": [
-                "research context, gap, and thesis",
-                "architecture/method flow with component-level detail",
-                "math/objectives/training or algorithm steps when present",
-                "datasets, baselines, metrics, ablations, and error/limitation analysis",
-                "what changes for future work or deployment",
-            ],
-            "depth_checks": [
-                "Do not collapse multiple major paper sections into a single generic summary slide.",
-                "Prefer separate slides for mechanism, experimental setup, headline results, ablations, and limitations when the target slide count allows.",
-                "Include enough technical anchors that a reader can trace claims back to the paper.",
-            ],
+            "paper_input_char_budget": 72000,
+            "summary_token_budget": 16384,
+            "evidence_cards_per_page": 5,
+            "source_sections_per_page": 2,
         },
     }
     profile = dict(base[normalized])
     profile.update(
         {
-            "requested_detail_level": normalized,
             "target_pages": num_pages,
             "auto_slide_range": [min_pages, max_pages],
             "page_type_budget": budget,
@@ -3699,13 +3598,13 @@ def _agent_detail_profile(detail_level: str | None, num_pages: int | None) -> di
 
 def _agent_icon_policy() -> dict[str, Any]:
     return {
-        "must_search_local_icons_before_use": True,
+        "search_only_after_identifying_a_concrete_need": True,
         "use_icons_only_when_they_clarify": True,
-        "icon_search_paths": ["agent_task.json.paths.icons", "assets/icons if exposed by add_dirs"],
+        "metadata_only_search": True,
+        "do_not_enumerate_icon_directories": True,
+        "do_not_read_svg_content_during_selection": True,
         "recommended_search_commands": [
-            "rg --files <icons_path>",
-            "rg -i \"semantic-keyword|tag|concept\" <icons_path>",
-            "Get-ChildItem -Recurse <icons_path> -Filter *.svg",
+            "<configured-python> skills/paper-ppt-generate/scripts/search_icons.py --task agent_task.json --query \"short English concept\" --limit 8",
         ],
         "when_to_use": [
             "Use icons for repeated semantic labels, process steps, comparison dimensions, legend keys, and compact section markers.",
@@ -3778,10 +3677,11 @@ def _agent_layout_policy() -> dict[str, Any]:
             "For image+text pages, reserve the figure frame first, preserve aspect ratio inside that frame, and make the text column use comparable vertical rhythm.",
         ],
         "text_wrapping": {
-            "ordinary_cjk_body_line": "24-36 CJK characters",
-            "card_cjk_line": "18-30 CJK characters",
-            "avoid": "multiple consecutive visible lines under 10 CJK characters except labels, legends, and final paragraph lines",
-            "repair": "widen the box, reduce font size slightly, split into callouts, or rewrite more concisely",
+            "mode": "dynamic_per_region",
+            "derive_from": "actual region width, font size, visual share, and current-page content",
+            "avoid": "conservative early breaks that leave most of a usable line empty",
+            "allow": "light raggedness and semantic line breaks",
+            "repair": "reflow regions, widen the box, adjust gaps, or tune typography only for actual clipping or overlap",
         },
         "text_capacity_preflight": {
             "required_before_svg": True,
@@ -3912,7 +3812,6 @@ def _agent_source_asset_policy() -> dict[str, Any]:
 
 def _agent_subagent_policy(request: Any, agent_config: dict[str, Any], detail_profile: dict[str, Any]) -> dict[str, Any]:
     target_pages = int(getattr(request, "num_pages", None) or 0)
-    detail = str(detail_profile.get("requested_detail_level") or "normal")
     review_enabled = bool(agent_config.get("enable_visual_qa", True))
     return {
         "enabled_when_runtime_supports_task_tool": True,
@@ -3949,7 +3848,7 @@ def _agent_subagent_policy(request: Any, agent_config: dict[str, Any], detail_pr
             },
             {
                 "scenario": "slide batch drafting",
-                "when": "target_pages >= 8 or detail_level is high/very_high",
+                "when": "target_pages >= 8 and parallel drafting is genuinely useful",
                 "output": "draft SVGs for separate slide ranges that follow design_spec.md",
             },
             {
@@ -3960,7 +3859,6 @@ def _agent_subagent_policy(request: Any, agent_config: dict[str, Any], detail_pr
         ],
         "recommended_parallelism": {
             "target_pages": target_pages,
-            "detail_level": detail,
             "paper_extraction_subagents": 1 if agent_config.get("allow_deep_research") else 0,
             "research_subagents": 3 if agent_config.get("allow_deep_research") else (1 if agent_config.get("allow_external_research") else 0),
             "qa_subagents": 1 if review_enabled else 0,

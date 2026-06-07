@@ -79,6 +79,7 @@ interface RoutingProfile {
   model: string;
   baseUrl: string;
   apiKey: string;
+  artifactThinkingMode?: "disabled" | "default";
   deepseekSettings?: DeepSeekSettings;
   openaiSettings?: OpenAISettings;
 }
@@ -112,6 +113,7 @@ function readModelConfig(): TemplateImportModelConfig | undefined {
           model: profile.model,
           api_key: profile.apiKey,
           base_url: profile.baseUrl || undefined,
+          artifact_thinking_mode: profile.artifactThinkingMode ?? "disabled",
           deepseek_settings: providerName === "deepseek" ? profile.deepseekSettings : undefined,
           openai_settings: providerName === "openai" ? profile.openaiSettings : undefined,
         };

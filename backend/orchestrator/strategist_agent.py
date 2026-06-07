@@ -15,11 +15,6 @@ from backend.orchestrator.manuscript import (
     format_page_inventory,
     page_inventory,
 )
-from backend.orchestrator.provider_guidance import (
-    deepseek_strategy_guidance,
-    is_deepseek_provider,
-)
-
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "strategist.md"
@@ -44,6 +39,56 @@ OFFLINE_ICON_PALETTE: list[tuple[str, str, list[str]]] = [
     ("people / pose", "person, crowd, keypoint, human pose, accessibility", ["users", "user", "accessibility"]),
     ("future / contribution", "implication, next step, contribution summary, closing message", ["rocket", "flag", "trophy", "book", "file-text"]),
 ]
+
+
+def _format_chapter_map(inventory: list[dict[str, str | int]]) -> str:
+    """Render an explicit chapter-to-slide map from the manuscript contract."""
+    lines: list[str] = []
+    current_title = ""
+    current_page: int | None = None
+    current_items: list[str] = []
+    opening_items: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_title, current_page, current_items
+        if current_page is None:
+            return
+        if current_items:
+            covered = "; ".join(current_items)
+        else:
+            covered = "(no following content slides)"
+        lines.append(f"- Chapter slide {current_page}: {current_title} -> {covered}")
+        current_title = ""
+        current_page = None
+        current_items = []
+
+    for item in inventory:
+        page = int(item["page"])
+        page_type = str(item["type"])
+        title = str(item["title"])
+        if page_type == "chapter":
+            flush()
+            current_page = page
+            current_title = title
+            current_items = []
+        elif page_type == "content":
+            entry = f"Slide {page} {title}"
+            if current_page is None:
+                opening_items.append(entry)
+            else:
+                current_items.append(entry)
+        elif page_type == "ending":
+            flush()
+
+    flush()
+    if opening_items:
+        lines.insert(
+            0,
+            "- Opening content before first chapter: " + "; ".join(opening_items),
+        )
+    if not lines:
+        return "No explicit chapter divider slides; keep content sequence continuous."
+    return "\n".join(lines)
 
 
 def _extract_icon_queries(manuscript: str) -> list[str]:
@@ -284,6 +329,57 @@ _PAGE_TYPE_LABEL_PATTERN = (
 )
 
 
+def _response_finish_reason(response: LLMResponse) -> str:
+    raw = response.raw
+    choices = None
+    if isinstance(raw, dict):
+        choices = raw.get("choices")
+    elif raw is not None:
+        choices = getattr(raw, "choices", None)
+    if not choices:
+        return ""
+    choice = choices[0]
+    if isinstance(choice, dict):
+        return str(choice.get("finish_reason") or "")
+    return str(getattr(choice, "finish_reason", "") or "")
+
+
+def _write_strategy_attempt_debug(
+    debug_dir: Path | None,
+    *,
+    attempt: int,
+    response: LLMResponse,
+    validation_error: str | None,
+) -> None:
+    if debug_dir is None:
+        return
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        usage = response.usage
+        header = [
+            f"attempt={attempt}",
+            f"chars={len(response.content or '')}",
+            f"finish_reason={_response_finish_reason(response)}",
+        ]
+        if usage is not None:
+            header.extend(
+                [
+                    f"prompt_tokens={usage.prompt_tokens}",
+                    f"completion_tokens={usage.completion_tokens}",
+                    f"total_tokens={usage.total_tokens}",
+                ]
+            )
+        if validation_error:
+            header.append(f"validation_error={validation_error}")
+        path = debug_dir / f"strategist_response_attempt_{attempt}.md"
+        path.write_text(
+            "<!-- " + "; ".join(header) + " -->\n\n" + (response.content or ""),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 def _outline_block_mentions_page_type(block: str, page_type: str) -> bool:
     aliases = _PAGE_TYPE_ALIASES.get(page_type, (page_type,))
     for alias in aliases:
@@ -389,7 +485,6 @@ def _design_spec_validation_error(
             return "Content Outline page types do not match manuscript: " + ", ".join(missing_types[:5])
 
         missing_region_plan = []
-        missing_text_capacity = []
         contradictory_region_plan = []
         for item in expected_inventory:
             if str(item["type"]) != "content":
@@ -402,8 +497,6 @@ def _design_spec_validation_error(
             block = page_match.group(0)
             if not re.search(r"(?i)\bRegion\s+Plan\b|区域规划|区域计划", block):
                 missing_region_plan.append(str(page_num))
-            if not re.search(r"(?i)\bText\s+Capacity\b|文本容量|文字容量", block):
-                missing_text_capacity.append(str(page_num))
             region_lines = [
                 line
                 for line in block.splitlines()
@@ -421,12 +514,6 @@ def _design_spec_validation_error(
                 "Content pages have contradictory Region Plan sizing notes: "
                 + ", ".join(contradictory_region_plan[:8])
             )
-        if missing_text_capacity:
-            return (
-                "Content pages are missing Text Capacity lines: "
-                + ", ".join(missing_text_capacity[:8])
-            )
-
     missing_icons = sorted(
         {
             match.group(1).strip()
@@ -453,71 +540,6 @@ def _outline_page_numbers(content: str) -> set[int]:
         int(match.group(1))
         for match in re.finditer(r"(?i)\b(?:page|slide)\s*0*(\d+)\b", outline)
     }
-
-
-def _repair_design_spec_page_contract(
-    content: str,
-    expected_inventory: list[dict[str, str | int]],
-) -> str:
-    """Patch harmless page-count omissions in a valid design spec.
-
-    Long decks can cause the strategist to stop Section IX early. Rather than
-    fail the entire run, append minimal page contracts from the already-fixed
-    manuscript inventory. Extra/out-of-range pages are still left for
-    validation to reject.
-    """
-    if not expected_inventory:
-        return content
-
-    expected_page_count = len(expected_inventory)
-    repaired = re.sub(
-        r"(?im)(\bPage Count\s*[:：]\s*)\d+\b",
-        rf"\g<1>{expected_page_count}",
-        content,
-        count=1,
-    )
-
-    outline = _extract_design_spec_section(repaired, "IX")
-    if not outline:
-        return repaired
-
-    present = _outline_page_numbers(repaired)
-    if present and max(present) > expected_page_count:
-        return repaired
-
-    missing = [item for item in expected_inventory if int(item["page"]) not in present]
-    if not missing:
-        return repaired
-
-    additions = []
-    for item in missing:
-        page_num = int(item["page"])
-        page_type = str(item["type"])
-        title = str(item["title"]).strip() or f"Page {page_num}"
-        region_plan = (
-            "\n- **Region Plan**: content area x=40 y=100 w=1200 h=520; "
-            "primary region x=70 y=130 w=540 h=390; secondary region "
-            "x=650 y=130 w=500 h=390; optional callout x=650 y=540 w=500 h=80"
-            "\n- **Text Capacity**: primary/secondary body max 8 lines at 18px "
-            "with 26px leading; optional callout max 2 lines at 18px with 24px leading"
-            if page_type == "content"
-            else ""
-        )
-        additions.append(
-            f"#### Slide {page_num:02d} - {title}\n"
-            f"- **Page Type**: {page_type}\n"
-            f"- **Title**: {title}\n"
-            "- **Layout**: Follow the global design system and the manuscript content for this page."
-            f"{region_plan}"
-        )
-
-    patched_outline = outline.rstrip() + "\n\n" + "\n\n".join(additions)
-    start = repaired.find(outline)
-    if start < 0:
-        return repaired
-    suffix = repaired[start + len(outline):]
-    separator = "\n\n" if suffix and not suffix.startswith("\n") else ""
-    return repaired[:start] + patched_outline + separator + suffix
 
 
 def _align_content_outline_page_types(
@@ -610,7 +632,8 @@ async def create_design_spec(
         canvas_format: Canvas format key.
         style: Design style key.
         language: Output language.
-        detail_level: Requested content depth and density target.
+        detail_level: Compatibility parameter. It controls upstream page and context
+            budgets, not design density.
         icon_library: Icon library to use (chunk/tabler-filled/tabler-outline).
 
     Returns:
@@ -631,16 +654,17 @@ async def create_design_spec(
     page_count = count_manuscript_pages(manuscript)
     inventory = page_inventory(manuscript)
     inventory_block = format_page_inventory(manuscript)
+    chapter_map_block = _format_chapter_map(inventory)
     enforce_page_types = "<!--" in manuscript and "page_type" in manuscript
 
     user_parts = [
         f"## Manuscript\n\n{manuscript}",
         f"\n## Manuscript Page Inventory\n\n{inventory_block}",
+        f"\n## Manuscript Chapter Map (authoritative)\n\n{chapter_map_block}",
         f"\n## Canvas Format: {fmt['name']} ({fmt['ratio']}), viewBox: `{fmt['viewbox']}`",
         f"\n## Design Style: {style_info['name']}",
         f"\n## Page Count: {page_count}",
         f"\n## Language: {language}",
-        f"\n## Detail Level: {detail_level}",
         f"\n## Pre-resolved Confirmations",
         f"- Canvas Format: {fmt['name']}",
         f"- Page Count: {page_count}",
@@ -660,6 +684,7 @@ async def create_design_spec(
             f"- Page contract: exactly {page_count} pages; page N in Section IX must match manuscript page N.",
             "- For decks over 30 pages, keep Section IX concise but list every page exactly once; never stop before the final manuscript page.",
             "- Do not add, remove, or reorder cover, chapter/transition, content, or ending pages.",
+            "- Treat the Manuscript Chapter Map as authoritative: do not invent, rename, split, merge, or move chapter divider slides in Section IX.",
             "- Keep cover/chapter/ending pages distinct from content pages: cover pages may include title metadata and a modest context/accent treatment, while chapter/ending pages stay minimal dividers/closers.",
             "- Do not assign paper figures, dense article-content blocks, multi-column evidence layouts, or detailed result sections to cover/chapter/ending pages.",
             "- If a chapter/ending manuscript page contains extra body text, summarize it into at most one subtitle/key phrase in Section IX; do not create cards, KPI strips, question lists, mini-agendas, or `核心问题` / `本章看点` blocks on those pages.",
@@ -671,12 +696,12 @@ async def create_design_spec(
             "- Region Plan coordinates are final layout boxes. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`; for figures, define a final frame and say the image should fit inside it preserving aspect ratio.",
             "- Use reusable content layout families such as `figure-left-text-right`, `text-left-figure-right`, `two-column-evidence`, `three-card-grid`, `process-flow-with-evidence`, `comparison-table-callout`, or `full-width-chart-with-notes` unless the manuscript truly requires another.",
             "- Plan balanced occupancy: content pages should use about 65-85% of the content area with aligned gutters, no empty quadrant, no floating short bullet list, and no detached bottom callout.",
-            "- Plan Chinese text boxes wide enough for natural wrapping: target 24-36 CJK characters per body line and avoid repeated short orphan lines under 10 CJK characters.",
-            "- After each content-page Region Plan, include `Text Capacity:` with intended line counts/font/leading for text-heavy boxes and explicit column widths for tables. Check that heading + body lines + gaps + padding fit the planned height.",
+            "- Derive each page's `Density:` from that page's manuscript, visual share, and argument structure. Do not infer density from any global detail setting.",
+            "- Plan wrapping dynamically from the actual text-region width, font size, and image/chart share. Avoid premature short lines; use semantic line breaks and allow light raggedness when it improves composition.",
+            "- For text-heavy regions and tables, describe a concise `Text Strategy:` with font range, line-height range, and column allocation. Do not state fixed character-capacity numbers.",
             "- In Section IX, separate footer page numbering from chapter index. Chapter labels use the planned chapter index, never the slide page number.",
             f"- The visible slide language must be `{language}`.",
             f"- {_language_constraint(language)}",
-            "- Detail level `normal` should keep pages concise, `high` should allow moderately denser explanatory content, and `very_high` should accommodate richer explanations and fuller evidence coverage without becoming unreadable.",
         ])
         user_parts.append(f"\n{template_context}")
     else:
@@ -692,6 +717,7 @@ async def create_design_spec(
             f"- Page contract: exactly {page_count} pages; page N in Section IX must match manuscript page N.",
             "- For decks over 30 pages, keep Section IX concise but list every page exactly once; never stop before the final manuscript page.",
             "- Do not add, remove, or reorder cover, chapter/transition, content, or ending pages.",
+            "- Treat the Manuscript Chapter Map as authoritative: do not invent, rename, split, merge, or move chapter divider slides in Section IX.",
             "- Keep cover/chapter/ending pages distinct from content pages: cover pages may include title metadata and a modest context/accent treatment, while chapter/ending pages stay minimal dividers/closers.",
             "- Do not assign paper figures, dense article-content blocks, multi-column evidence layouts, or detailed result sections to cover/chapter/ending pages.",
             "- If a chapter/ending manuscript page contains extra body text, summarize it into at most one subtitle/key phrase in Section IX; do not create cards, KPI strips, question lists, mini-agendas, or `核心问题` / `本章看点` blocks on those pages.",
@@ -703,16 +729,13 @@ async def create_design_spec(
             "- Region Plan coordinates are final layout boxes. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`; for figures, define a final frame and say the image should fit inside it preserving aspect ratio.",
             "- Use reusable content layout families such as `figure-left-text-right`, `text-left-figure-right`, `two-column-evidence`, `three-card-grid`, `process-flow-with-evidence`, `comparison-table-callout`, or `full-width-chart-with-notes` unless the manuscript truly requires another.",
             "- Plan balanced occupancy: content pages should use about 65-85% of the content area with aligned gutters, no empty quadrant, no floating short bullet list, and no detached bottom callout.",
-            "- Plan Chinese text boxes wide enough for natural wrapping: target 24-36 CJK characters per body line and avoid repeated short orphan lines under 10 CJK characters.",
-            "- After each content-page Region Plan, include `Text Capacity:` with intended line counts/font/leading for text-heavy boxes and explicit column widths for tables. Check that heading + body lines + gaps + padding fit the planned height.",
+            "- Derive each page's `Density:` from that page's manuscript, visual share, and argument structure. Do not infer density from any global detail setting.",
+            "- Plan wrapping dynamically from the actual text-region width, font size, and image/chart share. Avoid premature short lines; use semantic line breaks and allow light raggedness when it improves composition.",
+            "- For text-heavy regions and tables, describe a concise `Text Strategy:` with font range, line-height range, and column allocation. Do not state fixed character-capacity numbers.",
             "- In Section IX, separate footer page numbering from chapter index. Chapter labels use the planned chapter index, never the slide page number.",
             f"- The visible slide language must be `{language}`.",
             f"- {_language_constraint(language)}",
-            "- Detail level `normal` should keep pages concise, `high` should allow moderately denser explanatory content, and `very_high` should accommodate richer explanations and fuller evidence coverage without becoming unreadable.",
         ])
-
-    if is_deepseek_provider(llm, model):
-        user_parts.append("\n" + deepseek_strategy_guidance(detail_level))
 
     # Icon policy: when enabled, Phase 1 skips icon detail — Phase 2 (icon_round) decides
     if not enable_icon:
@@ -833,6 +856,7 @@ async def create_design_spec(
             pass
 
     last_error = ""
+    last_nonempty_error = ""
     for attempt in range(1, MAX_DESIGN_SPEC_ATTEMPTS + 1):
         messages = list(base_messages)
         if last_error:
@@ -851,13 +875,18 @@ async def create_design_spec(
             max_tokens=DESIGN_SPEC_MAX_TOKENS,
         )
         content = response.content.strip()
-        content = _repair_design_spec_page_contract(content, inventory)
         if enforce_page_types:
             content = _align_content_outline_page_types(content, inventory)
         error = _design_spec_validation_error(
             content,
             expected_page_count=page_count,
             expected_inventory=inventory if enforce_page_types else None,
+        )
+        _write_strategy_attempt_debug(
+            debug_dir,
+            attempt=attempt,
+            response=response,
+            validation_error=error,
         )
         if error is None:
             # Phase 2: Icon Decoration Round (if enabled)
@@ -877,5 +906,10 @@ async def create_design_spec(
                 )
             return content
         last_error = error
+        if content:
+            last_nonempty_error = error
 
-    raise RuntimeError(f"Invalid design specification from strategist: {last_error}")
+    detail = last_error
+    if last_nonempty_error and last_nonempty_error != last_error:
+        detail = f"{last_error}; previous non-empty attempt failed: {last_nonempty_error}"
+    raise RuntimeError(f"Invalid design specification from strategist: {detail}")

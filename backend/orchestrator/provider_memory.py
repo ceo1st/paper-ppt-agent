@@ -25,6 +25,32 @@ MAX_SECTION_BRIEF_CHARS = 1400
 MAX_CARD_TEXT_CHARS = 520
 MAX_EVIDENCE_CARDS = 180
 SLIDE_CONTEXT_CARD_COUNT = 5
+SLIDE_CONTEXT_BUDGETS = {
+    "normal": {
+        "cards": 3,
+        "sections": 1,
+        "briefs": 1,
+        "card_chars": 420,
+        "section_chars": 420,
+        "brief_chars": 420,
+    },
+    "high": {
+        "cards": 4,
+        "sections": 2,
+        "briefs": 1,
+        "card_chars": 480,
+        "section_chars": 520,
+        "brief_chars": 480,
+    },
+    "very_high": {
+        "cards": 5,
+        "sections": 2,
+        "briefs": 2,
+        "card_chars": 520,
+        "section_chars": 620,
+        "brief_chars": 620,
+    },
+}
 BM25_K1 = 1.5
 BM25_B = 0.75
 
@@ -310,6 +336,7 @@ def build_slide_contexts(
     memory: ProviderMemory | None,
     deck_plan: DeckPlan | None = None,
     deck_brief: str = "",
+    detail_level: str = "normal",
 ) -> dict[int, str]:
     """Return compact evidence context for each manuscript page."""
     if memory is None:
@@ -317,6 +344,10 @@ def build_slide_contexts(
     pages = split_manuscript_pages(manuscript)
     contexts: dict[int, str] = {}
     plan_by_page = deck_plan.by_page if deck_plan is not None else {}
+    budget = SLIDE_CONTEXT_BUDGETS.get(
+        detail_level,
+        SLIDE_CONTEXT_BUDGETS["normal"],
+    )
     for page_num, page in enumerate(pages, start=1):
         slide_plan = plan_by_page.get(page_num)
         query = "\n".join(
@@ -337,18 +368,27 @@ def build_slide_contexts(
             else retrieve_evidence_cards(
                 query,
                 memory,
-                limit=SLIDE_CONTEXT_CARD_COUNT,
+                limit=budget["cards"],
             )
         )
         relevant_sections = (
             []
             if is_structural
-            else _relevant_section_memories(query, cards, memory, limit=2)
+            else _relevant_section_memories(
+                query,
+                cards,
+                memory,
+                limit=budget["sections"],
+            )
         )
         brief_passages = (
             []
             if is_structural
-            else _relevant_brief_passages(query, deck_brief, limit=2)
+            else _relevant_brief_passages(
+                query,
+                deck_brief,
+                limit=budget["briefs"],
+            )
         )
         figure_lines = [] if is_structural else _slide_figure_hints(page, memory)
         lines = [
@@ -361,36 +401,27 @@ def build_slide_contexts(
         ]
         if memory.authors:
             lines.append(f"- Authors: {', '.join(memory.authors)}")
-        if slide_plan:
-            lines.extend(
-                [
-                    f"- Layout family: {slide_plan.layout_family}",
-                    f"- Density target: {slide_plan.density}",
-                ]
-            )
-        if not is_structural and memory.abstract:
-            lines.extend(
-                [
-                    "",
-                    "### Paper-Level Anchor",
-                    _trim(memory.abstract, 900),
-                ]
-            )
         if relevant_sections:
             lines.extend(["", "### Relevant Source Sections"])
             for section in relevant_sections:
                 lines.append(
-                    f"- {section.title}: {_trim(section.brief, 620)}"
+                    f"- {section.title}: {_trim(section.brief, budget['section_chars'])}"
                 )
         if brief_passages:
             lines.extend(["", "### Brief Claim Boundaries"])
-            lines.extend(f"- {_trim(passage, 620)}" for passage in brief_passages)
+            lines.extend(
+                f"- {_trim(passage, budget['brief_chars'])}"
+                for passage in brief_passages
+            )
         if cards:
             lines.append("")
             lines.append("### Evidence Anchors")
             for card in cards:
                 figure_note = f" figures={', '.join(card.figure_ids)}" if card.figure_ids else ""
-                lines.append(f"- `{card.id}` [{card.kind}] {card.section}:{figure_note} {card.text}")
+                lines.append(
+                    f"- `{card.id}` [{card.kind}] {card.section}:{figure_note} "
+                    f"{_trim(card.text, budget['card_chars'])}"
+                )
         if figure_lines:
             lines.append("")
             lines.append("### Figure Hints")

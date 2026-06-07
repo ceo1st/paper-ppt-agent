@@ -26,6 +26,7 @@ interface RoutingProfile {
   model: string;
   baseUrl: string;
   apiKey: string;
+  artifactThinkingMode?: "disabled" | "default";
   deepseekSettings?: DeepSeekSettings;
   openaiSettings?: OpenAISettings;
 }
@@ -34,7 +35,7 @@ type RoutingProfileMap = Record<string, RoutingProfile>;
 function readProviderProfile(
   provider: string,
   defaults?: { model?: string; baseUrl?: string },
-): { provider: string; model: string; apiKey: string; baseUrl: string; deepseekSettings?: DeepSeekSettings; openaiSettings?: OpenAISettings } | null {
+): { provider: string; model: string; apiKey: string; baseUrl: string; artifactThinkingMode: "disabled" | "default"; deepseekSettings?: DeepSeekSettings; openaiSettings?: OpenAISettings } | null {
   try {
     const raw = window.localStorage.getItem(ROUTING_PROFILE_STORAGE_KEY);
     if (!raw) return null;
@@ -48,6 +49,7 @@ function readProviderProfile(
       model: defaults?.model || profile.model,
       apiKey: profile.apiKey,
       baseUrl: defaults?.baseUrl || profile.baseUrl,
+      artifactThinkingMode: profile.artifactThinkingMode ?? "disabled",
       deepseekSettings: profile.deepseekSettings,
       openaiSettings: profile.openaiSettings,
     };
@@ -385,6 +387,7 @@ export function ResultPage() {
           model: profile.model,
           api_key: profile.apiKey,
           base_url: profile.baseUrl || undefined,
+          artifact_thinking_mode: profile.artifactThinkingMode,
           deepseek_settings:
             profile.provider === "deepseek" ? profile.deepseekSettings : undefined,
           openai_settings:

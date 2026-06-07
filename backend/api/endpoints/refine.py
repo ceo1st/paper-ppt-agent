@@ -176,6 +176,7 @@ async def refine_presentation(request: RefineRequest) -> RefineResponse:
         model=request.model_settings.model,
         api_key=request.model_settings.api_key,
         base_url=request.model_settings.base_url,
+        artifact_thinking_mode=request.model_settings.artifact_thinking_mode,
         canvas_format=options.canvas_format or parent_job.canvas_format or "ppt169",
         style=options.style or parent_job.style or "academic",
         language=options.language or parent_job.language or "zh",

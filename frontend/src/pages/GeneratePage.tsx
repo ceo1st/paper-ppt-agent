@@ -85,6 +85,7 @@ interface RoutingProfile {
   model: string;
   baseUrl: string;
   apiKey: string;
+  artifactThinkingMode?: "disabled" | "default";
   deepseekSettings?: DeepSeekSettings;
   openaiSettings?: OpenAISettings;
 }
@@ -199,6 +200,9 @@ export function GeneratePage() {
   const [model, setModel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [artifactThinkingMode, setArtifactThinkingMode] = useState<"disabled" | "default">(
+    "disabled",
+  );
   const [deepSeekSettings, setDeepSeekSettings] = useState<DeepSeekSettings>(
     DEFAULT_DEEPSEEK_SETTINGS,
   );
@@ -346,6 +350,7 @@ export function GeneratePage() {
       setModel("");
       setBaseUrl(saved?.baseUrl || defaults.baseUrl);
       setApiKey(saved?.apiKey || "");
+      setArtifactThinkingMode(saved?.artifactThinkingMode ?? "disabled");
       setDeepSeekSettings(saved?.deepseekSettings ?? DEFAULT_DEEPSEEK_SETTINGS);
       setOpenAISettings(saved?.openaiSettings ?? DEFAULT_OPENAI_SETTINGS);
     }
@@ -364,6 +369,7 @@ export function GeneratePage() {
     setModel(saved?.model || "");
     setBaseUrl(saved?.baseUrl || defaults.baseUrl);
     setApiKey(saved?.apiKey || "");
+    setArtifactThinkingMode(saved?.artifactThinkingMode ?? "disabled");
     setDeepSeekSettings(saved?.deepseekSettings ?? DEFAULT_DEEPSEEK_SETTINGS);
     setOpenAISettings(saved?.openaiSettings ?? DEFAULT_OPENAI_SETTINGS);
   }, [provider, providers]);
@@ -381,11 +387,12 @@ export function GeneratePage() {
       model: model.trim() || existing?.model || "",
       baseUrl,
       apiKey,
+      artifactThinkingMode,
       deepseekSettings: provider === "deepseek" ? deepSeekSettings : existing?.deepseekSettings,
       openaiSettings: provider === "openai" ? openAISettings : existing?.openaiSettings,
     };
     writeRoutingProfiles(profiles);
-  }, [apiKey, baseUrl, deepSeekSettings, model, openAISettings, provider, targetJobId]);
+  }, [apiKey, artifactThinkingMode, baseUrl, deepSeekSettings, model, openAISettings, provider, targetJobId]);
 
   useEffect(() => {
     if (!targetJobId || !selectedRunConfig) {
@@ -398,6 +405,7 @@ export function GeneratePage() {
     setModel(selectedRunConfig.model);
     setBaseUrl(selectedRunConfig.baseUrl ?? "");
     setApiKey(savedProfile?.apiKey ?? "");
+    setArtifactThinkingMode(savedProfile?.artifactThinkingMode ?? "disabled");
     setDeepSeekSettings(savedProfile?.deepseekSettings ?? DEFAULT_DEEPSEEK_SETTINGS);
     setOpenAISettings(savedProfile?.openaiSettings ?? DEFAULT_OPENAI_SETTINGS);
     setCanvasFormat(options.canvas_format || "ppt169");
@@ -420,7 +428,7 @@ export function GeneratePage() {
     setGenerationMode(options.generation_mode || "sequential");
     setParallelConcurrency(String(options.parallel_concurrency ?? 3));
     setTimeoutSeconds(options.timeout_seconds ? String(options.timeout_seconds) : "");
-    setMaxCriticAttempts(String(options.max_critic_attempts ?? 3));
+    setMaxCriticAttempts(String(options.max_critic_attempts ?? 0));
     setEnableDeepResearch(Boolean(options.enable_deep_research));
     setEnableVisualCritic(Boolean(options.enable_visual_critic));
     setVisualQaMaxAttempts(String(options.visual_qa_max_attempts ?? 1));
@@ -544,6 +552,7 @@ export function GeneratePage() {
         model: normalizedModel,
         baseUrl,
         apiKey,
+        artifactThinkingMode,
         deepseekSettings: provider === "deepseek" ? deepSeekSettings : undefined,
         openaiSettings: provider === "openai" ? openAISettings : undefined,
       };
@@ -566,6 +575,7 @@ export function GeneratePage() {
             model: normalizedModel,
             api_key: apiKey,
             base_url: baseUrl || undefined,
+            artifact_thinking_mode: artifactThinkingMode,
             deepseek_settings: provider === "deepseek" ? deepSeekSettings : undefined,
             openai_settings: provider === "openai" ? openAISettings : undefined,
           }
@@ -726,7 +736,7 @@ export function GeneratePage() {
                 className={generationBackend === "provider" ? "active" : ""}
                 onClick={() => requestGenerationBackend("provider")}
               >
-                LLM
+                Provider
               </button>
               <button
                 type="button"
@@ -771,6 +781,7 @@ export function GeneratePage() {
                 model={model}
                 baseUrl={baseUrl}
                 apiKey={apiKey}
+                artifactThinkingMode={artifactThinkingMode}
                 deepSeekSettings={deepSeekSettings}
                 openAISettings={openAISettings}
                 onProviderChange={(nextProvider) => {
@@ -779,6 +790,7 @@ export function GeneratePage() {
                 onModelChange={setModel}
                 onBaseUrlChange={setBaseUrl}
                 onApiKeyChange={setApiKey}
+                onArtifactThinkingModeChange={setArtifactThinkingMode}
                 onDeepSeekSettingsChange={setDeepSeekSettings}
                 onOpenAISettingsChange={setOpenAISettings}
               />

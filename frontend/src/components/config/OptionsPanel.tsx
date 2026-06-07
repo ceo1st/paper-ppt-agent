@@ -662,7 +662,7 @@ export function OptionsPanel(props: OptionsPanelProps) {
         />
       </label>
 
-      <label className="form-field">
+      <label className="form-field instruction-section-field">
         <span>{t("options.instruction")}</span>
         <textarea
           rows={4}

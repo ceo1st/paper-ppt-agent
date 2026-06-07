@@ -126,6 +126,7 @@ def create_provider(
     api_key: str,
     *,
     base_url: str | None = None,
+    artifact_thinking_mode: str = "disabled",
     deepseek_settings: dict | None = None,
     openai_settings: dict | None = None,
 ) -> LLMProvider:
@@ -142,6 +143,7 @@ def create_provider(
             "api_key": api_key,
             "base_url": resolved_base_url,
             "provider_name": name,
+            "artifact_thinking_mode": artifact_thinking_mode,
         }
         if deepseek_settings is not None:
             kwargs["deepseek_settings"] = deepseek_settings

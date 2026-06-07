@@ -59,6 +59,35 @@ def _lexical_boost(query: str, icon: dict) -> float:
     return min(boost, 0.24)
 
 
+def _metadata_score(query: str, icon: dict) -> float:
+    """Score icon metadata without loading embeddings or SVG content."""
+    query_tokens = _tokens(query)
+    if not query_tokens:
+        return 0.0
+
+    icon_tokens = _tokens(
+        " ".join(
+            [
+                str(icon.get("name") or ""),
+                str(icon.get("category") or ""),
+                " ".join(str(tag) for tag in icon.get("tags", []) or []),
+            ]
+        )
+    )
+    overlap = query_tokens & icon_tokens
+    if not overlap:
+        return 0.0
+
+    score = len(overlap) / max(1, len(query_tokens))
+    name_tokens = _tokens(str(icon.get("name") or ""))
+    if overlap & name_tokens:
+        score += 0.35
+    category_tokens = _tokens(str(icon.get("category") or ""))
+    if overlap & category_tokens:
+        score += 0.15
+    return score
+
+
 def _np():
     """Lazy import numpy."""
     import numpy as np
@@ -79,16 +108,32 @@ class IconIndex:
         self._icons_dir = icons_dir
         self._vectors = None  # np.ndarray | None
         self._meta: dict | None = None
+        self._metadata_loaded = False
         self._loaded = False
+
+    def _ensure_metadata_loaded(self) -> None:
+        if self._metadata_loaded:
+            return
+        if self._meta is not None:
+            self._metadata_loaded = True
+            return
+
+        meta_path = self._icons_dir / "index_meta.json"
+        if not meta_path.exists():
+            logger.warning("Icon metadata index not found at %s", meta_path)
+            self._metadata_loaded = True
+            return
+
+        self._meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self._metadata_loaded = True
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
 
         npz_path = self._icons_dir / "index.npz"
-        meta_path = self._icons_dir / "index_meta.json"
-
-        if not npz_path.exists() or not meta_path.exists():
+        self._ensure_metadata_loaded()
+        if not npz_path.exists() or self._meta is None:
             logger.warning(
                 "Icon index not found at %s. "
                 "Run `python scripts/build_icon_index.py` to build it.",
@@ -107,7 +152,6 @@ class IconIndex:
             out=self._vectors,
             where=norms > 0,
         )
-        self._meta = json.loads(meta_path.read_text(encoding="utf-8"))
         self._loaded = True
         logger.info(
             "Loaded icon index: %d icons, %d dimensions",
@@ -124,6 +168,11 @@ class IconIndex:
     def is_available(self) -> bool:
         """Alias for is_loaded."""
         return self.is_loaded
+
+    @property
+    def metadata_available(self) -> bool:
+        self._ensure_metadata_loaded()
+        return self._meta is not None
 
     def search(
         self,
@@ -195,6 +244,47 @@ class IconIndex:
 
         return results
 
+    def search_metadata(
+        self,
+        query: str,
+        lib: str | None = None,
+        k: int = 8,
+    ) -> list[dict]:
+        """Search pre-built metadata only; never read icon SVG files."""
+        self._ensure_metadata_loaded()
+        if self._meta is None:
+            return []
+
+        candidates = [
+            (icon, _metadata_score(query, icon))
+            for icon in self._meta["icons"]
+            if not lib or icon.get("lib") == lib
+        ]
+        candidates = [
+            (icon, score)
+            for icon, score in candidates
+            if score > 0
+        ]
+        candidates.sort(
+            key=lambda item: (
+                item[1],
+                str(item[0].get("name") or ""),
+            ),
+            reverse=True,
+        )
+        return [
+            {
+                "path": icon["path"],
+                "name": icon["name"],
+                "lib": icon["lib"],
+                "category": icon.get("category", ""),
+                "tags": icon.get("tags", []),
+                "score": score,
+                "search_mode": "metadata",
+            }
+            for icon, score in candidates[: max(0, k)]
+        ]
+
     def _embed_query(self, query: str):
         """Embed a search query using Gemini Embedding 2. Returns np.ndarray or None."""
         np = _np()
@@ -223,7 +313,7 @@ class IconIndex:
 
     def get_all_icons(self, lib: str | None = None) -> list[dict]:
         """Return all icon metadata, optionally filtered by library."""
-        self._ensure_loaded()
+        self._ensure_metadata_loaded()
         if self._meta is None:
             return []
 

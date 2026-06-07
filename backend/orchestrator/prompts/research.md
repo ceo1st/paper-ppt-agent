@@ -146,14 +146,17 @@ Produce a Markdown document where each slide is separated by `---`. Each slide s
 6. **Key data/numbers** highlighted in bold
 
 The ending page should be a closing/thanks page, not a final content summary.
+Slide 2 should be a mandatory table of contents whose entries match the final
+chapter titles.
 For `cover`, `chapter/transition`, and `ending` slides, the Structural Page Boundaries below override the generic slide format.
 
 ### 3.6 Structural Page Boundaries
 
 - `cover` is a lightweight title/meta slide: title, optional subtitle, authors/source/venue/date if available, and a few short context or thesis lines. It must not contain paper figures or become a detailed research-background, contribution, metric, or results slide.
+- `toc` is the mandatory table-of-contents slide immediately after the cover. It mirrors the final chapter plan and does not add new evidence.
 - `chapter/transition` is only a divider: chapter title, optional short subtitle, and at most 1-2 brief orientation phrases. It must not contain detailed metrics, evidence bullets, numbered question lists, charts, diagrams, paper figures, or labeled content blocks such as `核心问题` / `本章看点`.
 - All `chapter/transition` slides must keep the same manuscript shape and visual intent across the deck: same title/subtitle pattern, no ad-hoc cards, no per-chapter mini-outline grids. Put detailed questions and preview bullets on the following `content` slides.
-- A chapter divider should normally introduce at least 2 following `content` slides. If a topic would have only 1 content slide, merge it into a neighboring chapter instead of creating a standalone divider.
+- A chapter divider should introduce a real narrative section. If the paper genuinely has a major single-slide pivot, use a `content` slide with a clear section label instead of a divider-only page.
 - `content` slides carry the actual mechanisms, evidence, figures, and detailed bullets. Do not make content slides look like chapter dividers.
 
 ---

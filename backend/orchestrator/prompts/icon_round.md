@@ -1,8 +1,8 @@
 # Icon Layout Planner
 
 Decide which pages get exactly one semantic icon and which pages stay clean.
-This is a separate icon-only round, so you may inspect the full icon catalog
-without worrying about distracting the main layout/content planning step.
+Candidates were retrieved on demand from pre-built metadata. Do not enumerate
+the icon directory or inspect SVG file contents during this planning step.
 
 ## Core Decision Order
 
@@ -15,7 +15,7 @@ without worrying about distracting the main layout/content planning step.
 
 - **Forbidden page types**: chapter/transition, TOC/agenda, and ending pages must use `None`. Cover pages may use `None` or one subtle semantic icon when it supports the title/meta treatment.
 - **Max 1 icon per page**.
-- **Use exact paths only** from the shortlist or full catalog below. Never invent icon names.
+- **Use exact paths only** from the per-page shortlist below. Never invent icon names.
 - **Icons are layout anchors, not decoration**. Do not place a floating sticker in a random corner.
 - **Prefer `None`** for dense data slides, text-heavy explanations, paper-figure slides, or pages where the icon would only fill empty space.
 - **Prefer an icon** on eligible content pages when it naturally anchors a process step, method/module, KPI/result callout, warning/limitation, key contribution, or explicit action.
@@ -32,8 +32,6 @@ without worrying about distracting the main layout/content planning step.
 ## Per-page Shortlist and Context
 
 {per_page_candidates_table}
-
-{full_icon_catalog}
 
 ## Output
 

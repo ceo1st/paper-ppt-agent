@@ -33,6 +33,7 @@ class ModelConfig(BaseModel):
     model: str
     api_key: str
     base_url: str | None = None
+    artifact_thinking_mode: Literal["disabled", "default"] = "disabled"
     deepseek_settings: DeepSeekSettings | None = None
     openai_settings: OpenAISettings | None = None
 

@@ -353,6 +353,7 @@ export interface GenerateRequestPayload {
     model: string;
     api_key: string;
     base_url?: string;
+    artifact_thinking_mode?: "disabled" | "default";
     deepseek_settings?: DeepSeekSettings;
     openai_settings?: OpenAISettings;
   };
@@ -766,6 +767,7 @@ export interface RefineRequestPayload {
     model: string;
     api_key: string;
     base_url?: string;
+    artifact_thinking_mode?: "disabled" | "default";
     deepseek_settings?: DeepSeekSettings;
     openai_settings?: OpenAISettings;
   };

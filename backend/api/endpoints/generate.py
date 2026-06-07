@@ -258,6 +258,11 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         model=model_settings.model if model_settings is not None else "",
         api_key=model_settings.api_key if model_settings is not None else "",
         base_url=model_settings.base_url if model_settings is not None else None,
+        artifact_thinking_mode=(
+            model_settings.artifact_thinking_mode
+            if model_settings is not None
+            else "disabled"
+        ),
         canvas_format=request.options.canvas_format,
         style=request.options.style,
         num_pages=request.options.num_pages,

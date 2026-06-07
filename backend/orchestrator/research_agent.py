@@ -23,17 +23,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.llm import LLMMessage, LLMProvider, LLMResponse
-from backend.orchestrator.provider_guidance import (
-    deepseek_research_guidance,
-    is_deepseek_provider,
-)
+from backend.orchestrator.provider_guidance import is_deepseek_provider
 from backend.orchestrator.manuscript import (
     auto_slide_range,
     extract_page_type,
     normalize_manuscript_slide_delimiters,
     page_type_budget,
     page_type_budget_guidance,
-    strip_page_type_metadata,
     split_manuscript_pages,
 )
 from backend.orchestrator.provider_memory import ProviderMemory
@@ -57,7 +53,11 @@ LEGACY_PROMPT = PROMPTS_DIR / "research.md"
 
 DEEPSEEK_MAX_TOKENS = 24576
 DEEPSEEK_RESEARCH_MAX_TOKENS = DEEPSEEK_MAX_TOKENS
-QUALITY_THRESHOLD = 28  # out of 35 (7 dimensions × 5 points each)
+BRIEF_MAX_TOKENS = {
+    "normal": 8192,
+    "high": 12288,
+    "very_high": 16384,
+}
 MAX_MANUSCRIPT_ATTEMPTS = 3
 SINGLE_PASS_SYSTEM_PROMPT = (
     "You write slide-structured manuscripts from academic papers. "
@@ -88,38 +88,6 @@ _REVIEW_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _FIG_TOKEN_RE = re.compile(r"\[\[FIG:([A-Za-z0-9_\-]+)\]\]")
-_STRUCTURAL_PAGE_TYPES = frozenset({"cover", "chapter", "toc", "ending"})
-_STRUCTURAL_LIST_RE = re.compile(r"(?m)^\s*(?:[-*•]|\d+[\.)、])\s+\S+")
-_STRUCTURAL_LABEL_RE = re.compile(
-    r"(?i)(核心问题|本章看点|本章关注|本节关注|三个问题|主要结果|结果亮点|"
-    r"模型规格|关键目标|贡献|方法要点|实验看点|chapter\s+highlights|key\s+points)"
-)
-_EVIDENCE_MARKER_RE = re.compile(
-    r"(?i)(\d|%|table|figure|fig\.?|equation|formula|experiment|result|metric|"
-    r"dataset|baseline|sota|bleu|rouge|accuracy|f1|auc|ap\b|loss|latency|"
-    r"ablation|complexity|parameter|token|图|表|公式|实验|结果|指标|数据集|"
-    r"基线|消融|复杂度|参数|训练|推理|精度|召回|误差)"
-)
-_EXPLANATION_MARKER_RE = re.compile(
-    r"(?i)(because|therefore|so that|this means|this shows|this suggests|"
-    r"implies|enables|reduces|increases|compared|mechanism|design choice|"
-    r"assumption|limitation|trade[- ]?off|why|because of|原因|因此|所以|"
-    r"意味着|说明|表明|显示|支撑|导致|使得|解决|降低|提升|相比|机制|"
-    r"设计|假设|局限|权衡|启示|关键在于)"
-)
-_DEPTH_CHAR_THRESHOLDS = {
-    "normal": 70,
-    "high": 105,
-    "very_high": 130,
-}
-_NUMBER_CLAIM_RE = re.compile(
-    r"(?<![A-Za-z0-9_.])[-+]?\d+(?:[.,]\d+)*(?:%|×|x|X)?"
-    r"(?![A-Za-z0-9_.])"
-)
-_DERIVATION_MARKER_RE = re.compile(
-    r"(?i)(derived|calculated|computed|approximately|about|rounded|"
-    r"计算|推算|折算|约为|大约|近似|相减|相除|由.+得)"
-)
 _INTERNAL_EVIDENCE_ID_RE = re.compile(r"`?\bs\d{2,}[ct]\d{2,}\b`?", re.IGNORECASE)
 
 
@@ -142,75 +110,6 @@ def _debug_write_messages(
     _debug_write_text(debug_dir, filename, "\n\n".join(parts))
 
 
-def _normalized_numbers(text: str) -> set[str]:
-    values: set[str] = set()
-    for match in _NUMBER_CLAIM_RE.finditer(text or ""):
-        value = match.group(0).replace(",", "").lower()
-        suffix = ""
-        if value.endswith(("%", "×", "x")):
-            suffix = value[-1]
-            value = value[:-1]
-        try:
-            value = (
-                f"{float(value):.12f}".rstrip("0").rstrip(".")
-                if "." in value
-                else str(int(value))
-            )
-        except ValueError:
-            pass
-        value += suffix
-        if value not in {"0", "1"}:
-            values.add(value)
-    return values
-
-
-def _numeric_audit_lines(manuscript: str, source_text: str) -> list[str]:
-    source_numbers = _normalized_numbers(source_text)
-    if not source_numbers:
-        return []
-    findings: list[str] = []
-    for line_number, raw_line in enumerate(manuscript.splitlines(), start=1):
-        line = re.sub(r"\s+", " ", raw_line).strip()
-        if not line:
-            continue
-        missing = sorted(_normalized_numbers(line) - source_numbers)
-        if missing:
-            derivation_note = (
-                " The line contains an approximation/derivation marker; keep the "
-                "number only if the exact source inputs and calculation are shown."
-                if _DERIVATION_MARKER_RE.search(line)
-                else ""
-            )
-            findings.append(
-                f"- Line {line_number}: numbers {', '.join(missing)} are not present "
-                f"verbatim in the source: {line[:500]}{derivation_note}"
-            )
-    return findings[:30]
-
-
-def _restore_missing_page_type_metadata(candidate: str, reference: str) -> str:
-    candidate_pages = split_manuscript_pages(candidate)
-    reference_pages = split_manuscript_pages(reference)
-    if len(candidate_pages) != len(reference_pages):
-        return candidate
-
-    restored_pages: list[str] = []
-    for candidate_page, reference_page in zip(candidate_pages, reference_pages, strict=True):
-        if re.search(r"(?im)^\s*<!--\s*page_type\s*:", candidate_page):
-            restored_pages.append(candidate_page)
-            continue
-        match = re.search(
-            r"(?im)^\s*<!--\s*page_type\s*:\s*"
-            r"(?:cover|chapter|transition|toc|content|ending)\s*-->\s*",
-            reference_page,
-        )
-        if match:
-            restored_pages.append(match.group(0).strip() + "\n" + candidate_page.lstrip())
-        else:
-            restored_pages.append(candidate_page)
-    return "\n\n---\n\n".join(page.strip() for page in restored_pages if page.strip())
-
-
 def _sanitize_internal_evidence_markers(manuscript: str) -> str:
     def replacement(match: re.Match[str]) -> str:
         token = match.group(0).strip("`").lower()
@@ -228,219 +127,6 @@ def _sanitize_internal_evidence_markers(manuscript: str) -> str:
         cleaned,
     )
     return cleaned
-
-
-async def _repair_numeric_provenance_if_needed(
-    manuscript: str,
-    source_text: str,
-    llm: LLMProvider,
-    model: str,
-    *,
-    language: str,
-    detail_level: str,
-    is_deepseek: bool,
-    paper: ParsedPaper,
-    num_pages: int | None,
-    debug_dir: Path | None,
-) -> str:
-    findings = _numeric_audit_lines(manuscript, source_text)
-    if not findings:
-        return manuscript
-    messages = [
-        LLMMessage.system(
-            "You are an evidence repair editor. Correct numeric provenance problems in "
-            "a slide manuscript without changing its page count, order, page types, or "
-            "valid figure tokens. Preserve exact source values. A derived value may remain "
-            "only when explicitly marked as calculated/approximate and its source inputs "
-            "or calculation are stated. Preserve every `<!-- page_type: ... -->` metadata "
-            "line, including the cover slide. Do not compress exact counts into Chinese "
-            "unit shorthand unless the source uses the same shorthand: keep `12,282,034` "
-            "rather than `1228万`, `12.28万`, or `超过1200万`. Prefer exact source "
-            "metrics and absolute percentage-point differences over newly derived "
-            "relative percentages. Output only the complete repaired manuscript."
-        ),
-        LLMMessage.user(
-            f"## Target Language\n{language}\n\n"
-            f"## Detail Level\n{detail_level}\n\n"
-            f"## Automatic Numeric Audit\n{chr(10).join(findings)}\n\n"
-            f"## Source Working Memory\n{source_text}\n\n"
-            f"## Manuscript\n{manuscript}"
-        ),
-    ]
-    _debug_write_messages(debug_dir, "research_numeric_repair_prompt.md", messages)
-    response = await llm.chat(
-        messages,
-        model,
-        temperature=0.15,
-        max_tokens=DEEPSEEK_MAX_TOKENS if is_deepseek else None,
-    )
-    _debug_write_text(debug_dir, "research_numeric_repair_response.md", response.content)
-    repaired = normalize_manuscript_slide_delimiters(response.content)
-    if _manuscript_validation_error(repaired, paper, num_pages, detail_level):
-        metadata_restored = _restore_missing_page_type_metadata(repaired, manuscript)
-        if not _manuscript_validation_error(metadata_restored, paper, num_pages, detail_level):
-            _debug_write_text(
-                debug_dir,
-                "research_numeric_repair_metadata_restored.md",
-                metadata_restored,
-            )
-            return metadata_restored
-        return manuscript
-    return repaired
-
-
-def _manuscript_page_inventory(manuscript: str) -> str:
-    rows = []
-    for index, page in enumerate(split_manuscript_pages(manuscript), start=1):
-        page_type = extract_page_type(page)
-        heading = _page_heading(page)
-        body_len = len(re.sub(r"\s+", "", " ".join(_visible_body_lines(page))))
-        rows.append(
-            f"- Slide {index}: page_type={page_type}, title={heading}, visible_chars={body_len}"
-        )
-    return "\n".join(rows) or "- No slides detected."
-
-
-def _merge_content_slides(primary: str, secondary: str) -> str:
-    primary_visible = strip_page_type_metadata(primary).rstrip()
-    secondary_visible = strip_page_type_metadata(secondary)
-    secondary_heading = _page_heading(secondary)
-    secondary_body = []
-    for line in secondary_visible.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("<!--"):
-            continue
-        if stripped.startswith("#"):
-            continue
-        secondary_body.append(line.rstrip())
-    supplement = "\n".join(secondary_body).strip()
-    if supplement:
-        merged_visible = (
-            f"{primary_visible}\n\n"
-            f"**补充：{secondary_heading}**\n"
-            f"{supplement}"
-        )
-    else:
-        merged_visible = primary_visible
-    return "<!-- page_type: content -->\n" + merged_visible.lstrip()
-
-
-def _minimal_ending_slide(manuscript: str) -> str:
-    if re.search(r"[\u4e00-\u9fff]", manuscript):
-        return "<!-- page_type: ending -->\n# 谢谢\n### Q&A / 交流"
-    return "<!-- page_type: ending -->\n# Thank You\n### Questions"
-
-
-def _content_groups_by_chapter(pages: list[str]) -> list[list[int]]:
-    groups: list[list[int]] = []
-    current: list[int] | None = None
-    for idx, page in enumerate(pages):
-        page_type = extract_page_type(page)
-        if page_type == "chapter":
-            current = []
-            groups.append(current)
-        elif page_type == "content":
-            if current is None:
-                current = []
-                groups.append(current)
-            current.append(idx)
-        elif page_type == "ending":
-            current = None
-    return [group for group in groups if group]
-
-
-def _content_merge_indices(pages: list[str]) -> tuple[int, int] | None:
-    groups = _content_groups_by_chapter(pages)
-    eligible_groups = [group for group in groups if len(group) > 2]
-    if eligible_groups:
-        group = max(eligible_groups, key=len)
-        return group[-1], group[-2]
-
-    content_indices = [
-        idx for idx, page in enumerate(pages) if extract_page_type(page) == "content"
-    ]
-    if len(content_indices) < 2:
-        return None
-    idx = content_indices[-1]
-    prev_candidates = [candidate for candidate in content_indices if candidate < idx]
-    next_candidates = [candidate for candidate in content_indices if candidate > idx]
-    if prev_candidates:
-        return idx, prev_candidates[-1]
-    if next_candidates:
-        return idx, next_candidates[0]
-    return None
-
-
-def _coerce_overlong_manuscript_to_budget(
-    manuscript: str,
-    paper: ParsedPaper,
-    num_pages: int | None,
-    detail_level: str,
-) -> str | None:
-    if not num_pages:
-        return None
-    pages = split_manuscript_pages(manuscript)
-    expected_count = _expected_slide_count(num_pages, detail_level)
-    if len(pages) <= expected_count:
-        return None
-
-    budget = page_type_budget(num_pages, detail_level)
-    while len(pages) > expected_count:
-        counts = {"cover": 0, "chapter": 0, "content": 0, "ending": 0}
-        for page in pages:
-            page_type = extract_page_type(page)
-            if page_type in counts:
-                counts[page_type] += 1
-
-        if counts["content"] > budget["content"]:
-            merge_pair = _content_merge_indices(pages)
-            if merge_pair is None:
-                return None
-            idx, target = merge_pair
-            pages[target] = _merge_content_slides(pages[target], pages[idx])
-            del pages[idx]
-            continue
-
-        removable_type = None
-        for page_type in ("chapter", "ending", "cover"):
-            if counts[page_type] > budget[page_type]:
-                removable_type = page_type
-                break
-        if removable_type is None:
-            return None
-        for idx in range(len(pages) - 1, -1, -1):
-            if extract_page_type(pages[idx]) == removable_type:
-                del pages[idx]
-                break
-
-    coerced = "\n\n---\n\n".join(page.strip() for page in pages if page.strip())
-    error = _manuscript_validation_error(coerced, paper, num_pages, detail_level)
-    if error == "ending slide must be a closing/thanks page" and pages:
-        pages[-1] = _minimal_ending_slide(coerced)
-        coerced = "\n\n---\n\n".join(page.strip() for page in pages if page.strip())
-        error = _manuscript_validation_error(coerced, paper, num_pages, detail_level)
-    if error:
-        return None
-    return coerced
-
-
-def _repair_closing_slide_if_needed(
-    manuscript: str,
-    paper: ParsedPaper,
-    num_pages: int | None,
-    detail_level: str,
-) -> str | None:
-    error = _manuscript_validation_error(manuscript, paper, num_pages, detail_level)
-    if error != "ending slide must be a closing/thanks page":
-        return None
-    pages = split_manuscript_pages(manuscript)
-    if not pages or extract_page_type(pages[-1]) != "ending":
-        return None
-    pages[-1] = _minimal_ending_slide(manuscript)
-    repaired = "\n\n---\n\n".join(page.strip() for page in pages if page.strip())
-    if _manuscript_validation_error(repaired, paper, num_pages, detail_level):
-        return None
-    return repaired
 
 
 async def _repair_manuscript_structure_if_needed(
@@ -474,28 +160,22 @@ async def _repair_manuscript_structure_if_needed(
         )
         messages = [
             LLMMessage.system(
-                "You are a slide-manuscript structure repair editor. Fix structural "
-                "validation errors without changing the topic, evidence basis, language, "
-                "or valid paper figure tokens. Preserve important claims by merging, "
-                "splitting, or redistributing content when necessary. Output only the "
-                "complete repaired manuscript."
+                "You repair only the machine-readable structure of a slide manuscript. "
+                "Preserve the visible content and evidence as closely as possible. Fix "
+                "page separators, page_type metadata, required structural roles, page "
+                "count, ordering, and invalid FIG tokens. Output only the complete "
+                "repaired manuscript."
             ),
             LLMMessage.user(
                 f"## Validation Error\n{current_error}\n\n"
-                f"## Current Slide Inventory\n{_manuscript_page_inventory(current)}\n\n"
                 f"## Target Language\n{language}\n\n"
                 f"## Target Slides\n{_target_slides_guidance(num_pages, detail_level)}\n\n"
-                f"## Detail Level\n{detail_level}\n\n"
                 "## Repair Rules\n"
-                "- Keep cover/chapter/ending pages lightweight and minimal.\n"
-                "- If there are too many content slides, merge the weakest or most overlapping "
-                "content slide into a neighboring content slide instead of deleting evidence.\n"
-                "- If there are too few content slides, split only a dense content slide whose "
-                "source evidence supports two distinct claims.\n"
-                "- For decks with chapter slides, every chapter must introduce at least two "
-                "following content slides before the next chapter or ending slide.\n"
-                "- Do not add new claims, figures, metrics, or source attributions.\n\n"
-                f"## Source Working Memory\n{source_text}\n\n"
+                "- Slide 1 is cover and slide 2 is the mandatory table of contents.\n"
+                "- Preserve the existing visible wording; do not perform content-quality edits.\n"
+                "- Do not add new claims, figures, metrics, or source attributions.\n"
+                "- Use only exact FIG tokens available in the source working memory.\n\n"
+                f"## Source Working Memory (for FIG token validation only)\n{source_text}\n\n"
                 f"## Manuscript To Repair\n{current}"
             ),
         ]
@@ -516,35 +196,6 @@ async def _repair_manuscript_structure_if_needed(
         )
         if not current_error:
             return current
-
-        closing_repaired = _repair_closing_slide_if_needed(
-            current,
-            paper,
-            num_pages,
-            detail_level,
-        )
-        if closing_repaired:
-            _debug_write_text(
-                debug_dir,
-                f"{attempt_prefix}_closing_repaired.md",
-                closing_repaired,
-            )
-            return closing_repaired
-
-        coerced = _coerce_overlong_manuscript_to_budget(
-            current,
-            paper,
-            num_pages,
-            detail_level,
-        ) or _coerce_overlong_manuscript_to_budget(
-            manuscript,
-            paper,
-            num_pages,
-            detail_level,
-        )
-        if coerced:
-            _debug_write_text(debug_dir, f"{attempt_prefix}_coerced.md", coerced)
-            return coerced
 
         _debug_write_text(debug_dir, f"{attempt_prefix}_rejected.txt", current_error)
 
@@ -572,7 +223,6 @@ async def _run_lightweight_paper_brief(
     user_parts = [
         f"## Paper Working Memory\n\n{paper_context}",
         f"\n## Target Language\n\n{language}\n\n{_language_guidance(language)}",
-        f"\n## Detail Level\n\n{detail_level}\n\n{DETAIL_GUIDANCE.get(detail_level, DETAIL_GUIDANCE['normal'])}",
     ]
     figure_inventory = _figure_token_inventory_block(paper)
     if figure_inventory:
@@ -581,8 +231,6 @@ async def _run_lightweight_paper_brief(
         user_parts.append(f"\n{enrichment_block}")
     if instruction:
         user_parts.append(f"\n## User Instruction\n\n{instruction}")
-    if is_deepseek:
-        user_parts.append("\n" + deepseek_research_guidance(detail_level))
     user_parts.append(
         "\n\n## Brief Requirements\n\n"
         "Output Markdown only. Be concise where possible, but do not omit a major claim, "
@@ -623,7 +271,10 @@ async def _run_lightweight_paper_brief(
         messages,
         model,
         temperature=0.25,
-        max_tokens=DEEPSEEK_RESEARCH_MAX_TOKENS if is_deepseek else None,
+        max_tokens=min(
+            BRIEF_MAX_TOKENS.get(detail_level, BRIEF_MAX_TOKENS["normal"]),
+            DEEPSEEK_RESEARCH_MAX_TOKENS,
+        ),
     )
     brief = response.content.strip()
     _debug_write_text(debug_dir, "paper_brief.md", brief)
@@ -651,7 +302,6 @@ async def _run_single_pass_analysis(
         f"## Paper Working Memory\n\n{paper_context}",
         f"\n## Target Language\n\n{language}\n\n{_language_guidance(language)}",
         f"\n## Target Slides\n\n{_target_slides_guidance(num_pages, detail_level)}",
-        f"\n## Detail Level\n\n{detail_level}\n\n{DETAIL_GUIDANCE.get(detail_level, DETAIL_GUIDANCE['normal'])}",
     ]
     if paper_brief:
         user_parts.append(
@@ -668,16 +318,15 @@ async def _run_single_pass_analysis(
         user_parts.append(f"\n{enrichment_block}")
     if instruction:
         user_parts.append(f"\n## User Instruction\n\n{instruction}")
-    if is_deepseek:
-        user_parts.append("\n" + deepseek_research_guidance(detail_level))
     user_parts.append(
         "\n\n## Internal Structure Planning Contract\n\n"
         "Before writing the manuscript, internally allocate the deck into coherent "
-        "chapter groups. A chapter/transition slide is allowed only when it introduces "
-        "at least 2 following `content` slides. If a topic has only 1 content slide, "
-        "do not create a chapter divider for it; merge that topic into a neighboring "
-        "chapter and make the slide `content`. Never put labels such as `核心问题` / "
-        "`本章看点`, bullets, figures, or evidence blocks on `chapter` slides."
+        "chapter groups based on your understanding of the paper's content, not a "
+        "fixed template. Chapter titles should reflect the paper's real conceptual "
+        "blocks, argument stages, mechanisms, evidence clusters, or contribution "
+        "logic. Slide 2 is the mandatory table of contents and must list the final "
+        "chapter titles in narrative order. Keep chapter dividers concise and put "
+        "detailed evidence on content slides."
     )
     user_parts.append(
         "\n\n## Content Depth Contract\n\n"
@@ -685,8 +334,8 @@ async def _run_single_pass_analysis(
         "(2) paper-grounded evidence appropriate to the discipline, such as a metric, dataset, "
         "quotation, case, observation, archival source, theorem, table/figure/formula reference, "
         "method detail, comparison, or reasoning step; and (3) a short explanation of why that "
-        "evidence matters. For `high` and `very_high`, prefer 3-5 concrete content blocks per "
-        "content slide when readable. Do not invent evidence and do not force numeric evidence "
+        "evidence matters. Choose the number of content blocks from the current page's argument "
+        "and visual needs. Do not invent evidence and do not force numeric evidence "
         "onto qualitative, theoretical, historical, or interpretive work."
     )
     user_parts.append(
@@ -744,55 +393,6 @@ async def _run_single_pass_analysis(
             detail_level,
         ) or ""
         if not last_error:
-            depth_feedback = _manuscript_depth_feedback(response_content, detail_level)
-            if not depth_feedback:
-                return response_content
-
-            rewrite_messages = list(base_messages)
-            rewrite_messages.extend(
-                [
-                    LLMMessage.assistant(response_content),
-                    LLMMessage.user(
-                        _depth_retry_prompt(depth_feedback, num_pages, detail_level)
-                    ),
-                ]
-            )
-            _debug_write_messages(
-                debug_dir,
-                "research_depth_rewrite_prompt.md",
-                rewrite_messages,
-            )
-            rewrite_response = await llm.chat(
-                rewrite_messages,
-                model,
-                temperature=0.35,
-                max_tokens=DEEPSEEK_MAX_TOKENS if is_deepseek else None,
-            )
-            revised = normalize_manuscript_slide_delimiters(rewrite_response.content)
-            _debug_write_text(
-                debug_dir,
-                "research_depth_rewrite_response.md",
-                rewrite_response.content,
-            )
-            if revised != rewrite_response.content.strip():
-                _debug_write_text(
-                    debug_dir,
-                    "research_depth_rewrite_response_normalized.md",
-                    revised,
-                )
-            revised_error = _manuscript_validation_error(
-                revised,
-                paper,
-                num_pages,
-                detail_level,
-            )
-            if not revised_error:
-                return revised
-            _debug_write_text(
-                debug_dir,
-                "research_depth_rewrite_rejected.txt",
-                revised_error,
-            )
             return response_content
 
     logger.warning("Single-pass manuscript structure invalid after retry; repairing: %s", last_error)
@@ -836,28 +436,6 @@ def _language_guidance(language: str) -> str:
         f"and presenter-facing content in {language.strip() or 'the requested language'}. "
         "Keep proper nouns, paper titles, dataset names, model names, and metric abbreviations in their original form when needed."
     )
-
-
-# ── Detail level guidance ──────────────────────────────────────────────────────
-
-
-DETAIL_GUIDANCE = {
-    "normal": (
-        "Produce a concise but faithful reading of the paper. Capture the core "
-        "problem, method, evidence, and conclusions without overloading each slide."
-    ),
-    "high": (
-        "Read the paper more deeply before writing. Surface the paper's reasoning, "
-        "method design choices, assumptions, experimental logic, and non-obvious takeaways. "
-        "Slides may be moderately denser when that improves understanding."
-    ),
-    "very_high": (
-        "Perform a thorough reading rather than a surface summary. Explicitly cover the "
-        "paper's motivation, mechanism, architecture, training or inference flow, assumptions, "
-        "limitations, and the significance of the results. It is acceptable for slides to be "
-        "denser and richer so the deck reflects a complete understanding of the paper."
-    ),
-}
 
 
 # ── Research context (optional external enrichment) ─────────────────────────────
@@ -961,23 +539,19 @@ def _manuscript_structure_error(
     detail_level: str = "normal",
 ) -> str | None:
     pages = split_manuscript_pages(manuscript)
-    seen = {"cover": 0, "chapter": 0, "content": 0, "ending": 0}
+    if not pages:
+        return "no parseable slides found"
+
+    seen = {"cover": 0, "toc": 0, "chapter": 0, "content": 0, "ending": 0}
     missing_meta = []
     for index, page in enumerate(pages, start=1):
-        if "page_type" not in page:
+        if not re.search(r"(?im)^\s*<!--\s*page_type\s*:", page):
             missing_meta.append(str(index))
         page_type = extract_page_type(page)
         if page_type in seen:
             seen[page_type] += 1
         else:
             return f"slide {index} has unsupported page_type `{page_type}`"
-        structural_content_error = _structural_page_content_error(
-            page,
-            index,
-            page_type,
-        )
-        if structural_content_error:
-            return structural_content_error
 
     if missing_meta:
         return "missing page_type metadata on slides " + ", ".join(missing_meta[:8])
@@ -990,6 +564,8 @@ def _manuscript_structure_error(
         expected_budget = page_type_budget(num_pages, detail_level)
         if seen["cover"] != expected_budget["cover"]:
             return f"expected {expected_budget['cover']} cover slide(s), got {seen['cover']}"
+        if seen["toc"] != expected_budget["toc"]:
+            return f"expected {expected_budget['toc']} table-of-contents slide(s), got {seen['toc']}"
         if seen["ending"] != expected_budget["ending"]:
             return f"expected {expected_budget['ending']} ending slide(s), got {seen['ending']}"
         if expected_budget["content"] > 0 and seen["content"] < 1:
@@ -1000,104 +576,19 @@ def _manuscript_structure_error(
             return f"expected {min_pages}-{max_pages} slides, got {len(pages)}"
         if seen["cover"] != 1:
             return f"expected 1 cover slide, got {seen['cover']}"
+        if seen["toc"] != 1:
+            return f"expected 1 table-of-contents slide, got {seen['toc']}"
         if seen["ending"] != 1:
             return f"expected 1 ending slide, got {seen['ending']}"
         if seen["content"] < 1:
             return "expected at least 1 content slide"
 
-    if pages and extract_page_type(pages[-1]) == "ending":
-        ending_text = pages[-1].lower()
-        closing_markers = (
-            "谢谢",
-            "thank you",
-            "thanks",
-            "q&a",
-            "questions",
-            "致谢",
-            "交流",
-        )
-        if not any(marker in ending_text for marker in closing_markers):
-            return "ending slide must be a closing/thanks page"
-
-    chapter_group_error = _chapter_group_structure_error(pages)
-    if chapter_group_error:
-        return chapter_group_error
-    return None
-
-
-def _structural_page_content_error(
-    page: str,
-    index: int,
-    page_type: str,
-) -> str | None:
-    if page_type not in _STRUCTURAL_PAGE_TYPES:
-        return None
-
-    visible = strip_page_type_metadata(page)
-    if "[[FIG:" in visible:
-        return f"slide {index} ({page_type}) is structural but contains a paper figure token"
-
-    if page_type == "chapter" and _STRUCTURAL_LIST_RE.search(visible):
-        return (
-            f"slide {index} ({page_type}) is structural but contains bullet or "
-            "numbered-list content"
-        )
-
-    non_heading_lines = [
-        line.strip()
-        for line in visible.splitlines()
-        if line.strip()
-        and not line.lstrip().startswith("#")
-        and not line.strip().startswith("<!--")
-    ]
-    non_heading_text = "\n".join(non_heading_lines)
-    if page_type == "chapter" and _STRUCTURAL_LABEL_RE.search(non_heading_text):
-        return (
-            f"slide {index} ({page_type}) is structural but contains content-block "
-            "labels such as 核心问题/本章看点"
-        )
-
-    if page_type == "cover" and len(non_heading_lines) > 6:
-        return (
-            "cover slide has too much body content; keep it to title, metadata, "
-            "and a few short context lines"
-        )
-    if page_type == "chapter" and len(non_heading_lines) > 2:
-        return "chapter slide must contain only title and at most 1-2 orientation phrases"
-    return None
-
-
-def _chapter_group_structure_error(pages: list[str]) -> str | None:
-    if len(pages) < 12:
-        return None
-
-    groups: list[tuple[int, int]] = []
-    current_chapter_page: int | None = None
-    current_content_count = 0
-    for index, page in enumerate(pages, start=1):
-        page_type = extract_page_type(page)
-        if page_type == "chapter":
-            if current_chapter_page is not None:
-                groups.append((current_chapter_page, current_content_count))
-            current_chapter_page = index
-            current_content_count = 0
-        elif page_type == "content" and current_chapter_page is not None:
-            current_content_count += 1
-        elif page_type == "ending" and current_chapter_page is not None:
-            groups.append((current_chapter_page, current_content_count))
-            current_chapter_page = None
-            current_content_count = 0
-
-    if current_chapter_page is not None:
-        groups.append((current_chapter_page, current_content_count))
-
-    for chapter_page, content_count in groups:
-        if content_count < 2:
-            return (
-                f"chapter slide {chapter_page} introduces only {content_count} "
-                "content slide(s); merge it into a neighboring section or add "
-                "at least 2 following content slides"
-            )
+    if seen["cover"] and extract_page_type(pages[0]) != "cover":
+        return "cover slide must be slide 1"
+    if seen["toc"] and (len(pages) < 2 or extract_page_type(pages[1]) != "toc"):
+        return "table-of-contents slide must be slide 2"
+    if seen["ending"] and extract_page_type(pages[-1]) != "ending":
+        return "ending slide must be the final slide"
     return None
 
 
@@ -1163,112 +654,17 @@ def _manuscript_validation_error(
     return structure_error or figure_error
 
 
-def _visible_body_lines(page: str) -> list[str]:
-    visible = strip_page_type_metadata(page)
-    lines: list[str] = []
-    for line in visible.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("<!--") or stripped.startswith("[[FIG:"):
-            continue
-        if stripped.lstrip().startswith("#"):
-            continue
-        lines.append(stripped)
-    return lines
-
-
-def _page_heading(page: str) -> str:
-    visible = strip_page_type_metadata(page)
-    match = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", visible)
-    if match:
-        return match.group(1).strip()
-    return "Untitled"
-
-
-def _content_depth_issues(page: str, detail_level: str) -> list[str]:
-    visible = strip_page_type_metadata(page)
-    body_lines = _visible_body_lines(page)
-    body_text = " ".join(body_lines)
-    compact_text = re.sub(r"[\s*_`#>\-\[\]():：，。,.]+", "", body_text)
-    threshold = _DEPTH_CHAR_THRESHOLDS.get(detail_level, _DEPTH_CHAR_THRESHOLDS["normal"])
-
-    has_claim = bool(re.search(r"\*\*[^*]{10,}\*\*", visible)) or any(
-        len(line.lstrip("-*•0123456789.、) ")) >= 24
-        and not line.lstrip().startswith(("-", "*", "•"))
-        for line in body_lines[:3]
-    )
-    has_evidence = bool(_FIG_TOKEN_RE.search(visible) or _EVIDENCE_MARKER_RE.search(visible))
-    has_explanation = bool(_EXPLANATION_MARKER_RE.search(visible))
-
-    issues: list[str] = []
-    if not has_claim:
-        issues.append("missing a clear claim sentence")
-    if not has_evidence:
-        issues.append("missing paper-grounded evidence")
-    if not has_explanation:
-        issues.append("missing explanation / so-what")
-    if len(compact_text) < threshold:
-        issues.append(f"too little slide substance ({len(compact_text)} chars)")
-    return issues if len(issues) >= 2 else []
-
-
-def _manuscript_depth_feedback(manuscript: str, detail_level: str = "normal") -> str | None:
-    shallow: list[str] = []
-    content_count = 0
-    for index, page in enumerate(split_manuscript_pages(manuscript), start=1):
-        if extract_page_type(page) != "content":
-            continue
-        content_count += 1
-        issues = _content_depth_issues(page, detail_level)
-        if issues:
-            title = _page_heading(page)
-            shallow.append(
-                f"- Slide {index} `{title}`: " + "; ".join(issues[:3])
-            )
-
-    if not shallow:
-        return None
-
-    listed = "\n".join(shallow[:6])
-    more = f"\n- ... and {len(shallow) - 6} more shallow content slide(s)" if len(shallow) > 6 else ""
-    return (
-        f"{len(shallow)} of {content_count} content slide(s) look too shallow.\n"
-        f"{listed}{more}"
-    )
-
-
-def _depth_retry_prompt(
-    feedback: str,
-    num_pages: int | None,
-    detail_level: str = "normal",
-) -> str:
-    return (
-        "The manuscript structure is valid, but several content slides are too shallow:\n\n"
-        f"{feedback}\n\n"
-        "Rewrite the full slide manuscript once. Preserve slide count, slide order, "
-        "page_type metadata, the lightweight cover title/meta role, chapter/ending "
-        "minimalism, and valid FIG tokens. "
-        "Only strengthen content slides: add paper-grounded claim/evidence/so-what "
-        "substance from the Paper Brief and Paper Content. Do not invent metrics or "
-        "figures. If a slide lacks numeric evidence, use concrete mechanism details, "
-        "equations, assumptions, or experimental logic from the paper instead.\n"
-        f"{page_type_budget_guidance(num_pages, detail_level)}"
-    )
-
-
 def _structure_retry_prompt(
     error: str,
     num_pages: int | None,
     detail_level: str = "normal",
 ) -> str:
     return (
-        "The previous manuscript did not match the slide structure contract: "
+        "The previous manuscript could not be parsed by the slide pipeline: "
         f"{error}.\n\n"
-        "Regenerate the full slide manuscript only. First rebuild the chapter plan internally, then write the manuscript.\n"
+        "Regenerate the full slide manuscript only. Preserve the visible content and evidence as closely as possible.\n"
         "If the error mentions paper figure tokens, replace invalid tokens with exact tokens from the Valid Paper Figure Tokens list, or omit the real figure when no listed token matches.\n"
-        "Structural-page rules are strict but page-specific: cover slides may include title, optional subtitle, paper metadata, and a few short context/thesis lines, but no paper figures or dense body content. Chapter/ending slides must not contain bullet lists, numbered question lists, KPI/result blocks, paper figures, or labeled sections such as `核心问题` / `本章看点`. "
-        "All chapter slides must use the same manuscript shape: one chapter title plus an optional short subtitle/orientation phrase only; put all detailed questions and evidence on following content slides.\n"
-        "If a chapter divider would introduce only 0 or 1 content slide, remove that divider from the chapter plan and merge the topic into a neighboring chapter. "
-        "If a planned chapter slide contains `核心问题`, `本章看点`, bullets, figures, or evidence, it is not a chapter slide; rewrite that material as a `content` slide and keep chapter dividers minimal.\n"
+        "Use valid standalone slide separators and explicit page_type metadata. Slide 1 must be cover, slide 2 must be the mandatory table of contents, and the final slide must be ending when the page budget requires it.\n"
         f"{page_type_budget_guidance(num_pages, detail_level)}"
     )
 
@@ -1300,7 +696,7 @@ async def analyze_paper(
         instruction: Optional user instruction.
         num_pages: Target number of slides (None = auto).
         language: Target language for visible slide text.
-        detail_level: Controls analysis depth (normal/high/very_high).
+        detail_level: Controls automatic page range and context/summary budgets.
         research_context: Optional enrichment from external tools.
         enable_deep_research: When True, use the 4-pass deep workflow. When
             False, generate a lightweight paper brief before the manuscript.
@@ -1355,18 +751,6 @@ async def analyze_paper(
             paper_markdown=compact_paper_md,
             debug_dir=debug_dir,
         )
-        manuscript = await _repair_numeric_provenance_if_needed(
-            manuscript,
-            compact_paper_md,
-            llm,
-            model,
-            language=language,
-            detail_level=detail_level,
-            is_deepseek=is_deepseek,
-            paper=paper,
-            num_pages=num_pages,
-            debug_dir=debug_dir,
-        )
         manuscript = _sanitize_internal_evidence_markers(manuscript)
         _debug_write_text(debug_dir, "research_final_manuscript.md", manuscript)
         return manuscript
@@ -1377,14 +761,11 @@ async def analyze_paper(
 
     pass1_user_parts = [
         f"## Paper Content\n\n{paper_md}",
-        f"\n## Detail Level\n\n{detail_level}\n\n{DETAIL_GUIDANCE.get(detail_level, DETAIL_GUIDANCE['normal'])}",
     ]
     if enrichment_block:
         pass1_user_parts.append(f"\n{enrichment_block}")
     if instruction:
         pass1_user_parts.append(f"\n## User Instruction\n\n{instruction}")
-    if is_deepseek:
-        pass1_user_parts.append("\n" + deepseek_research_guidance(detail_level))
     pass1_user_parts.append(
         "\n\nAnalyze this paper following the structured format above. Be specific and insightful. "
         "When supplementary related-work context is provided, use it to ground the gap analysis "
@@ -1415,7 +796,6 @@ async def analyze_paper(
     pass2_user_parts = [
         f"## Deep Analysis of the Paper\n\n{deep_analysis}",
         f"\n## Target Slides\n\n{_target_slides_guidance(num_pages, detail_level)}",
-        f"\n## Detail Level\n\n{detail_level}",
     ]
     pass2_user_parts.append(
         "\n\nDesign the narrative arc for this paper's presentation. Choose the best narrative strategy "
@@ -1448,7 +828,6 @@ async def analyze_paper(
         f"\n## Narrative Arc Plan\n\n{narrative_plan}",
         f"\n## Target Language\n\n{language}\n\n{_language_guidance(language)}",
         f"\n## Target Slides\n\n{_target_slides_guidance(num_pages, detail_level)}",
-        f"\n## Detail Level\n\n{detail_level}\n\n{DETAIL_GUIDANCE.get(detail_level, DETAIL_GUIDANCE['normal'])}",
     ]
     figure_inventory = _figure_token_inventory_block(paper)
     if figure_inventory:
@@ -1458,17 +837,13 @@ async def analyze_paper(
     # NOTE: enrichment_block is intentionally injected only into Pass 1 above.
     # Pass 3 sees the deep_analysis (which already absorbed the enrichment),
     # so re-injecting here would just burn context for no benefit.
-    if is_deepseek:
-        pass3_user_parts.append("\n" + deepseek_research_guidance(detail_level))
     pass3_user_parts.append(
         "\n\nGenerate the complete slide manuscript now. Use `---` to separate slides. "
         "Follow the narrative arc plan and the information aesthetics principles. "
-        "Before writing, internally verify the chapter plan: every chapter divider "
-        "must introduce at least 2 following content slides; topics with only 1 "
-        "content slide must be merged into a neighboring chapter instead of getting "
-        "their own divider. Keep chapter slides minimal; detailed labels such as "
-        "`核心问题` / `本章看点`, bullets, figures, metrics, and evidence belong on "
-        "`content` slides."
+        "Before writing, internally verify that the chapter plan comes from the paper's "
+        "real content logic, not a fixed template. Slide 2 must be the table of contents "
+        "and must use the same final chapter titles. Keep chapter slides concise; detailed "
+        "evidence belongs on content slides."
     )
 
     pass3_base_messages = [
@@ -1542,16 +917,9 @@ async def analyze_paper(
     pass4_user_parts = [
         f"## Slide Manuscript to Evaluate\n\n{manuscript}",
         f"\n## Source Working Memory (authoritative)\n\n{compact_paper_md}",
-        f"\n## Automatic Numeric Audit\n\n"
-        + (
-            "\n".join(_numeric_audit_lines(manuscript, compact_paper_md))
-            or "No unsupported numeric string was detected automatically. "
-            "You must still audit attribution, logic, and claim strength."
-        ),
         f"\n## Original Deep Analysis\n\n{deep_analysis[:5000]}",
         f"\n## Narrative Plan\n\n{narrative_plan[:2000]}",
         f"\n## Target Language\n\n{language}",
-        f"\n## Detail Level\n\n{detail_level}",
     ]
     if figure_inventory:
         pass4_user_parts.append(f"\n{figure_inventory}")
@@ -1598,18 +966,6 @@ async def analyze_paper(
             debug_dir=debug_dir,
             debug_prefix="research_final_structure_repair",
         )
-    final_output = await _repair_numeric_provenance_if_needed(
-        final_output,
-        compact_paper_md,
-        llm,
-        model,
-        language=language,
-        detail_level=detail_level,
-        is_deepseek=is_deepseek,
-        paper=paper,
-        num_pages=num_pages,
-        debug_dir=debug_dir,
-    )
     final_output = _sanitize_internal_evidence_markers(final_output)
     _debug_write_text(debug_dir, "research_final_manuscript.md", final_output)
     logger.info("Research Pass 4 complete. Final manuscript: %d chars", len(final_output))
@@ -1751,7 +1107,6 @@ async def revise_manuscript(
     user_prompt = (
         f"## Existing Manuscript\n\n{manuscript}\n\n"
         f"## Target Language\n\n{language}\n\n"
-        f"## Detail Level\n\n{detail_level}\n\n"
         f"## Requested Scope\n\n"
         f"- Target pages: {', '.join(map(str, target_pages)) if target_pages else 'all pages'}\n"
         f"- Scope rule: {scope_guidance}\n"
