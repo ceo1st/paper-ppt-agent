@@ -8,9 +8,10 @@ as it is recorded.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from backend.usage.tracker import UsageEvent, usage_tracker
 
@@ -58,12 +59,53 @@ async def usage_by_stage() -> dict[str, Any]:
 @router.get("/records")
 async def usage_records(
     job_id: str | None = None,
-    day: str | None = None,
-    limit: int = Query(200, ge=1, le=2000),
+    stage: str | None = None,
+    model: str | None = None,
+    page: int | None = Query(None, ge=1),
+    start: str | None = None,
+    end: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
 ) -> dict[str, Any]:
-    """Return raw per-call records, newest first."""
-    recs = usage_tracker.all_records(job_id=job_id, day=day, limit=limit)
-    return {"rows": [r.to_dict() for r in recs]}
+    """Return a filtered page of raw per-call records, newest first."""
+    start_ts = _normalize_filter_timestamp(start, end_of_range=False)
+    end_ts = _normalize_filter_timestamp(end, end_of_range=True)
+    if start_ts and end_ts and start_ts > end_ts:
+        raise HTTPException(status_code=400, detail="start must not be after end")
+    recs, total = usage_tracker.query_records(
+        job_id_prefix=(job_id or "").strip() or None,
+        stage=(stage or "").strip() or None,
+        model=(model or "").strip() or None,
+        page=page,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        offset=offset,
+        limit=limit,
+    )
+    return {
+        "rows": [record.to_dict() for record in recs],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def _normalize_filter_timestamp(value: str | None, *, end_of_range: bool) -> str | None:
+    if not value:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(timezone.utc)
+    if end_of_range and len(normalized) == 10:
+        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return parsed.isoformat(timespec="seconds")
 
 
 @router.websocket("/stream")

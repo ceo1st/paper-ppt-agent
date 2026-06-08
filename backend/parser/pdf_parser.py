@@ -82,6 +82,15 @@ _CAPTION_RE = re.compile(
     r"^\s*(fig(?:ure)?\.?\s*[0-9０-９]+|table\s*[0-9０-９]+|[图表]\s*[0-9０-９]+)",
     re.IGNORECASE,
 )
+_ROMAN_SECTION_RE = re.compile(r"^(?P<num>[IVXLCDM]+)\.\s+\S", re.IGNORECASE)
+_LETTER_SECTION_RE = re.compile(r"^[A-M]\.\s+\S")
+_NUMBERED_SECTION_RE = re.compile(
+    r"^\d+(?:\.\d+)*\.?\s+(?=[A-Z\u3400-\u9fff])\S"
+)
+_AUTHOR_CREDENTIAL_RE = re.compile(
+    r",?\s*(?:student\s+member|senior\s+member|fellow|member),?\s*IEEE",
+    re.IGNORECASE,
+)
 
 
 class PDFParser(PaperParser):
@@ -193,7 +202,45 @@ class PDFParser(PaperParser):
 
     def _get_heading_level(self, size: float, size_map: dict, text: str) -> int:
         text = text.strip()
+        roman_match = _ROMAN_SECTION_RE.match(text)
+        roman_tail = text.split(".", 1)[1].strip() if roman_match and "." in text else ""
+        if roman_match and (
+            len(roman_match.group("num")) > 1
+            or (
+                roman_tail
+                and roman_tail.upper() == roman_tail
+                and any(char.isalpha() for char in roman_tail)
+            )
+        ):
+            return 1
+        if _LETTER_SECTION_RE.match(text) or _NUMBERED_SECTION_RE.match(text):
+            return 2
+        normalized = re.sub(r"[^A-Za-z\u3400-\u9fff]+", " ", text).strip().lower()
+        if normalized in {
+            "references",
+            "bibliography",
+            "acknowledgments",
+            "acknowledgements",
+            "conclusion",
+            "conclusions",
+            "参考文献",
+            "结论",
+            "致谢",
+        }:
+            return 1
         if len(text) > 80:
+            return 0
+        if len(text) < 4:
+            return 0
+        if (
+            len(text.split()) == 1
+            and text.upper() == text
+            and any(char.isalpha() for char in text)
+        ):
+            return 0
+        if sum(char.isalnum() for char in text) / max(1, len(text)) < 0.55:
+            return 0
+        if size < float(size_map.get("body", 0)) + 1.0:
             return 0
         level = 0
         if "h1" in size_map and size >= size_map["h1"] - 0.5:
@@ -210,35 +257,107 @@ class PDFParser(PaperParser):
         if not doc.page_count:
             return "Untitled"
         page = doc[0]
-        blocks = page.get_text("dict")["blocks"]
-        max_size = 0.0
-        title_text = ""
-        for block in blocks:
-            if block["type"] == 0:
-                for line in block["lines"]:
-                    for span in line["spans"]:
-                        if span["size"] > max_size and span["text"].strip():
-                            max_size = span["size"]
-                            title_text = span["text"].strip()
-        return title_text or "Untitled"
+        lines = self._page_text_lines(page)
+        candidates = [
+            line
+            for line in lines
+            if line["text"]
+            and line["bbox"][1] < page.rect.height * 0.3
+            and line["bbox"][2] - line["bbox"][0] >= page.rect.width * 0.12
+            and line["bbox"][3] - line["bbox"][1] <= 48
+            and line["size"] >= size_map.get("body", 0) + 2.5
+        ]
+        if not candidates:
+            return "Untitled"
+        max_size = max(float(line["size"]) for line in candidates)
+        title_lines = [
+            line
+            for line in candidates
+            if float(line["size"]) >= max_size - 0.5
+        ]
+        title_lines.sort(key=lambda line: (line["bbox"][1], line["bbox"][0]))
+        return " ".join(str(line["text"]).strip() for line in title_lines).strip()
 
     def _extract_authors(self, doc: fitz.Document) -> list[str]:
         if not doc.page_count:
             return []
-        text = doc[0].get_text() or ""
-        lines = text.split("\n")
-        authors: list[str] = []
-        for line in lines[1:10]:
-            line = line.strip()
-            if not line:
+        page = doc[0]
+        lines = self._page_text_lines(page)
+        plausible_title_lines = [
+            line
+            for line in lines
+            if float(line["bbox"][1]) < page.rect.height * 0.3
+            and float(line["bbox"][2]) - float(line["bbox"][0]) >= page.rect.width * 0.12
+            and float(line["bbox"][3]) - float(line["bbox"][1]) <= 48
+        ]
+        title_size = max(
+            (float(line["size"]) for line in plausible_title_lines),
+            default=0.0,
+        )
+        title_bottom = max(
+            (
+                float(line["bbox"][3])
+                for line in plausible_title_lines
+                if float(line["size"]) >= title_size - 0.5
+            ),
+            default=0.0,
+        )
+        for item in sorted(lines, key=lambda line: (line["bbox"][1], line["bbox"][0])):
+            text = str(item["text"]).strip()
+            if float(item["bbox"][1]) <= title_bottom or not text:
                 continue
-            if any(kw in line.lower() for kw in ["university", "department", "abstract", "@", "http"]):
+            lowered = text.lower()
+            if lowered.startswith("abstract"):
                 break
-            if re.match(r"^[A-Za-z\s,.\-]+$", line) and len(line) < 200:
-                authors.extend(a.strip() for a in line.split(",") if a.strip())
-                if authors:
-                    break
-        return authors
+            if any(
+                marker in lowered
+                for marker in ("university", "department", "academy of", "@", "http")
+            ):
+                continue
+            if float(item["size"]) >= title_size - 1:
+                continue
+            if not re.search(r"[A-Za-z\u3400-\u9fff]", text) or len(text) > 240:
+                continue
+            cleaned = _AUTHOR_CREDENTIAL_RE.sub("", text)
+            cleaned = re.sub(
+                r"(?<=[A-Za-z\u3400-\u9fff])\d+(?:,\d+)*[*†‡]?",
+                "",
+                cleaned,
+            )
+            cleaned = re.sub(r"\s+,", ",", cleaned)
+            cleaned = re.sub(r",\s*,+", ",", cleaned)
+            cleaned = cleaned.strip(" ,")
+            parts = [
+                re.sub(r"(?i)^and\s+", "", part.strip(" ,")).strip()
+                for part in re.split(r"\s*,\s*|\s+and\s+|\s*&\s*", cleaned)
+                if part.strip(" ,")
+            ]
+            if parts:
+                return parts
+        return []
+
+    @staticmethod
+    def _page_text_lines(page: fitz.Page) -> list[dict[str, object]]:
+        lines: list[dict[str, object]] = []
+        for block in page.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                spans = line.get("spans", [])
+                text = "".join(str(span.get("text") or "") for span in spans).strip()
+                if not text:
+                    continue
+                lines.append(
+                    {
+                        "text": text,
+                        "size": max(
+                            (float(span.get("size") or 0.0) for span in spans),
+                            default=0.0,
+                        ),
+                        "bbox": tuple(line.get("bbox") or (0, 0, 0, 0)),
+                    }
+                )
+        return lines
 
     # ── main section + figure extraction ─────────────────────────────────────
 
@@ -252,9 +371,20 @@ class PDFParser(PaperParser):
         abstract = ""
         current_section: PaperSection | None = None
         content_lines: list[str] = []
+        abstract_lines: list[str] = []
+        in_abstract = False
         img_counter = [0]  # mutable for nested helpers
 
         for page_idx, page in enumerate(doc):
+            first_page_abstract_y: float | None = None
+            if page_idx == 0:
+                abstract_positions = [
+                    float(item["bbox"][1])
+                    for item in self._page_text_lines(page)
+                    if re.match(r"(?i)^abstract(?:\s*[—\-:]|$)", str(item["text"]).strip())
+                ]
+                if abstract_positions:
+                    first_page_abstract_y = min(abstract_positions)
             # ── 1. collect caption locations on this page ──────────────────
             caption_map = self._collect_captions(page)
 
@@ -280,6 +410,44 @@ class PDFParser(PaperParser):
                     line_text = line_text.strip()
                     if not line_text:
                         continue
+                    line_bbox = fitz.Rect(line.get("bbox", (0, 0, 0, 0)))
+                    if (
+                        line_bbox.y1 < 40
+                        or line_bbox.y0 > page.rect.height - 38
+                        or line_bbox.height > 48
+                        or re.fullmatch(r"\d+", line_text)
+                    ):
+                        continue
+
+                    abstract_match = re.match(
+                        r"(?i)^abstract\s*[—\-:]\s*(.*)$",
+                        line_text,
+                    )
+                    if abstract_match:
+                        in_abstract = True
+                        remainder = abstract_match.group(1).strip()
+                        if remainder:
+                            abstract_lines.append(remainder)
+                        continue
+                    if re.fullmatch(r"(?i)abstract", line_text):
+                        in_abstract = True
+                        continue
+                    if page_idx == 0 and (
+                        (
+                            first_page_abstract_y is not None
+                            and line_bbox.y0 < first_page_abstract_y
+                        )
+                        or line_bbox.y0 > page.rect.height * 0.84
+                    ):
+                        continue
+                    if in_abstract:
+                        if re.match(r"(?i)^index\s+terms?\s*[—\-:]", line_text):
+                            in_abstract = False
+                            continue
+                        if self._get_heading_level(line_size, size_map, line_text) <= 0:
+                            abstract_lines.append(line_text)
+                            continue
+                        in_abstract = False
 
                     heading_level = self._get_heading_level(line_size, size_map, line_text)
 
@@ -289,24 +457,18 @@ class PDFParser(PaperParser):
                             sections.append(current_section)
                             content_lines = []
 
-                        if line_text.lower().startswith("abstract"):
-                            current_section = PaperSection(
-                                title="Abstract",
-                                level=heading_level,
-                                content="",
-                            )
-                        else:
-                            current_section = PaperSection(
-                                title=line_text,
-                                level=heading_level,
-                                content="",
-                                figures=page_figures[:],
-                                tables=page_tables[:],
-                            )
-                            page_figures = []
-                            page_tables = []
+                        current_section = PaperSection(
+                            title=line_text,
+                            level=heading_level,
+                            content="",
+                            figures=page_figures[:],
+                            tables=page_tables[:],
+                        )
+                        page_figures = []
+                        page_tables = []
                     else:
-                        content_lines.append(line_text)
+                        if current_section is not None:
+                            content_lines.append(line_text)
 
             # leftover figures attach to current section
             if page_figures and current_section:
@@ -318,15 +480,8 @@ class PDFParser(PaperParser):
             current_section.content = "\n".join(content_lines).strip()
             sections.append(current_section)
 
-        # separate abstract
-        new_sections: list[PaperSection] = []
-        for section in sections:
-            if section.title.lower() == "abstract":
-                abstract = section.content
-            else:
-                new_sections.append(section)
-
-        return new_sections, abstract
+        abstract = "\n".join(abstract_lines).strip()
+        return sections, abstract
 
     # ── caption collection ────────────────────────────────────────────────────
 
@@ -1065,10 +1220,18 @@ class PDFParser(PaperParser):
         try:
             tab_finder = page.find_tables()
             for tab in tab_finder.tables:
-                rows = tab.extract()
-                if not rows:
-                    continue
-                md = self._rows_to_markdown(rows)
+                md = ""
+                to_markdown = getattr(tab, "to_markdown", None)
+                if callable(to_markdown):
+                    try:
+                        md = str(to_markdown() or "").strip()
+                    except Exception:
+                        md = ""
+                if not md:
+                    rows = tab.extract()
+                    if not rows:
+                        continue
+                    md = self._rows_to_markdown(rows)
                 if md:
                     tables.append(PaperTable(markdown=md))
         except Exception:

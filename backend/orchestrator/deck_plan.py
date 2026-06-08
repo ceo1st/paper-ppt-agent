@@ -114,7 +114,7 @@ def _style_family(page_type: str, block: str, layout_family: str) -> str:
     return f"content.{layout_family}"
 
 
-def _density(page_type: str, block: str, detail_level: str) -> str:
+def _density(page_type: str, block: str) -> str:
     explicit = _field(block, "Density", "Content Density", "Information Density")
     if explicit:
         return explicit
@@ -122,11 +122,7 @@ def _density(page_type: str, block: str, detail_level: str) -> str:
         return "light cover: title, metadata, and a modest context/accent treatment; avoid dense article content"
     if page_type in {"chapter", "toc", "ending"}:
         return "minimal structural"
-    if detail_level == "very_high":
-        return "very_high: full but readable; use the content area with meaningful callouts, diagrams, annotations, or evidence blocks instead of leaving large unused regions"
-    if detail_level == "high":
-        return "high: moderately dense, with clear evidence and explanation blocks"
-    return "normal: concise and readable"
+    return "page-derived: balance manuscript substance, evidence, and visual share"
 
 
 def _redact_current_title(block: str, title: str, subtitle: str) -> str:
@@ -167,7 +163,7 @@ def build_deck_plan(
         chapter_label = f"{chapter_index:02d}" if chapter_index and page_type != "cover" else ""
         layout_family = _layout_family(page_type, block)
         style_family = _style_family(page_type, block, layout_family)
-        density = _density(page_type, block, detail_level)
+        density = _density(page_type, block)
 
         slides.append(
             SlidePlan(
@@ -235,6 +231,40 @@ def deck_plan_markdown(plan: DeckPlan) -> str:
         lines.append(
             f"| {slide.page_num} | {slide.page_type} | {slide.page_num}/{slide.total_pages} | "
             f"{chapter} | {slide.style_family} | {slide.layout_family} | {density} | {title} |"
+        )
+    return "\n".join(lines).strip()
+
+
+def deck_generation_context_markdown(plan: DeckPlan) -> str:
+    """Return the compact global subset needed while generating one page."""
+    lines = [
+        "# Deck Generation Context",
+        "",
+        "- Footer numbers use slide page numbers.",
+        "- Chapter numbers use chapter indices, never slide page numbers.",
+        "- The current page's Slide Plan and Page Design Contract are authoritative.",
+        "",
+        "## Chapter Sequence",
+        "",
+    ]
+    chapters = [slide for slide in plan.slides if slide.page_type == "chapter"]
+    if chapters:
+        for slide in chapters:
+            lines.append(
+                f"- {slide.chapter_label}: {slide.title}"
+                + (f" — {slide.subtitle}" if slide.subtitle else "")
+            )
+    else:
+        lines.append("- No chapter divider pages.")
+
+    if plan.canonical_chapter_contract:
+        lines.extend(
+            [
+                "",
+                "## Canonical Chapter Divider Family",
+                "",
+                plan.canonical_chapter_contract,
+            ]
         )
     return "\n".join(lines).strip()
 

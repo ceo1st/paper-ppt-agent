@@ -69,6 +69,7 @@ class OpenAIProvider(LLMProvider):
         api_key: str,
         base_url: str | None = None,
         provider_name: str = "openai",
+        artifact_thinking_mode: str = "disabled",
         deepseek_settings: dict | None = None,
         openai_settings: dict | None = None,
     ) -> None:
@@ -77,20 +78,31 @@ class OpenAIProvider(LLMProvider):
         # retry/backoff, so leaving the SDK's default 2 internal retries on
         # would double-retry and, combined with the 600s default timeout,
         # let a hung upstream block a single call for up to 30 min.
+        http_client = httpx.AsyncClient(
+            timeout=settings.llm_request_timeout,
+            trust_env=False,
+        )
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=normalized_base_url,
             timeout=settings.llm_request_timeout,
             max_retries=0,
+            http_client=http_client,
         )
         self._api_key = api_key
         self._provider_name = provider_name
         self._base_url = (normalized_base_url or "").rstrip("/")
+        self._artifact_thinking_mode = (
+            artifact_thinking_mode
+            if artifact_thinking_mode in {"disabled", "default"}
+            else "disabled"
+        )
         self._deepseek_settings = deepseek_settings
         self._openai_settings = openai_settings
         # Set once we learn an endpoint rejects streaming, so subsequent
         # calls skip the stream attempt and go straight to the buffered path.
         self._streaming_unsupported = False
+        self._direct_artifact_controls_unsupported = False
 
     def _is_deepseek_request(self, model: str | None = None) -> bool:
         return (
@@ -163,9 +175,50 @@ class OpenAIProvider(LLMProvider):
             kwargs.update(self._normalized_openai_settings())
         if is_deepseek:
             self._apply_deepseek_thinking_kwargs(kwargs, model)
+        if (
+            self._is_direct_artifact_stage()
+            and self._artifact_thinking_mode != "default"
+            and not self._direct_artifact_controls_unsupported
+        ):
+            self._apply_direct_artifact_controls(
+                kwargs,
+                is_official_openai=is_official_openai,
+                is_openai_gpt5=is_openai_gpt5,
+            )
         if stream:
             kwargs["stream"] = True
         return kwargs
+
+    def _is_direct_artifact_stage(self) -> bool:
+        return str(current_usage_context().get("stage") or "") in {
+            "strategy",
+            "template_design_spec",
+            "generation",
+            "repair",
+            "visual_qa",
+        }
+
+    def _apply_direct_artifact_controls(
+        self,
+        kwargs: dict,
+        *,
+        is_official_openai: bool,
+        is_openai_gpt5: bool,
+    ) -> None:
+        """Ask the provider for direct output without hidden reasoning.
+
+        This is stage-driven rather than model-name-driven. Official OpenAI
+        uses its native reasoning control; OpenAI-compatible endpoints receive
+        the common ``thinking.type`` extension used by reasoning-capable APIs.
+        """
+        if is_official_openai:
+            if is_openai_gpt5:
+                kwargs["reasoning_effort"] = "none"
+            return
+        extra_body = dict(kwargs.get("extra_body") or {})
+        extra_body["thinking"] = {"type": "disabled"}
+        kwargs["extra_body"] = extra_body
+        kwargs.pop("reasoning_effort", None)
 
     def _fallback_chat_kwargs(self, kwargs: dict) -> list[dict]:
         fallbacks: list[dict] = []
@@ -179,7 +232,21 @@ class OpenAIProvider(LLMProvider):
         if removed_gpt_controls:
             fallbacks.append(without_gpt_controls)
 
-        legacy_tokens = dict(without_gpt_controls if removed_gpt_controls else kwargs)
+        without_direct_artifact_controls = dict(
+            without_gpt_controls if removed_gpt_controls else kwargs
+        )
+        extra_body = without_direct_artifact_controls.get("extra_body")
+        if isinstance(extra_body, dict) and "thinking" in extra_body:
+            next_extra_body = dict(extra_body)
+            next_extra_body.pop("thinking", None)
+            if next_extra_body:
+                without_direct_artifact_controls["extra_body"] = next_extra_body
+            else:
+                without_direct_artifact_controls.pop("extra_body", None)
+            if without_direct_artifact_controls not in fallbacks:
+                fallbacks.append(without_direct_artifact_controls)
+
+        legacy_tokens = dict(without_direct_artifact_controls)
         if "max_completion_tokens" in legacy_tokens:
             legacy_tokens["max_tokens"] = legacy_tokens.pop("max_completion_tokens")
             if legacy_tokens not in fallbacks:
@@ -204,6 +271,7 @@ class OpenAIProvider(LLMProvider):
                 "max_tokens",
                 "reasoning_effort",
                 "verbosity",
+                "thinking",
                 "unsupported",
                 "unrecognized",
                 "unknown parameter",
@@ -326,9 +394,17 @@ class OpenAIProvider(LLMProvider):
         usage = None
         usage_data = data.get("usage")
         if isinstance(usage_data, dict):
+            completion_details = usage_data.get("completion_tokens_details")
             usage = SimpleNamespace(
                 prompt_tokens=int(usage_data.get("prompt_tokens") or 0),
                 completion_tokens=int(usage_data.get("completion_tokens") or 0),
+                completion_tokens_details=SimpleNamespace(
+                    reasoning_tokens=int(
+                        completion_details.get("reasoning_tokens") or 0
+                    )
+                )
+                if isinstance(completion_details, dict)
+                else None,
             )
 
         return SimpleNamespace(
@@ -374,7 +450,7 @@ class OpenAIProvider(LLMProvider):
         async def attempt():
             last_error: BaseException | None = None
             timeout = httpx.Timeout(120.0, connect=30.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
                 for endpoint in endpoints:
                     endpoint_retryable_error: _RetryableRawChatError | None = None
                     for payload in payloads:
@@ -470,9 +546,12 @@ class OpenAIProvider(LLMProvider):
                 raise
             for index, fallback in enumerate(fallbacks):
                 try:
-                    return await call_with_retry(
+                    response = await call_with_retry(
                         lambda: self._consume_chat_stream(fallback)
                     )
+                    if kwargs.get("extra_body") != fallback.get("extra_body"):
+                        self._direct_artifact_controls_unsupported = True
+                    return response
                 except BaseException as fallback_exc:
                     if (
                         index >= len(fallbacks) - 1
@@ -578,9 +657,21 @@ class OpenAIProvider(LLMProvider):
                         finish_reason = choice_finish
             usage_ns = None
             if usage is not None:
+                completion_details = getattr(
+                    usage,
+                    "completion_tokens_details",
+                    None,
+                )
                 usage_ns = SimpleNamespace(
                     prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
                     completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+                    completion_tokens_details=SimpleNamespace(
+                        reasoning_tokens=int(
+                            getattr(completion_details, "reasoning_tokens", 0) or 0
+                        )
+                    )
+                    if completion_details is not None
+                    else None,
                 )
             message = SimpleNamespace(role="assistant", content="".join(content_parts))
             return SimpleNamespace(
@@ -642,6 +733,8 @@ class OpenAIProvider(LLMProvider):
                     resp = await call_with_retry(
                         lambda: self._consume_chat_stream(fallback)
                     )
+                    if structured_kwargs.get("extra_body") != fallback.get("extra_body"):
+                        self._direct_artifact_controls_unsupported = True
                     return self._attach_parsed_response_format(resp, response_format)
                 except BaseException as fallback_exc:
                     if (
@@ -745,6 +838,17 @@ class OpenAIProvider(LLMProvider):
         content = resp.choices[0].message.content or ""
         usage = None
         if resp.usage:
+            completion_details = getattr(
+                resp.usage,
+                "completion_tokens_details",
+                None,
+            )
+            reasoning_tokens = int(
+                getattr(completion_details, "reasoning_tokens", 0) or 0
+            )
+            finish_reason = str(
+                getattr(resp.choices[0], "finish_reason", "") or ""
+            ) or None
             usage = TokenUsage(
                 prompt_tokens=resp.usage.prompt_tokens,
                 completion_tokens=resp.usage.completion_tokens,
@@ -761,6 +865,9 @@ class OpenAIProvider(LLMProvider):
                 page=ctx.get("page"),
                 attempt=ctx.get("attempt") or 1,
                 duration_ms=duration_ms,
+                reasoning_tokens=reasoning_tokens,
+                finish_reason=finish_reason,
+                output_chars=len(content),
             )
         return LLMResponse(content=content, usage=usage, raw=resp)
 

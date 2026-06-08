@@ -176,6 +176,7 @@ async def refine_presentation(request: RefineRequest) -> RefineResponse:
         model=request.model_settings.model,
         api_key=request.model_settings.api_key,
         base_url=request.model_settings.base_url,
+        artifact_thinking_mode=request.model_settings.artifact_thinking_mode,
         canvas_format=options.canvas_format or parent_job.canvas_format or "ppt169",
         style=options.style or parent_job.style or "academic",
         language=options.language or parent_job.language or "zh",
@@ -189,7 +190,6 @@ async def refine_presentation(request: RefineRequest) -> RefineResponse:
             if options.style_overrides
             else None
         ),
-        icon_library=options.icon_library,
         deepseek_settings=(
             request.model_settings.deepseek_settings.model_dump()
             if request.model_settings.provider == "deepseek"
@@ -204,9 +204,6 @@ async def refine_presentation(request: RefineRequest) -> RefineResponse:
         ),
         enable_visual_critic=options.enable_visual_critic,
         visual_qa_max_attempts=options.visual_qa_max_attempts,
-        enable_icon=options.enable_icon,
-        enable_icon_rag=options.enable_icon_rag,
-        gemini_api_key=options.gemini_api_key,
         template_id=options.template_id,
     )
 

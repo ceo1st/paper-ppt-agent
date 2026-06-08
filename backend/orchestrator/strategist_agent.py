@@ -2,234 +2,71 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from pathlib import Path
 
 from backend.config import CANVAS_FORMATS, DESIGN_STYLES, settings
-from backend.generator.icon_index import get_icon_index
 from backend.llm import LLMMessage, LLMProvider, LLMResponse
 from backend.orchestrator.manuscript import (
     count_manuscript_pages,
     format_page_inventory,
     page_inventory,
 )
-from backend.orchestrator.provider_guidance import (
-    deepseek_strategy_guidance,
-    is_deepseek_provider,
-)
-
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "strategist.md"
 DESIGN_SPEC_MAX_TOKENS = 32768
 MAX_DESIGN_SPEC_ATTEMPTS = 2
 
-# Number of icon candidates to pre-select via RAG
-ICON_CANDIDATE_COUNT = 30
-# Number of search queries to extract from manuscript
-ICON_QUERY_COUNT = 8
-OFFLINE_ICON_CANDIDATE_COUNT = 28
+def _format_chapter_map(inventory: list[dict[str, str | int]]) -> str:
+    """Render an explicit chapter-to-slide map from the manuscript contract."""
+    lines: list[str] = []
+    current_title = ""
+    current_page: int | None = None
+    current_items: list[str] = []
+    opening_items: list[str] = []
 
-OFFLINE_ICON_PALETTE: list[tuple[str, str, list[str]]] = [
-    ("warning / failure mode", "occlusion risk, noisy feature, error propagation, invalid assumption", ["alert-triangle", "circle-exclamation", "alert-circle", "ban", "bug"]),
-    ("insight / key idea", "turning point, core thesis, design intuition, important takeaway", ["lightbulb", "sparkles", "bulb", "brain"]),
-    ("framework / architecture", "model block, stacked decoder, module composition, hierarchy", ["puzzle", "component", "cube", "layers", "stack", "binary-tree"]),
-    ("method / process", "pipeline, stage transition, iterative update, tuning or regulation", ["route", "git-branch", "arrow-right", "settings", "cog", "sliders"]),
-    ("result / metric", "quantitative result, AP gain, trade-off, target objective", ["chart-bar", "chart-line", "chart-pie", "activity", "target"]),
-    ("evidence / experiment", "ablation, table result, experimental support, dataset evidence", ["flask", "microscope", "clipboard", "database"]),
-    ("visibility / perception", "visible/occluded evidence, observation, localization, attention", ["eye", "search", "crosshairs"]),
-    ("robustness / safety", "reliability, protection from bad updates, gated trust", ["shield", "lock", "key"]),
-    ("people / pose", "person, crowd, keypoint, human pose, accessibility", ["users", "user", "accessibility"]),
-    ("future / contribution", "implication, next step, contribution summary, closing message", ["rocket", "flag", "trophy", "book", "file-text"]),
-]
-
-
-def _extract_icon_queries(manuscript: str) -> list[str]:
-    """Extract semantic queries for icon search from manuscript content.
-
-    Parses page titles and key concepts from the slide-structured manuscript
-    to generate targeted icon search queries.
-    """
-    queries: list[str] = []
-
-    # Extract page titles (## headings)
-    for m in re.finditer(r"^##\s+(.+)$", manuscript, re.MULTILINE):
-        title = m.group(1).strip()
-        # Clean up numbering like "1. " or "Page 1: "
-        title = re.sub(r"^\d+[\.\):\s]+", "", title).strip()
-        if title and len(title) > 2:
-            queries.append(title)
-
-    # Extract bold concepts (**text**)
-    for m in re.finditer(r"\*\*([^*]{3,50})\*\*", manuscript):
-        concept = m.group(1).strip()
-        if concept not in queries:
-            queries.append(concept)
-
-    return queries[:ICON_QUERY_COUNT]
-
-
-async def _retrieve_icon_candidates(
-    manuscript: str,
-    lib: str,
-    gemini_api_key: str | None = None,
-) -> str:
-    """Retrieve icon candidates for the chosen library using RAG.
-
-    Returns a formatted string listing candidate icons for injection
-    into the strategist prompt.  Wrapped in asyncio.to_thread() so that
-    the blocking Gemini embedding call does not prevent task cancellation.
-    """
-    import os
-
-    # Temporarily set GEMINI_API_KEY if provided via frontend config
-    old_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_api_key:
-        os.environ["GEMINI_API_KEY"] = gemini_api_key
-
-    index = get_icon_index()
-    if not index.is_available:
-        logger.warning("Icon index not available, skipping RAG retrieval")
-        return ""
-
-    queries = _extract_icon_queries(manuscript)
-    if not queries:
-        return ""
-
-    # Collect candidates from all queries — run blocking search in a thread
-    # so that asyncio cancellation can interrupt it.
-    seen_paths: set[str] = set()
-    candidates: list[dict] = []
-
-    for query in queries:
-        try:
-            results = await asyncio.wait_for(
-                asyncio.to_thread(index.search, query, lib=lib, k=5),
-                timeout=30,
-            )
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            logger.warning("Icon search timed out or was cancelled for query: %s", query)
-            break
-        for r in results:
-            path = str(r.get("path") or "")
-            if path in seen_paths:
-                continue
-            if not _icon_asset_exists(path):
-                logger.warning("Skipping stale icon RAG candidate with missing local asset: %s", path)
-                continue
-            seen_paths.add(path)
-            candidates.append(r)
-
-    # Sort by score descending, take top N
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    candidates = candidates[:ICON_CANDIDATE_COUNT]
-
-    # Restore original key
-    if gemini_api_key:
-        if old_key is not None:
-            os.environ["GEMINI_API_KEY"] = old_key
+    def flush() -> None:
+        nonlocal current_title, current_page, current_items
+        if current_page is None:
+            return
+        if current_items:
+            covered = "; ".join(current_items)
         else:
-            os.environ.pop("GEMINI_API_KEY", None)
+            covered = "(no following content slides)"
+        lines.append(f"- Chapter slide {current_page}: {current_title} -> {covered}")
+        current_title = ""
+        current_page = None
+        current_items = []
 
-    if not candidates:
-        return ""
+    for item in inventory:
+        page = int(item["page"])
+        page_type = str(item["type"])
+        title = str(item["title"])
+        if page_type == "chapter":
+            flush()
+            current_page = page
+            current_title = title
+            current_items = []
+        elif page_type == "content":
+            entry = f"Slide {page} {title}"
+            if current_page is None:
+                opening_items.append(entry)
+            else:
+                current_items.append(entry)
+        elif page_type == "ending":
+            flush()
 
-    # Format as a compact table for prompt injection
-    lines = [
-        f"\n## Available Icon Candidates ({lib} library, {len(candidates)} icons)",
-        "",
-        "Semantic-searched from manuscript content. Use only when justified by clear design purpose.",
-        "",
-        "| # | Icon Path | Category | Tags |",
-        "|---|-----------|----------|------|",
-    ]
-
-    for i, c in enumerate(candidates, 1):
-        tags = ", ".join(c.get("tags", [])[:5])
-        cat = c.get("category", "-")
-        lines.append(f"| {i} | `{c['path']}` | {cat} | {tags} |")
-
-    lines.append("")
-    lines.append(
-        "Use the icon path with the `<use data-icon=\"...\"/>` placeholder syntax. "
-        "Example: `<use data-icon=\"chart-bar\" x=\"100\" y=\"200\" width=\"32\" height=\"32\" fill=\"#0076A8\"/>`"
-    )
-    lines.append("")
-
-    return "\n".join(lines)
-
-
-def _icon_asset_exists(icon_path: str) -> bool:
-    if "/" not in icon_path:
-        return False
-    lib, name = icon_path.split("/", 1)
-    return (settings.icons_dir / lib / f"{name}.svg").exists()
-
-
-def _offline_icon_candidates_block(lib: str) -> str:
-    """Provide a compact verified palette when semantic icon RAG is disabled."""
-    rows: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
-    for semantic_role, use_when, names in OFFLINE_ICON_PALETTE:
-        for name in names:
-            path = f"{lib}/{name}"
-            if path in seen or not _icon_asset_exists(path):
-                continue
-            seen.add(path)
-            rows.append((path, semantic_role, use_when))
-            if len(rows) >= OFFLINE_ICON_CANDIDATE_COUNT:
-                break
-        if len(rows) >= OFFLINE_ICON_CANDIDATE_COUNT:
-            break
-
-    if not rows:
-        return (
-            f"\n## Available Icon Candidates ({lib} library, offline fallback)\n\n"
-            "No verified local icons were found for this library. Prefer `Icon: None` "
-            "unless a specific local icon path is known to exist.\n"
+    flush()
+    if opening_items:
+        lines.insert(
+            0,
+            "- Opening content before first chapter: " + "; ".join(opening_items),
         )
-
-    lines = [
-        f"\n## Available Icon Candidates ({lib} library, offline fallback, {len(rows)} verified icons)",
-        "",
-        "Semantic RAG is disabled, so use this small verified palette instead of inventing icon names.",
-        "Choose icons sparingly; most slides should still use `Icon: None`.",
-        "",
-        "| # | Icon Path | Role | Use when |",
-        "|---|-----------|------|----------|",
-    ]
-    for i, (path, semantic_role, use_when) in enumerate(rows, 1):
-        lines.append(f"| {i} | `{path}` | {semantic_role} | {use_when} |")
-    lines.append("")
-    lines.append(
-        "Use icon paths exactly as shown, with the library prefix, in Section VI and Section IX."
-    )
+    if not lines:
+        return "No explicit chapter divider slides; keep content sequence continuous."
     return "\n".join(lines)
-
-
-def _icon_usage_policy_block(icon_library: str) -> str:
-    return (
-        "\n## Icon Usage: ENABLED — restrained semantic mode\n"
-        "Icons are enabled, but they must remain sparse and purposeful. "
-        "Use icons only when they clarify the slide's structure or meaning; do not add icons merely because the switch is on.\n\n"
-        "Rules:\n"
-        "- Target only high-value placements: chapter dividers, process steps, KPI/result highlights, warnings/failure modes, limitation cards, or future-direction cards.\n"
-        "- Avoid icon use on dense technical/data slides unless the icon labels a clear process step or callout.\n"
-        "- Never use icons as ordinary bullet prefixes, repeated decoration, filler, or background texture.\n"
-        "- Keep to one icon library for the whole deck and use explicit `<use data-icon=\"...\"/>` placeholders.\n"
-        "- In Section VI, list only icons with a concrete justification; leave slides unlisted when no icon is needed.\n"
-        "- In Section IX Content Outline, add an `Icon: ` line only for slides that should actually render an icon.\n"
-        f"- Selected icon library: `{icon_library}`. Icon paths should include this library prefix, e.g. `{icon_library}/name`.\n"
-        "- Choose only icon paths that appear in the candidate table below, unless a local asset with that exact path is explicitly known to exist.\n"
-        "\nVisual role separation:\n"
-        "- `Icon` means a real library icon only. Use `Icon: None` on ordinary content pages unless the icon has a clear semantic job.\n"
-        "- `Card Marker` means structural labeling only: prefer `numbered` or `none`. Do not use single-letter/symbol badges such as `P`, `Δ`, `!`, or `G` as fake icons.\n"
-        "- `Micro Visual` means a tiny mechanism diagram, not an icon. Prefer forms such as `distribution-bins`, `residual-arrow`, `error-growth`, `gate-slider`, `stage-flow`, `mini-chart`, or `none`.\n"
-        "- For dense technical explanation cards, choose numbered markers or micro visuals over decorative icons.\n"
-        "- In Section IX, add `Card Marker:` and/or `Micro Visual:` only when they materially guide the Executor; otherwise omit them or use `none`.\n"
-    )
 
 
 def _extract_design_spec_section(content: str, roman: str) -> str:
@@ -284,6 +121,57 @@ _PAGE_TYPE_LABEL_PATTERN = (
 )
 
 
+def _response_finish_reason(response: LLMResponse) -> str:
+    raw = response.raw
+    choices = None
+    if isinstance(raw, dict):
+        choices = raw.get("choices")
+    elif raw is not None:
+        choices = getattr(raw, "choices", None)
+    if not choices:
+        return ""
+    choice = choices[0]
+    if isinstance(choice, dict):
+        return str(choice.get("finish_reason") or "")
+    return str(getattr(choice, "finish_reason", "") or "")
+
+
+def _write_strategy_attempt_debug(
+    debug_dir: Path | None,
+    *,
+    attempt: int,
+    response: LLMResponse,
+    validation_error: str | None,
+) -> None:
+    if debug_dir is None:
+        return
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        usage = response.usage
+        header = [
+            f"attempt={attempt}",
+            f"chars={len(response.content or '')}",
+            f"finish_reason={_response_finish_reason(response)}",
+        ]
+        if usage is not None:
+            header.extend(
+                [
+                    f"prompt_tokens={usage.prompt_tokens}",
+                    f"completion_tokens={usage.completion_tokens}",
+                    f"total_tokens={usage.total_tokens}",
+                ]
+            )
+        if validation_error:
+            header.append(f"validation_error={validation_error}")
+        path = debug_dir / f"strategist_response_attempt_{attempt}.md"
+        path.write_text(
+            "<!-- " + "; ".join(header) + " -->\n\n" + (response.content or ""),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 def _outline_block_mentions_page_type(block: str, page_type: str) -> bool:
     aliases = _PAGE_TYPE_ALIASES.get(page_type, (page_type,))
     for alias in aliases:
@@ -325,6 +213,7 @@ def _design_spec_validation_error(
     expected_page_count: int | None = None,
     expected_inventory: list[dict[str, str | int]] | None = None,
 ) -> str | None:
+    del expected_page_count, expected_inventory
     text = content.strip()
     if len(text) < 1200:
         return f"design_spec.md is too short ({len(text)} characters)"
@@ -340,71 +229,6 @@ def _design_spec_validation_error(
         if not _has_required_design_spec_section(text, roman, title):
             return f"design_spec.md is missing section {roman}. {title}"
 
-    if expected_page_count is not None:
-        count_match = re.search(r"(?im)\bPage Count\s*[:：]\s*(\d+)\b", text)
-        if count_match and int(count_match.group(1)) != expected_page_count:
-            return (
-                f"Page Count is {count_match.group(1)}, expected {expected_page_count}"
-            )
-
-        outline = _extract_design_spec_section(text, "IX")
-        page_nums = [
-            int(match.group(1))
-            for match in re.finditer(
-                r"(?i)\b(?:page|slide)\s*0*(\d+)\b", outline
-            )
-        ]
-        if page_nums:
-            if max(page_nums) > expected_page_count:
-                return (
-                    f"Content Outline references page {max(page_nums)}, "
-                    f"expected no more than {expected_page_count}"
-                )
-            if len(set(page_nums)) != expected_page_count:
-                missing_pages = sorted(set(range(1, expected_page_count + 1)) - set(page_nums))
-                missing_suffix = (
-                    "; missing pages: " + ", ".join(str(page) for page in missing_pages[:12])
-                    if missing_pages
-                    else ""
-                )
-                return (
-                    f"Content Outline lists {len(set(page_nums))} unique pages, "
-                    f"expected {expected_page_count}{missing_suffix}"
-                )
-
-    if expected_inventory:
-        outline = _extract_design_spec_section(text, "IX")
-        missing_types = []
-        for item in expected_inventory:
-            page_num = item["page"]
-            page_type = str(item["type"])
-            page_pattern = rf"(?is)\b(?:page|slide)\s*0*{page_num}\b(.+?)(?=\b(?:page|slide)\s*0*\d+\b|\Z)"
-            page_match = re.search(page_pattern, outline)
-            if page_match and not _outline_block_mentions_page_type(
-                page_match.group(0),
-                page_type,
-            ):
-                missing_types.append(f"{page_num}:{page_type}")
-        if missing_types:
-            return "Content Outline page types do not match manuscript: " + ", ".join(missing_types[:5])
-
-    missing_icons = sorted(
-        {
-            match.group(1).strip()
-            for match in re.finditer(
-                r"`((?:chunk|tabler-filled|tabler-outline)/[^`]+)`",
-                text,
-            )
-            if not match.group(1).strip().endswith("/name")
-            and not _icon_asset_exists(match.group(1).strip())
-        }
-    )
-    if missing_icons:
-        return (
-            "Design spec references missing local icon assets: "
-            + ", ".join(missing_icons[:8])
-            + ". Choose exact paths from the provided icon candidate table, or use Icon: None."
-        )
     return None
 
 
@@ -414,61 +238,6 @@ def _outline_page_numbers(content: str) -> set[int]:
         int(match.group(1))
         for match in re.finditer(r"(?i)\b(?:page|slide)\s*0*(\d+)\b", outline)
     }
-
-
-def _repair_design_spec_page_contract(
-    content: str,
-    expected_inventory: list[dict[str, str | int]],
-) -> str:
-    """Patch harmless page-count omissions in a valid design spec.
-
-    Long decks can cause the strategist to stop Section IX early. Rather than
-    fail the entire run, append minimal page contracts from the already-fixed
-    manuscript inventory. Extra/out-of-range pages are still left for
-    validation to reject.
-    """
-    if not expected_inventory:
-        return content
-
-    expected_page_count = len(expected_inventory)
-    repaired = re.sub(
-        r"(?im)(\bPage Count\s*[:：]\s*)\d+\b",
-        rf"\g<1>{expected_page_count}",
-        content,
-        count=1,
-    )
-
-    outline = _extract_design_spec_section(repaired, "IX")
-    if not outline:
-        return repaired
-
-    present = _outline_page_numbers(repaired)
-    if present and max(present) > expected_page_count:
-        return repaired
-
-    missing = [item for item in expected_inventory if int(item["page"]) not in present]
-    if not missing:
-        return repaired
-
-    additions = []
-    for item in missing:
-        page_num = int(item["page"])
-        page_type = str(item["type"])
-        title = str(item["title"]).strip() or f"Page {page_num}"
-        additions.append(
-            f"#### Slide {page_num:02d} - {title}\n"
-            f"- **Page Type**: {page_type}\n"
-            f"- **Title**: {title}\n"
-            "- **Layout**: Follow the global design system and the manuscript content for this page."
-        )
-
-    patched_outline = outline.rstrip() + "\n\n" + "\n\n".join(additions)
-    start = repaired.find(outline)
-    if start < 0:
-        return repaired
-    suffix = repaired[start + len(outline):]
-    separator = "\n\n" if suffix and not suffix.startswith("\n") else ""
-    return repaired[:start] + patched_outline + separator + suffix
 
 
 def _align_content_outline_page_types(
@@ -543,11 +312,7 @@ async def create_design_spec(
     style: str = "academic",
     language: str = "en",
     detail_level: str = "normal",
-    icon_library: str = "chunk",
     style_overrides: dict | None = None,
-    enable_icon: bool = False,
-    enable_icon_rag: bool = False,
-    gemini_api_key: str | None = None,
     figure_inventory: list[dict] | None = None,
     debug_dir: Path | None = None,
     template_context: str | None = None,
@@ -561,9 +326,8 @@ async def create_design_spec(
         canvas_format: Canvas format key.
         style: Design style key.
         language: Output language.
-        detail_level: Requested content depth and density target.
-        icon_library: Icon library to use (chunk/tabler-filled/tabler-outline).
-
+        detail_level: Compatibility parameter. It controls upstream page and context
+            budgets, not design density.
     Returns:
         Design specification markdown (design_spec.md content).
     """
@@ -582,16 +346,17 @@ async def create_design_spec(
     page_count = count_manuscript_pages(manuscript)
     inventory = page_inventory(manuscript)
     inventory_block = format_page_inventory(manuscript)
+    chapter_map_block = _format_chapter_map(inventory)
     enforce_page_types = "<!--" in manuscript and "page_type" in manuscript
 
     user_parts = [
         f"## Manuscript\n\n{manuscript}",
         f"\n## Manuscript Page Inventory\n\n{inventory_block}",
+        f"\n## Manuscript Chapter Map (authoritative)\n\n{chapter_map_block}",
         f"\n## Canvas Format: {fmt['name']} ({fmt['ratio']}), viewBox: `{fmt['viewbox']}`",
         f"\n## Design Style: {style_info['name']}",
         f"\n## Page Count: {page_count}",
         f"\n## Language: {language}",
-        f"\n## Detail Level: {detail_level}",
         f"\n## Pre-resolved Confirmations",
         f"- Canvas Format: {fmt['name']}",
         f"- Page Count: {page_count}",
@@ -611,6 +376,7 @@ async def create_design_spec(
             f"- Page contract: exactly {page_count} pages; page N in Section IX must match manuscript page N.",
             "- For decks over 30 pages, keep Section IX concise but list every page exactly once; never stop before the final manuscript page.",
             "- Do not add, remove, or reorder cover, chapter/transition, content, or ending pages.",
+            "- Treat the Manuscript Chapter Map as authoritative: do not invent, rename, split, merge, or move chapter divider slides in Section IX.",
             "- Keep cover/chapter/ending pages distinct from content pages: cover pages may include title metadata and a modest context/accent treatment, while chapter/ending pages stay minimal dividers/closers.",
             "- Do not assign paper figures, dense article-content blocks, multi-column evidence layouts, or detailed result sections to cover/chapter/ending pages.",
             "- If a chapter/ending manuscript page contains extra body text, summarize it into at most one subtitle/key phrase in Section IX; do not create cards, KPI strips, question lists, mini-agendas, or `核心问题` / `本章看点` blocks on those pages.",
@@ -618,10 +384,21 @@ async def create_design_spec(
             "- Keep content pages as content pages: do not style them as chapter dividers or add oversized chapter/section counters.",
             "- Put any page number in the footer only; do not create top-left administrative labels or mixed section/page counters.",
             "- In Section IX, every page must include `Style Family:`, `Layout Family:`, and `Density:` fields. All chapter pages must share the same Style Family.",
+            "- In Section IX, every content page must include `Region Plan:` with concrete content-area boxes (x/y/w/h) for major regions such as figure, text, callout, cards, chart, and caption.",
+            "- Region Plan coordinates are final layout boxes. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`; for figures, define a final frame and say the image should fit inside it preserving aspect ratio.",
+            "- On pages with paper figures, calculate the final visible image rectangles from the actual dimensions before allocating text. State both the frame and visible image x/y/w/h in the Region Plan.",
+            "- Do not place a small centered image in a much larger frame. If ratio-preserving fit would leave most of the frame empty, redesign the composition, resize the frame, or use fewer figures.",
+            "- For multiple figures, budget each image from its own aspect ratio before stacking or gridding. Do not force incompatible figures into equal-height strips.",
+            "- Use reusable content layout families such as `figure-left-text-right`, `text-left-figure-right`, `two-column-evidence`, `three-card-grid`, `process-flow-with-evidence`, `comparison-table-callout`, or `full-width-chart-with-notes` unless the manuscript truly requires another.",
+            "- Plan balanced occupancy: content pages should use about 65-85% of the content area with aligned gutters, no empty quadrant, no floating short bullet list, and no detached bottom callout.",
+            "- Do not place planned content boxes in the footer band; if a callout does not fit, change the content-area composition.",
+            "- TOC pages are title plus the full ordered chapter/list items only; do not plan side summaries, stats, charts, or process blocks.",
+            "- Derive each page's `Density:` from that page's manuscript, visual share, and argument structure. Do not infer density from any global detail setting.",
+            "- Plan wrapping dynamically from the actual text-region width, font size, and image/chart share. Avoid premature short lines; use semantic line breaks and allow light raggedness when it improves composition.",
+            "- For text-heavy regions and tables, describe a concise `Text Strategy:` with font range, line-height range, and column allocation. Do not state fixed character-capacity numbers.",
             "- In Section IX, separate footer page numbering from chapter index. Chapter labels use the planned chapter index, never the slide page number.",
             f"- The visible slide language must be `{language}`.",
             f"- {_language_constraint(language)}",
-            "- Detail level `normal` should keep pages concise, `high` should allow moderately denser explanatory content, and `very_high` should accommodate richer explanations and fuller evidence coverage without becoming unreadable.",
         ])
         user_parts.append(f"\n{template_context}")
     else:
@@ -637,6 +414,7 @@ async def create_design_spec(
             f"- Page contract: exactly {page_count} pages; page N in Section IX must match manuscript page N.",
             "- For decks over 30 pages, keep Section IX concise but list every page exactly once; never stop before the final manuscript page.",
             "- Do not add, remove, or reorder cover, chapter/transition, content, or ending pages.",
+            "- Treat the Manuscript Chapter Map as authoritative: do not invent, rename, split, merge, or move chapter divider slides in Section IX.",
             "- Keep cover/chapter/ending pages distinct from content pages: cover pages may include title metadata and a modest context/accent treatment, while chapter/ending pages stay minimal dividers/closers.",
             "- Do not assign paper figures, dense article-content blocks, multi-column evidence layouts, or detailed result sections to cover/chapter/ending pages.",
             "- If a chapter/ending manuscript page contains extra body text, summarize it into at most one subtitle/key phrase in Section IX; do not create cards, KPI strips, question lists, mini-agendas, or `核心问题` / `本章看点` blocks on those pages.",
@@ -644,31 +422,32 @@ async def create_design_spec(
             "- Keep content pages as content pages: do not style them as chapter dividers or add oversized chapter/section counters.",
             "- Put any page number in the footer only; do not create top-left administrative labels or mixed section/page counters.",
             "- In Section IX, every page must include `Style Family:`, `Layout Family:`, and `Density:` fields. All chapter pages must share the same Style Family.",
+            "- In Section IX, every content page must include `Region Plan:` with concrete content-area boxes (x/y/w/h) for major regions such as figure, text, callout, cards, chart, and caption.",
+            "- Region Plan coordinates are final layout boxes. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`; for figures, define a final frame and say the image should fit inside it preserving aspect ratio.",
+            "- On pages with paper figures, calculate the final visible image rectangles from the actual dimensions before allocating text. State both the frame and visible image x/y/w/h in the Region Plan.",
+            "- Do not place a small centered image in a much larger frame. If ratio-preserving fit would leave most of the frame empty, redesign the composition, resize the frame, or use fewer figures.",
+            "- For multiple figures, budget each image from its own aspect ratio before stacking or gridding. Do not force incompatible figures into equal-height strips.",
+            "- Use reusable content layout families such as `figure-left-text-right`, `text-left-figure-right`, `two-column-evidence`, `three-card-grid`, `process-flow-with-evidence`, `comparison-table-callout`, or `full-width-chart-with-notes` unless the manuscript truly requires another.",
+            "- Plan balanced occupancy: content pages should use about 65-85% of the content area with aligned gutters, no empty quadrant, no floating short bullet list, and no detached bottom callout.",
+            "- Do not place planned content boxes in the footer band; if a callout does not fit, change the content-area composition.",
+            "- TOC pages are title plus the full ordered chapter/list items only; do not plan side summaries, stats, charts, or process blocks.",
+            "- Derive each page's `Density:` from that page's manuscript, visual share, and argument structure. Do not infer density from any global detail setting.",
+            "- Plan wrapping dynamically from the actual text-region width, font size, and image/chart share. Avoid premature short lines; use semantic line breaks and allow light raggedness when it improves composition.",
+            "- For text-heavy regions and tables, describe a concise `Text Strategy:` with font range, line-height range, and column allocation. Do not state fixed character-capacity numbers.",
             "- In Section IX, separate footer page numbering from chapter index. Chapter labels use the planned chapter index, never the slide page number.",
             f"- The visible slide language must be `{language}`.",
             f"- {_language_constraint(language)}",
-            "- Detail level `normal` should keep pages concise, `high` should allow moderately denser explanatory content, and `very_high` should accommodate richer explanations and fuller evidence coverage without becoming unreadable.",
         ])
 
-    if is_deepseek_provider(llm, model):
-        user_parts.append("\n" + deepseek_strategy_guidance(detail_level))
-
-    # Icon policy: when enabled, Phase 1 skips icon detail — Phase 2 (icon_round) decides
-    if not enable_icon:
-        user_parts.append(
-            "\n## Icon Usage: DISABLED\n"
-            "Do NOT use any `<use data-icon=\"...\"/>` elements in any slide. "
-            "Use plain SVG shapes (circles, rects, paths) for all visual elements instead."
-        )
-    else:
-        # Phase 1: just tell strategist that icons will be planned separately
-        user_parts.append(
-            f"\n## Icon Usage: ENABLED (Phase 2)\n"
-            f"Icons are enabled but will be planned in a separate phase.\n"
-            f"In Section VI, write: `Icon library: {icon_library} — inventory TBD.`\n"
-            f"In Section IX, do NOT add `Icon:` lines yet — they will be added later.\n"
-            f"Do not use `<use data-icon/>` placeholders in the content outline."
-        )
+    user_parts.append(
+        "\n## Icon Usage: DISABLED\n"
+        "Provider generation does not add icon decoration. Do NOT use any "
+        "`<use data-icon=\"...\"/>` elements in any slide. Use plain SVG "
+        "shapes, charts, diagrams, text, and local image assets instead. "
+        "Never use emoji, colored emoji glyphs, Unicode symbols, dingbats, "
+        "stars, checkmarks, arrows, warning marks, punctuation, letters, or "
+        "initials as icon substitutes."
+    )
 
     # Inject actual image dimensions so the design spec has correct ratios
     if figure_inventory:
@@ -772,6 +551,7 @@ async def create_design_spec(
             pass
 
     last_error = ""
+    last_nonempty_error = ""
     for attempt in range(1, MAX_DESIGN_SPEC_ATTEMPTS + 1):
         messages = list(base_messages)
         if last_error:
@@ -790,7 +570,6 @@ async def create_design_spec(
             max_tokens=DESIGN_SPEC_MAX_TOKENS,
         )
         content = response.content.strip()
-        content = _repair_design_spec_page_contract(content, inventory)
         if enforce_page_types:
             content = _align_content_outline_page_types(content, inventory)
         error = _design_spec_validation_error(
@@ -798,23 +577,19 @@ async def create_design_spec(
             expected_page_count=page_count,
             expected_inventory=inventory if enforce_page_types else None,
         )
+        _write_strategy_attempt_debug(
+            debug_dir,
+            attempt=attempt,
+            response=response,
+            validation_error=error,
+        )
         if error is None:
-            # Phase 2: Icon Decoration Round (if enabled)
-            if enable_icon:
-                from backend.orchestrator.icon_round import run_icon_round
-
-                logger.info("Running Icon Decoration Round (Phase 2)")
-                content = await run_icon_round(
-                    content,
-                    manuscript,
-                    icon_library,
-                    llm,
-                    model,
-                    enable_icon_rag=enable_icon_rag,
-                    gemini_api_key=gemini_api_key,
-                    debug_dir=debug_dir,
-                )
             return content
         last_error = error
+        if content:
+            last_nonempty_error = error
 
-    raise RuntimeError(f"Invalid design specification from strategist: {last_error}")
+    detail = last_error
+    if last_nonempty_error and last_nonempty_error != last_error:
+        detail = f"{last_error}; previous non-empty attempt failed: {last_nonempty_error}"
+    raise RuntimeError(f"Invalid design specification from strategist: {detail}")

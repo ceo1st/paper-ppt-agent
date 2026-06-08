@@ -258,6 +258,11 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         model=model_settings.model if model_settings is not None else "",
         api_key=model_settings.api_key if model_settings is not None else "",
         base_url=model_settings.base_url if model_settings is not None else None,
+        artifact_thinking_mode=(
+            model_settings.artifact_thinking_mode
+            if model_settings is not None
+            else "disabled"
+        ),
         canvas_format=request.options.canvas_format,
         style=request.options.style,
         num_pages=request.options.num_pages,
@@ -274,7 +279,6 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
             else None
         ),
         enable_deep_research=request.options.enable_deep_research,
-        icon_library=request.options.icon_library,
         deepseek_settings=(
             model_settings.deepseek_settings.model_dump()
             if model_settings is not None
@@ -291,9 +295,6 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         ),
         enable_visual_critic=request.options.enable_visual_critic,
         visual_qa_max_attempts=request.options.visual_qa_max_attempts,
-        enable_icon=request.options.enable_icon,
-        enable_icon_rag=request.options.enable_icon_rag,
-        gemini_api_key=request.options.gemini_api_key,
         template_id=request.options.template_id,
         research_config=request.options.research_config,
         job_id=job.id,
@@ -560,7 +561,11 @@ async def interrupt_agent_generation(job_id: str) -> AgentFeedbackResponse:
         session_manager.mark_job_cancelled(job_id, "Agent task cancelled.")
         return AgentFeedbackResponse(job_id=job_id, status="cancelled")
 
-    await live_session.close()
-    session_manager.cancel_job(job_id)
-    session_manager.mark_job_cancelled(job_id, "Agent task cancelled.")
-    return AgentFeedbackResponse(job_id=job_id, status="cancelled")
+    session_manager.update_job(
+        job_id,
+        status="pausing",
+        message="Pausing Agent...",
+        error=None,
+    )
+    await live_session.interrupt()
+    return AgentFeedbackResponse(job_id=job_id, status="pausing")

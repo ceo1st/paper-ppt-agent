@@ -165,9 +165,9 @@
 | Card padding | 20-32px | [fill in] |
 | Card border radius | 8-16px | [fill in] |
 | Icon-text gap | 8-16px | [fill in] |
-| Single-row card height | 530-600px | [fill in] |
-| Double-row card height | 265-295px each | [fill in] |
-| Three-column card width | 360-380px each | [fill in] |
+| Single-row card height | 180-320px | [fill in] |
+| Double-row card height | 220-240px each | [fill in] |
+| Three-column card width | 368-384px each | [fill in] |
 
 ### Image-Text Layout Formulas
 
@@ -205,31 +205,20 @@ cell_height = (H - (rows - 1) × 20) / rows
 
 ### Text Volume Guidelines
 
-> Control text density to prevent overflow and maintain readability.
+> Derive text density and wrapping from each page's actual text regions, font size,
+> visual share, and content structure. Do not use a deck-wide character-capacity table.
 
-**Character Capacity Estimation** (for a text area of width W, height H):
-```
-Single-line height = fontSize × max(lineHeight, 1.3)
-CJK character width  ≈ fontSize
-Latin character width ≈ fontSize × 0.55
-Max lines       = floor(H / single-line-height)
-Max chars/line  = floor(W / avg-char-width)
-```
-
-**Content Area Capacity Table** (16:9, content area 1200×520):
-
-| Font Size | Max Lines | Max CJK Chars | Max Latin Chars |
-| --------- | --------- | ------------- | --------------- |
-| 14px | 29 | ~20,500 | ~37,000 |
-| 16px | 25 | ~15,000 | ~27,000 |
-| 18px | 22 | ~11,700 | ~21,300 |
-| 24px | 16 | ~6,400 | ~11,600 |
+**Dynamic wrapping guidance**:
+1. Let ordinary non-final lines use most of the available width instead of inserting conservative early breaks.
+2. Use semantic punctuation and phrase boundaries for manual line breaks.
+3. Sparse pages may use larger type and wider text measures; text-heavy pages may use smaller type, tighter spacing, or additional columns when readable.
+4. Reflow or resize only when actual clipping or overlap occurs. Light raggedness is acceptable.
 
 **Anti-Overflow Rules**:
-1. Do NOT fill the entire content area with text. Leave at least 20% whitespace.
-2. For bullet lists, limit to 6-8 items per slide.
-3. For multi-column layouts, each column has independent character limits.
-4. If content exceeds capacity, split across multiple slides.
+1. Preserve readable padding and clear separation between text, figures, charts, and footers.
+2. Treat each text region independently according to its width and role.
+3. Prefer reflowing regions, widening a text box, or adjusting typography before removing content.
+4. Only split content across slides when the manuscript and page plan already support that structure.
 
 ---
 
@@ -291,7 +280,12 @@ Icons are optional. Most slides need 0 icons. Only add when it has a clear seman
 #### Slide 02 - [Page Name]
 
 - **Layout**: [Choose layout mode]
+- **Style Family**: [Page visual family]
+- **Layout Family**: [Reusable layout family]
+- **Density**: [Derived from this page's content and visual share]
 - **Title**: [Page title]
+- **Region Plan**: [Final x/y/w/h boxes for major regions]
+- **Text Strategy**: [Font range, line-height range, wrapping behavior, and table columns if relevant]
 - **Visualization**: [visualization_type] (see VII. Visualization Reference List)
 - **Content**:
   - [Point 1]

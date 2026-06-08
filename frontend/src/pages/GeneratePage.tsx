@@ -85,6 +85,7 @@ interface RoutingProfile {
   model: string;
   baseUrl: string;
   apiKey: string;
+  artifactThinkingMode?: "disabled" | "default";
   deepseekSettings?: DeepSeekSettings;
   openaiSettings?: OpenAISettings;
 }
@@ -113,8 +114,6 @@ interface PresentationSettingsDraft {
   cjkBodyFont?: string;
   enableDeepResearch?: boolean;
   enableVisualCritic?: boolean;
-  enableIcon?: boolean;
-  enableIconRag?: boolean;
   researchConfig?: ResearchConfig;
   templateId?: string;
 }
@@ -187,6 +186,7 @@ export function GeneratePage() {
     clearUploadSession,
     startGeneration,
     cancelCurrentRun,
+    interruptCurrentAgent,
     sendAgentFeedback,
     connect,
     resumeCurrentRun,
@@ -199,6 +199,9 @@ export function GeneratePage() {
   const [model, setModel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [artifactThinkingMode, setArtifactThinkingMode] = useState<"disabled" | "default">(
+    "disabled",
+  );
   const [deepSeekSettings, setDeepSeekSettings] = useState<DeepSeekSettings>(
     DEFAULT_DEEPSEEK_SETTINGS,
   );
@@ -234,12 +237,9 @@ export function GeneratePage() {
   const [maxCriticAttempts, setMaxCriticAttempts] = useState(initialSettings.maxCriticAttempts ?? "0");
   const [visualQaMaxAttempts, setVisualQaMaxAttempts] = useState(initialSettings.visualQaMaxAttempts ?? "1");
   const [instruction, setInstruction] = useState(initialSettings.instruction ?? "");
-  const GEMINI_KEY_STORAGE = "paper-ppt-agent-gemini-api-key";
   const RESEARCH_KEYS_STORAGE = "paper-ppt-agent-research-keys";
   const [enableDeepResearch, setEnableDeepResearch] = useState(initialSettings.enableDeepResearch ?? false);
   const [enableVisualCritic, setEnableVisualCritic] = useState(initialSettings.enableVisualCritic ?? false);
-  const [enableIcon, setEnableIcon] = useState(initialSettings.enableIcon ?? false);
-  const [enableIconRag, setEnableIconRag] = useState(initialSettings.enableIconRag ?? false);
   const [researchConfig, setResearchConfig] = useState<ResearchConfig>(() => {
     const base = initialSettings.researchConfig ?? {};
     try {
@@ -256,9 +256,6 @@ export function GeneratePage() {
       }
     } catch { /* noop */ }
     return base;
-  });
-  const [geminiApiKey, setGeminiApiKey] = useState(() => {
-    try { return window.localStorage.getItem(GEMINI_KEY_STORAGE) ?? ""; } catch { return ""; }
   });
   const [templateId, setTemplateId] = useState(initialSettings.templateId ?? "");
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
@@ -346,6 +343,7 @@ export function GeneratePage() {
       setModel("");
       setBaseUrl(saved?.baseUrl || defaults.baseUrl);
       setApiKey(saved?.apiKey || "");
+      setArtifactThinkingMode(saved?.artifactThinkingMode ?? "disabled");
       setDeepSeekSettings(saved?.deepseekSettings ?? DEFAULT_DEEPSEEK_SETTINGS);
       setOpenAISettings(saved?.openaiSettings ?? DEFAULT_OPENAI_SETTINGS);
     }
@@ -364,6 +362,7 @@ export function GeneratePage() {
     setModel(saved?.model || "");
     setBaseUrl(saved?.baseUrl || defaults.baseUrl);
     setApiKey(saved?.apiKey || "");
+    setArtifactThinkingMode(saved?.artifactThinkingMode ?? "disabled");
     setDeepSeekSettings(saved?.deepseekSettings ?? DEFAULT_DEEPSEEK_SETTINGS);
     setOpenAISettings(saved?.openaiSettings ?? DEFAULT_OPENAI_SETTINGS);
   }, [provider, providers]);
@@ -381,11 +380,12 @@ export function GeneratePage() {
       model: model.trim() || existing?.model || "",
       baseUrl,
       apiKey,
+      artifactThinkingMode,
       deepseekSettings: provider === "deepseek" ? deepSeekSettings : existing?.deepseekSettings,
       openaiSettings: provider === "openai" ? openAISettings : existing?.openaiSettings,
     };
     writeRoutingProfiles(profiles);
-  }, [apiKey, baseUrl, deepSeekSettings, model, openAISettings, provider, targetJobId]);
+  }, [apiKey, artifactThinkingMode, baseUrl, deepSeekSettings, model, openAISettings, provider, targetJobId]);
 
   useEffect(() => {
     if (!targetJobId || !selectedRunConfig) {
@@ -398,6 +398,7 @@ export function GeneratePage() {
     setModel(selectedRunConfig.model);
     setBaseUrl(selectedRunConfig.baseUrl ?? "");
     setApiKey(savedProfile?.apiKey ?? "");
+    setArtifactThinkingMode(savedProfile?.artifactThinkingMode ?? "disabled");
     setDeepSeekSettings(savedProfile?.deepseekSettings ?? DEFAULT_DEEPSEEK_SETTINGS);
     setOpenAISettings(savedProfile?.openaiSettings ?? DEFAULT_OPENAI_SETTINGS);
     setCanvasFormat(options.canvas_format || "ppt169");
@@ -420,12 +421,10 @@ export function GeneratePage() {
     setGenerationMode(options.generation_mode || "sequential");
     setParallelConcurrency(String(options.parallel_concurrency ?? 3));
     setTimeoutSeconds(options.timeout_seconds ? String(options.timeout_seconds) : "");
-    setMaxCriticAttempts(String(options.max_critic_attempts ?? 3));
+    setMaxCriticAttempts(String(options.max_critic_attempts ?? 0));
     setEnableDeepResearch(Boolean(options.enable_deep_research));
     setEnableVisualCritic(Boolean(options.enable_visual_critic));
     setVisualQaMaxAttempts(String(options.visual_qa_max_attempts ?? 1));
-    setEnableIcon(options.enable_icon !== false);
-    setEnableIconRag(options.enable_icon_rag !== false);
     setResearchConfig((prev) => {
       const incoming = options.research_config ?? {};
       return {
@@ -436,17 +435,12 @@ export function GeneratePage() {
         serpapi_key: incoming.serpapi_key || prev.serpapi_key,
       };
     });
-    setGeminiApiKey(options.gemini_api_key ?? "");
     setTemplateId(options.template_id ?? "");
   }, [selectedRunConfig, targetJobId]);
 
   useEffect(() => {
     setLanguageMode((current) => (current === "custom" ? current : locale === "zh" ? "zh" : "en"));
   }, [locale]);
-
-  useEffect(() => {
-    try { window.localStorage.setItem(GEMINI_KEY_STORAGE, geminiApiKey); } catch { /* noop */ }
-  }, [geminiApiKey]);
 
   useEffect(() => {
     try {
@@ -490,8 +484,6 @@ export function GeneratePage() {
         cjkBodyFont,
         enableDeepResearch,
         enableVisualCritic,
-        enableIcon,
-        enableIconRag,
         researchConfig,
         templateId,
       });
@@ -509,8 +501,6 @@ export function GeneratePage() {
     generationBackend,
     agentRuntime,
     enableDeepResearch,
-    enableIcon,
-    enableIconRag,
     enableVisualCritic,
     maxCriticAttempts,
     visualQaMaxAttempts,
@@ -544,6 +534,7 @@ export function GeneratePage() {
         model: normalizedModel,
         baseUrl,
         apiKey,
+        artifactThinkingMode,
         deepseekSettings: provider === "deepseek" ? deepSeekSettings : undefined,
         openaiSettings: provider === "openai" ? openAISettings : undefined,
       };
@@ -566,6 +557,7 @@ export function GeneratePage() {
             model: normalizedModel,
             api_key: apiKey,
             base_url: baseUrl || undefined,
+            artifact_thinking_mode: artifactThinkingMode,
             deepseek_settings: provider === "deepseek" ? deepSeekSettings : undefined,
             openai_settings: provider === "openai" ? openAISettings : undefined,
           }
@@ -608,9 +600,6 @@ export function GeneratePage() {
         enable_visual_critic: enableVisualCritic,
         visual_qa_max_attempts: parseBoundedInt(visualQaMaxAttempts, 1, 0, 10),
         enable_deep_research: enableDeepResearch,
-        enable_icon: enableIcon,
-        enable_icon_rag: enableIconRag,
-        gemini_api_key: geminiApiKey || undefined,
         template_id: templateId || undefined,
         research_config: (researchConfig.arxiv_search_enabled || researchConfig.semantic_scholar_enabled || researchConfig.web_search_enabled)
           ? researchConfig
@@ -628,6 +617,7 @@ export function GeneratePage() {
   const activeAgentGeneration = Boolean(
     jobId && selectedRunConfig?.provider?.startsWith("agent:") && job,
   );
+  const sideConfigLabel = activeAgentGeneration ? "Agent" : t("config.title");
   const requestGenerationBackend = (nextBackend: "provider" | "agent") => {
     if (nextBackend === "provider") {
       setShowAgentModeConfirm(false);
@@ -653,7 +643,7 @@ export function GeneratePage() {
   return (
     <Layout showSidebar={false} contentClassName="studio-page scholarly-workspace-page">
       <section className="scholarly-workspace" data-side-tab={workspaceSideTab}>
-        <div className="workspace-side-tabs" role="tablist" aria-label={`${t("source.title")} / ${t("config.title")}`}>
+        <div className="workspace-side-tabs" role="tablist" aria-label={`${t("source.title")} / ${sideConfigLabel}`}>
           <button
             type="button"
             className={`workspace-side-tab ${workspaceSideTab === "sources" ? "workspace-side-tab-active" : ""}`}
@@ -671,8 +661,8 @@ export function GeneratePage() {
             role="tab"
             onClick={() => setWorkspaceSideTab("config")}
           >
-            <Settings2 size={16} />
-            <span>{t("config.title")}</span>
+            {activeAgentGeneration ? <Bot size={16} /> : <Settings2 size={16} />}
+            <span>{sideConfigLabel}</span>
           </button>
         </div>
         <SourcesPanel
@@ -709,7 +699,7 @@ export function GeneratePage() {
             onStop={async () => {
               setCancelLoading(true);
               try {
-                await cancelCurrentRun();
+                await interruptCurrentAgent();
               } finally {
                 setCancelLoading(false);
               }
@@ -726,7 +716,7 @@ export function GeneratePage() {
                 className={generationBackend === "provider" ? "active" : ""}
                 onClick={() => requestGenerationBackend("provider")}
               >
-                LLM
+                Provider
               </button>
               <button
                 type="button"
@@ -771,6 +761,7 @@ export function GeneratePage() {
                 model={model}
                 baseUrl={baseUrl}
                 apiKey={apiKey}
+                artifactThinkingMode={artifactThinkingMode}
                 deepSeekSettings={deepSeekSettings}
                 openAISettings={openAISettings}
                 onProviderChange={(nextProvider) => {
@@ -779,6 +770,7 @@ export function GeneratePage() {
                 onModelChange={setModel}
                 onBaseUrlChange={setBaseUrl}
                 onApiKeyChange={setApiKey}
+                onArtifactThinkingModeChange={setArtifactThinkingMode}
                 onDeepSeekSettingsChange={setDeepSeekSettings}
                 onOpenAISettingsChange={setOpenAISettings}
               />
@@ -798,9 +790,6 @@ export function GeneratePage() {
                 instruction={instruction}
                 enableDeepResearch={enableDeepResearch}
                 enableVisualCritic={enableVisualCritic}
-                enableIcon={enableIcon}
-                enableIconRag={enableIconRag}
-                geminiApiKey={geminiApiKey}
                 templateId={templateId}
                 templates={templates}
                 onCanvasFormatChange={setCanvasFormat}
@@ -816,9 +805,6 @@ export function GeneratePage() {
                 onInstructionChange={setInstruction}
                 onEnableDeepResearchChange={setEnableDeepResearch}
                 onEnableVisualCriticChange={setEnableVisualCritic}
-                onEnableIconChange={setEnableIcon}
-                onEnableIconRagChange={setEnableIconRag}
-                onGeminiApiKeyChange={setGeminiApiKey}
                 onTemplateChange={setTemplateId}
                 density={density}
                 customFont={customFont}
@@ -1077,10 +1063,14 @@ export function GenerationAgentConsole({
     () => activityItems.some((item) => item.kind === "group" && item.state === "active"),
     [activityItems],
   );
-  const isPausing = job?.status === "pausing";
-  const stopLabel = isPausing
-    ? t("generation.agent.canceling")
-    : t("generation.agent.cancel");
+  const stopLabel =
+    job?.status === "pausing"
+      ? t("generation.agent.pausing")
+      : job?.status === "cancelling"
+        ? t("generation.agent.canceling")
+        : job?.status === "paused"
+          ? t("generation.agent.cancel")
+          : t("generation.agent.pause");
   const showThinking = Boolean(
     job &&
     !terminal &&
@@ -1119,7 +1109,7 @@ export function GenerationAgentConsole({
   };
 
   return (
-    <aside className="generation-agent-console">
+    <aside className="configuration-panel generation-agent-console">
       <div className="generation-agent-console-header">
         <div className="workspace-panel-title">
           <Bot size={18} />

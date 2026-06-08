@@ -121,7 +121,6 @@ export function PptistStudioHost({
       onStatus: () => setStatus(""),
       onSaved: (result) => onSavedRef.current?.(result),
       onError: (message) => {
-        setError(message);
         onErrorRef.current?.(message);
       },
     });

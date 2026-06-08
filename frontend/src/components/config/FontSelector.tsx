@@ -88,7 +88,7 @@ function FontStackPicker({
         }}
       >
         {selectedFonts.length === 0 && (
-          <span style={{ fontSize: "0.78rem", color: "var(--muted)", padding: "0.3rem 0", opacity: 0.6 }}>
+          <span style={{ fontSize: "0.78rem", color: "var(--muted)", opacity: 0.6 }}>
             {placeholder || t("font.noSelection")}
           </span>
         )}

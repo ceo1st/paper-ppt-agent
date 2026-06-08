@@ -43,6 +43,9 @@ class UsageRecord:
     page: int | None = None
     attempt: int = 1          # 1 = initial, 2+ = repair / retry
     duration_ms: int = 0
+    reasoning_tokens: int = 0
+    finish_reason: str | None = None
+    output_chars: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -73,14 +76,23 @@ class _UsageTracker:
         self._records: list[UsageRecord] = []
         self._subscribers: list[asyncio.Queue[UsageEvent]] = []
         self._loaded = False
+        self._loaded_signature: tuple[int, int] | None = None
 
     # ── persistence ─────────────────────────────────────────────────────
 
     def _ensure_loaded(self) -> None:
-        if self._loaded:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            stat = self._path.stat()
+            signature = (stat.st_size, stat.st_mtime_ns)
+        except OSError:
+            signature = None
+
+        if self._loaded and signature == self._loaded_signature:
             return
         self._loaded = True
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._loaded_signature = signature
+        self._records = []
         if not self._path.exists():
             return
         try:
@@ -107,6 +119,9 @@ class _UsageTracker:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with self._path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+            # Other worker processes may append to the same file at nearly the
+            # same time. Force the next aggregate query to reconcile from disk.
+            self._loaded_signature = None
         except OSError:
             # Persistence is best-effort — never block an LLM call on disk IO.
             pass
@@ -125,6 +140,9 @@ class _UsageTracker:
         page: int | None = None,
         attempt: int = 1,
         duration_ms: int = 0,
+        reasoning_tokens: int = 0,
+        finish_reason: str | None = None,
+        output_chars: int = 0,
     ) -> UsageRecord:
         with self._lock:
             self._ensure_loaded()
@@ -142,6 +160,9 @@ class _UsageTracker:
                 page=page,
                 attempt=attempt,
                 duration_ms=duration_ms,
+                reasoning_tokens=reasoning_tokens,
+                finish_reason=finish_reason,
+                output_chars=output_chars,
             )
             self._records.append(rec)
             self._persist(rec)
@@ -197,6 +218,42 @@ class _UsageTracker:
         if limit is not None:
             items = items[:limit]
         return items
+
+    def query_records(
+        self,
+        *,
+        job_id_prefix: str | None = None,
+        stage: str | None = None,
+        model: str | None = None,
+        page: int | None = None,
+        start_ts: str | None = None,
+        end_ts: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> tuple[list[UsageRecord], int]:
+        """Return a filtered page of records and the total matching count."""
+        with self._lock:
+            self._ensure_loaded()
+            items = list(self._records)
+        if job_id_prefix:
+            items = [
+                record
+                for record in items
+                if (record.job_id or "").startswith(job_id_prefix)
+            ]
+        if stage:
+            items = [record for record in items if record.stage == stage]
+        if model:
+            items = [record for record in items if record.model == model]
+        if page is not None:
+            items = [record for record in items if record.page == page]
+        if start_ts:
+            items = [record for record in items if record.ts >= start_ts]
+        if end_ts:
+            items = [record for record in items if record.ts <= end_ts]
+        items.sort(key=lambda record: record.ts, reverse=True)
+        total = len(items)
+        return items[offset : offset + limit], total
 
     def summary(
         self,

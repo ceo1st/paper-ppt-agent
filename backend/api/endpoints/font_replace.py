@@ -66,6 +66,7 @@ async def apply_fonts(job_id: str, request: FontReplaceRequest) -> FontReplaceRe
     # ── 1. Replace fonts in PPTX ──────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = project_dir / "exports" / f"presentation_{timestamp}_fonts.pptx"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         # PPTX font replacement opens the .pptx with python-pptx and
