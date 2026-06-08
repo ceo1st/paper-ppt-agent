@@ -91,6 +91,16 @@ export interface UsageRecordResponse {
   page: number | null;
   attempt: number;
   duration_ms: number;
+  reasoning_tokens: number;
+  finish_reason: string | null;
+  output_chars: number;
+}
+
+export interface UsageRecordsResponse {
+  rows: UsageRecordResponse[];
+  total: number;
+  offset: number;
+  limit: number;
 }
 
 export interface UsageSnapshotResponse {
@@ -805,7 +815,7 @@ export async function fetchUsageSnapshot(): Promise<UsageSnapshotResponse> {
     request<{ rows: UsageDailyRowResponse[] }>("/api/usage/daily"),
     request<{ rows: UsageModelRowResponse[] }>("/api/usage/by-model"),
     request<{ rows: UsageStageRowResponse[] }>("/api/usage/by-stage"),
-    request<{ rows: UsageRecordResponse[] }>("/api/usage/records?limit=50"),
+    request<UsageRecordsResponse>("/api/usage/records?limit=50"),
   ]);
   return {
     summary,
@@ -814,6 +824,28 @@ export async function fetchUsageSnapshot(): Promise<UsageSnapshotResponse> {
     by_stage: byStage.rows ?? [],
     recent: records.rows ?? [],
   };
+}
+
+export async function fetchUsageRecords(params: {
+  stage?: string;
+  model?: string;
+  page?: string;
+  jobId?: string;
+  start?: string;
+  end?: string;
+  offset?: number;
+  limit?: number;
+}): Promise<UsageRecordsResponse> {
+  const query = new URLSearchParams();
+  if (params.stage) query.set("stage", params.stage);
+  if (params.model) query.set("model", params.model);
+  if (params.page) query.set("page", params.page);
+  if (params.jobId) query.set("job_id", params.jobId);
+  if (params.start) query.set("start", params.start);
+  if (params.end) query.set("end", params.end);
+  query.set("offset", String(params.offset ?? 0));
+  query.set("limit", String(params.limit ?? 100));
+  return request<UsageRecordsResponse>(`/api/usage/records?${query.toString()}`);
 }
 
 export function getDownloadUrl(jobId: string): string {

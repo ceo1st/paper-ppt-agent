@@ -119,6 +119,7 @@ class GenerationRequest:
     model: str
     api_key: str
     base_url: str | None = None
+    artifact_thinking_mode: Literal["disabled", "default"] = "disabled"
     canvas_format: str = "ppt169"
     style: str = "academic"
     num_pages: int | None = None
@@ -131,13 +132,9 @@ class GenerationRequest:
     max_critic_attempts: int = 0
     style_overrides: dict | None = None  # {palette: [...], font: "...", density: "..."}
     enable_deep_research: bool = False
-    icon_library: str = "chunk"  # chunk / tabler-filled / tabler-outline
     deepseek_settings: dict | None = None
     openai_settings: dict | None = None
     enable_visual_critic: bool = False
-    enable_icon: bool = False
-    enable_icon_rag: bool = False
-    gemini_api_key: str | None = None
     visual_qa_max_attempts: int = 1
     template_id: str | None = None  # Template ID from assets/templates/layouts/
     research_config: ResearchConfig | None = None  # Optional external research enrichment
@@ -172,14 +169,22 @@ async def run_pipeline(
         return
 
     # Initialize LLM provider
-    from backend.generator.project_manager import get_notes, get_svg_files, init_project
+    from backend.generator.project_manager import (
+        PROVIDER_PROJECT_SUBDIRS,
+        get_notes,
+        get_svg_files,
+        init_project,
+    )
     from backend.generator.svg_finalize import finalize_project
     from backend.generator.svg_to_pptx import create_pptx
     from backend.llm import create_provider
     from backend.parser.latex_parser import LaTeXParser
     from backend.parser.pdf_parser import PDFParser
 
-    provider_kwargs = {"base_url": request.base_url}
+    provider_kwargs = {
+        "base_url": request.base_url,
+        "artifact_thinking_mode": request.artifact_thinking_mode,
+    }
     if request.deepseek_settings is not None:
         provider_kwargs["deepseek_settings"] = request.deepseek_settings
     if request.openai_settings is not None:
@@ -195,6 +200,7 @@ async def run_pipeline(
         name="paper_ppt",
         canvas_format=request.canvas_format,
         base_dir=settings.workspaces_dir,
+        initial_subdirs=PROVIDER_PROJECT_SUBDIRS,
     )
 
     # Attribute every LLM call inside this run to the caller's job if known.
@@ -242,7 +248,7 @@ async def run_pipeline(
 
         complete_msg = f"Parsed: {paper.title}"
         if parse_info.get("fallback"):
-            complete_msg += " (layout fallback used)"
+            complete_msg += " (PDF parse fallback used)"
         yield ProgressEvent(
             "parsing",
             "complete",
@@ -403,11 +409,7 @@ async def run_pipeline(
             style=request.style,
             language=request.language,
             detail_level=request.detail_level,
-            icon_library=request.icon_library,
             style_overrides=request.style_overrides,
-            enable_icon=request.enable_icon,
-            enable_icon_rag=request.enable_icon_rag,
-            gemini_api_key=request.gemini_api_key,
             figure_inventory=figure_inventory,
             debug_dir=project_dir / "debug",
             template_context=template_context_strat or None,
@@ -425,10 +427,24 @@ async def run_pipeline(
             design_spec,
             detail_level=request.detail_level,
         )
+        deck_brief = ""
+        for brief_path in (
+            project_dir / "debug" / "paper_brief.md",
+            project_dir / "debug" / "research_pass1_response.md",
+        ):
+            if brief_path.exists():
+                try:
+                    deck_brief = await aread_text(brief_path, encoding="utf-8")
+                except OSError:
+                    deck_brief = ""
+                if deck_brief:
+                    break
         slide_contexts = build_slide_contexts(
             manuscript,
             provider_memory,
             generation_deck_plan,
+            deck_brief,
+            request.detail_level,
         )
         if slide_contexts:
             try:
@@ -607,6 +623,7 @@ async def run_pipeline(
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pptx_path = project_dir / "exports" / f"presentation_{timestamp}.pptx"
+        pptx_path.parent.mkdir(parents=True, exist_ok=True)
 
         async with heavy_stage_slot():
             await aoffload(
@@ -752,6 +769,7 @@ class RefineRequest:
     model: str = "gpt-4o"
     api_key: str = ""
     base_url: str | None = None
+    artifact_thinking_mode: Literal["disabled", "default"] = "disabled"
     canvas_format: str = "ppt169"
     style: str = "academic"
     language: str = "zh"
@@ -763,13 +781,9 @@ class RefineRequest:
     target_pages: list[int] | None = None
     allow_structure_changes: bool = False
     style_overrides: dict | None = None
-    icon_library: str = "chunk"
     deepseek_settings: dict | None = None
     openai_settings: dict | None = None
     enable_visual_critic: bool = False
-    enable_icon: bool = False
-    enable_icon_rag: bool = False
-    gemini_api_key: str | None = None
     visual_qa_max_attempts: int = 1
     template_id: str | None = None
 
@@ -813,7 +827,10 @@ async def run_refine_pipeline(
     manuscript = await aread_text(manuscript_path, encoding="utf-8")
     design_spec = await aread_text(design_spec_path, encoding="utf-8")
 
-    provider_kwargs = {"base_url": request.base_url}
+    provider_kwargs = {
+        "base_url": request.base_url,
+        "artifact_thinking_mode": request.artifact_thinking_mode,
+    }
     if request.deepseek_settings is not None:
         provider_kwargs["deepseek_settings"] = request.deepseek_settings
     if request.openai_settings is not None:
@@ -871,11 +888,7 @@ async def run_refine_pipeline(
             style=request.style,
             language=request.language,
             detail_level=request.detail_level,
-            icon_library=request.icon_library,
             style_overrides=request.style_overrides,
-            enable_icon=request.enable_icon,
-            enable_icon_rag=request.enable_icon_rag,
-            gemini_api_key=request.gemini_api_key,
             figure_inventory=refine_figure_inventory,
         )
         await awrite_text(design_spec_path, design_spec, encoding="utf-8")
@@ -1003,6 +1016,7 @@ async def run_refine_pipeline(
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     pptx_path = project_dir / "exports" / f"presentation_{timestamp}.pptx"
+    pptx_path.parent.mkdir(parents=True, exist_ok=True)
 
     async with heavy_stage_slot():
         await aoffload(

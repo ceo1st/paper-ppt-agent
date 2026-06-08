@@ -9,14 +9,45 @@ from __future__ import annotations
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
 from backend.config import CANVAS_FORMATS
+
+
+DEFAULT_PROJECT_SUBDIRS = (
+    "svg_output",
+    "svg_final",
+    "images",
+    "notes",
+    "templates",
+    "sources",
+    "exports",
+)
+
+PROVIDER_PROJECT_SUBDIRS = (
+    "svg_output",
+    "sources",
+)
+
+_DIR_ROLES = {
+    "svg_output": "live SVG slides generated page by page",
+    "svg_final": "post-processed SVGs created during finalize/export",
+    "sources": "parsed source paper text and extracted paper figures",
+    "provider_memory": "private paper grounding, evidence cards, and slide contexts",
+    "debug": "LLM prompts/responses and intermediate research/debug traces",
+    "svg_archive": "repair/refine snapshots of SVG attempts",
+    "exports": "finished PPTX downloads",
+    "notes": "speaker notes matched to SVG stems",
+    "templates": "copied template references for Agent/template-aware runs",
+    "images": "user web-image-search downloads",
+}
 
 
 def init_project(
     name: str,
     canvas_format: str = "ppt169",
     base_dir: Path = Path("workspaces"),
+    initial_subdirs: Iterable[str] | None = None,
 ) -> Path:
     """Create a new project directory with required structure.
 
@@ -35,30 +66,54 @@ def init_project(
     project_dir = base_dir / project_name
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create required subdirectories
-    for subdir in [
-        "svg_output",
-        "svg_final",
-        "images",
-        "notes",
-        "templates",
-        "sources",
-        "exports",
-    ]:
+    # Create only the directories required at job start. Other well-known
+    # workspace directories are created lazily by the stage that owns them so
+    # aborted/partial runs remain easy to inspect.
+    subdirs = tuple(initial_subdirs) if initial_subdirs is not None else DEFAULT_PROJECT_SUBDIRS
+    for subdir in subdirs:
         (project_dir / subdir).mkdir(exist_ok=True)
 
-    # Write project metadata
-    fmt = CANVAS_FORMATS.get(canvas_format, CANVAS_FORMATS["ppt169"])
-    readme = project_dir / "README.md"
-    readme.write_text(
-        f"# {name}\n\n"
-        f"- **Format**: {fmt['name']} ({fmt['ratio']})\n"
-        f"- **ViewBox**: `{fmt['viewbox']}`\n"
-        f"- **Created**: {date_str}\n",
-        encoding="utf-8",
+    _write_workspace_manifest(
+        project_dir,
+        name=name,
+        canvas_format=canvas_format,
+        created=date_str,
+        initial_subdirs=subdirs,
     )
 
     return project_dir
+
+
+def _write_workspace_manifest(
+    project_dir: Path,
+    *,
+    name: str,
+    canvas_format: str,
+    created: str,
+    initial_subdirs: Iterable[str],
+) -> None:
+    fmt = CANVAS_FORMATS.get(canvas_format, CANVAS_FORMATS["ppt169"])
+    subdir_set = set(initial_subdirs)
+    lines = [
+        f"# {name}",
+        "",
+        f"- **Format**: {fmt['name']} ({fmt['ratio']})",
+        f"- **ViewBox**: `{fmt['viewbox']}`",
+        f"- **Created**: {created}",
+        "",
+        "## Key Files",
+        "",
+        "- `manuscript.md`: slide manuscript created by research/planning",
+        "- `design_spec.md`: visual plan and per-slide layout contract",
+        "- `deck_plan.md`: normalized slide matrix used by SVG generation",
+        "",
+        "## Directories",
+        "",
+    ]
+    for name_key in sorted(_DIR_ROLES):
+        status = "created at start" if name_key in subdir_set else "created on demand"
+        lines.append(f"- `{name_key}/`: {_DIR_ROLES[name_key]} ({status})")
+    (project_dir / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def clone_project_for_refine(

@@ -1,6 +1,6 @@
 # Pass 2: Narrative Arc Design
 
-You are a presentation storyteller. Given a deep analysis of an academic paper, design a **narrative arc** for a slide presentation that makes the audience *feel* the paper's contribution.
+You are a presentation strategist. Given a source-grounded deep analysis of an academic paper, design a coherent narrative that helps the audience understand the paper without overstating it.
 
 This is NOT a section-by-section outline. Design a story with tension, climax, and resolution.
 
@@ -10,10 +10,12 @@ This is NOT a section-by-section outline. Design a story with tension, climax, a
 
 Select the strategy that best fits this paper's content:
 
-- **Problem-Solution** (default): Build tension around the problem, reveal the method as the resolution, validate with results. Best for papers with a clear, novel solution.
-- **Evolutionary**: Show how the field evolved to this point, position this work as the natural next step. Best for incremental but well-motivated contributions.
-- **Contrarian**: Open with a prevailing assumption, then show why it's wrong. Best for papers that challenge conventional wisdom.
-- **Anatomy**: Dissect a complex system piece by piece, showing how each part contributes. Best for systems/architecture papers.
+- **Question-Evidence**: Introduce the research question, then build the answer through evidence or argument.
+- **Problem-Response**: Explain a concrete problem, the paper's response, and the limits of that response.
+- **Debate-Position**: Map a controversy or competing interpretations before presenting the paper's position.
+- **Process-Outcome**: Follow a method, intervention, historical process, proof, or analytic sequence to its results.
+- **Concept-Application**: Explain a theory or construct, then show how the paper applies, tests, or revises it.
+- **Anatomy**: Dissect a complex method, corpus, system, argument, or case when understanding parts and relationships is central.
 
 State your choice and briefly justify it (1-2 sentences).
 
@@ -25,21 +27,20 @@ Every presentation needs these narrative beats. Design each:
 - **What grabs attention?** A concrete scenario, striking number, provocative question, or vivid failure case.
 - **Core insight**: The one thing that makes the audience lean forward.
 
-### Tension (1-2 slides)
-- **What's broken?** The specific problem, gap, or limitation.
-- **Why does it matter?** Consequence of not solving it.
-- **What has blocked progress?** Prior attempts and why they fell short.
+### Context and Stakes (1-2 slides)
+- What question, problem, debate, or evidence gap organizes the paper?
+- Why does it matter in its actual scholarly or practical context?
+- Which prior approaches or interpretations are relevant, without caricaturing them?
 
-### Core Insight (1 slide)
-- **The "aha moment"**: The key idea, distilled to its essence. This is the climax of the narrative.
+### Central Contribution (1 slide)
+- State the paper's central contribution at the strength supported by the evidence ledger.
 
-### Mechanism (1-3 slides)
-- **How it works**: Enough depth to convince, not overwhelm.
-- For each slide: Which aspect of the method? What's the one takeaway?
+### Approach or Argument (1-3 slides)
+- Explain the method, materials, theory, cases, sources, proof, or reasoning structure appropriate to the paper.
 
 ### Evidence (1-3 slides)
-- **Proof it works**: Focus on the most persuasive results.
-- For each slide: What does this result prove? What's the most compelling comparison?
+- Focus on the most probative results, passages, observations, cases, comparisons, or formal steps.
+- Say what each item supports and what remains uncertain.
 
 ### Implications (1-2 slides)
 - **What this enables**: New capabilities, better understanding, or practical impact.
@@ -51,31 +52,33 @@ Every presentation needs these narrative beats. Design each:
 
 ## Step 3: Assign Content per Slide
 
-Before listing slides, internally group the deck into chapters. A `chapter` /
-transition slide is only valid when it introduces at least **two** following
-`content` slides. If a topic would have only one content slide, merge it into a
-neighboring chapter and mark that topic slide as `content` instead of creating a
-standalone divider.
+Before listing slides, internally group the deck into chapters. Count
+structural pages separately, then use the remaining content-slide budget to
+choose chapter boundaries from the paper's real content logic. Chapters are
+presentation-level sections, not paper subsection headings. Slide 2 is a
+mandatory table of contents whose chapter titles must match the final chapter
+plan. Keep local pivots as `content` slides with clear section labels.
 
 For each slide, specify in this exact format:
 
 ```
 Slide N: [Title]
-  Page type: [cover/chapter/content/ending]
+  Page type: [cover/toc/chapter/content/ending]
   Narrative role: [Hook/Tension/Core Insight/Mechanism/Evidence/Implications/Coda]
   Core insight: [The one thing the audience must remember]
   Key evidence: [Data point, figure, or argument that supports the insight]
   Visual strategy: [How to present — comparison, flow diagram, data table, before/after, etc.]
-  Detail density: [light/normal/rich — how much content this slide should carry]
+  Detail density: [page-derived — how much this particular slide should carry]
 ```
 
 ---
 
 ## Design Guidelines
 
-- **No filler slides**: Every slide must earn its place. If a slide doesn't advance understanding, merge it or cut it.
-- **Structural budget**: Cover, chapter/transition, content, and ending pages are counted slides. Keep the requested budget stable.
-- **Chapter grouping**: Do not create orphan or thin chapters. Every chapter divider must be followed by at least 2 content slides before the next chapter/ending page.
+- **No filler slides**: Every slide must earn its place. If a slide doesn't advance understanding, cut it and reallocate the budget.
+- **Structural budget**: Cover, table-of-contents, chapter/transition, content, and ending pages are counted slides. Keep the requested budget stable, but choose chapter boundaries from the content-slide budget after reserving structural pages.
+- **Mandatory TOC**: Slide 2 is always a table of contents and mirrors the final chapter titles.
+- **Chapter grouping**: Use dividers only for presentation-level sections. Keep paper subsection headings inside content slides.
 - **Minimal dividers**: Chapter slides are only title/subtitle/orientation slides. Detailed labels such as `核心问题` / `本章看点`, bullets, figures, metrics, and evidence must be assigned to content slides.
 - **Ending page**: Use it as a closing/thanks page, not a final content summary.
 - **Narrative momentum**: Each slide should create anticipation for the next. The audience should always wonder "and then what?"

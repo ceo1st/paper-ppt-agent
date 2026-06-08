@@ -525,12 +525,16 @@ export default () => {
   }
 
   // 导入PPTX文件
-  const importPPTXFile = (files: FileList | File[], options?: { cover?: boolean; fixedViewport?: boolean }) => {
+  const importPPTXFile = (
+    files: FileList | File[],
+    options?: { cover?: boolean; fixedViewport?: boolean; notifyOnError?: boolean },
+  ) => {
     const defaultOptions = {
       cover: false,
-      fixedViewport: false, 
+      fixedViewport: false,
+      notifyOnError: true,
     }
-    const { cover, fixedViewport } = { ...defaultOptions, ...options }
+    const { cover, fixedViewport, notifyOnError } = { ...defaultOptions, ...options }
 
     const file = files[0]
     if (!file) return
@@ -554,7 +558,7 @@ export default () => {
       }
       catch {
         exporting.value = false
-        message.error('无法正确读取 / 解析该文件')
+        if (notifyOnError) message.error('无法正确读取 / 解析该文件')
         return
       }
 

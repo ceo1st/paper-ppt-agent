@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BookOpen, Eye, EyeOff, FlaskConical, HelpCircle, Key, Layers, Puzzle, Search, Settings2, Sparkles } from "lucide-react";
+import { BookOpen, Eye, EyeOff, FlaskConical, HelpCircle, Key, Layers, Search, Settings2, Sparkles } from "lucide-react";
 import { useLocale } from "../../i18n";
 import type { ResearchConfig, TemplateInfo } from "../../lib/types";
 import { FontSelector } from "./FontSelector";
@@ -23,9 +23,6 @@ interface OptionsPanelProps {
   instruction: string;
   enableDeepResearch: boolean;
   enableVisualCritic: boolean;
-  enableIcon: boolean;
-  enableIconRag: boolean;
-  geminiApiKey: string;
   templateId: string;
   templates: TemplateInfo[];
   density: string;
@@ -48,9 +45,6 @@ interface OptionsPanelProps {
   onInstructionChange: (value: string) => void;
   onEnableDeepResearchChange: (value: boolean) => void;
   onEnableVisualCriticChange: (value: boolean) => void;
-  onEnableIconChange: (value: boolean) => void;
-  onEnableIconRagChange: (value: boolean) => void;
-  onGeminiApiKeyChange: (value: string) => void;
   onTemplateChange: (value: string) => void;
   onDensityChange: (value: string) => void;
   onCustomFontChange: (value: string) => void;
@@ -63,7 +57,6 @@ interface OptionsPanelProps {
 
 export function OptionsPanel(props: OptionsPanelProps) {
   const { t } = useLocale();
-  const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [showScholarKey, setShowScholarKey] = useState(false);
   const [showTavilyKey, setShowTavilyKey] = useState(false);
   const [showSerpApiKey, setShowSerpApiKey] = useState(false);
@@ -312,82 +305,6 @@ export function OptionsPanel(props: OptionsPanelProps) {
                   value={props.parallelConcurrency}
                   onChange={(event) => props.onParallelConcurrencyChange(event.target.value)}
                 />
-              </label>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-      ) : null}
-
-      {/* Icon section */}
-      {!props.agentMode ? (
-      <div className="options-icon-section">
-        <label className="visual-qa-field visual-qa-field-wide">
-          <span
-            className={`visual-qa-control ${
-              props.enableIcon ? "visual-qa-control-active" : ""
-            }`}
-          >
-            <span className="visual-qa-icon" aria-hidden="true">
-              <Puzzle size={16} />
-            </span>
-            <span className="visual-qa-copy">
-              <span className="visual-qa-name">{t("options.enableIcon")}</span>
-            </span>
-            <ConfigHelp text={t("options.enableIconTooltip")} />
-            <Switch
-              checked={props.enableIcon}
-              onCheckedChange={(checked) => {
-                props.onEnableIconChange(checked);
-                if (!checked) {
-                  props.onEnableIconRagChange(false);
-                }
-              }}
-            />
-          </span>
-        </label>
-
-        {props.enableIcon ? (
-          <div className="options-icon-sub">
-            <label className="visual-qa-field visual-qa-child-field">
-              <span
-                className={`visual-qa-control ${
-                  props.enableIconRag ? "visual-qa-control-active" : ""
-                }`}
-              >
-                <span className="visual-qa-icon" aria-hidden="true">
-                  <Puzzle size={14} />
-                </span>
-                <span className="visual-qa-copy">
-                  <span className="visual-qa-name">{t("options.iconRag")}</span>
-                </span>
-                <ConfigHelp text={t("options.iconRagTooltip")} />
-                <Switch checked={props.enableIconRag} onCheckedChange={props.onEnableIconRagChange} />
-              </span>
-            </label>
-            {props.enableIconRag ? (
-              <label className="form-field options-api-key-field">
-                <span>
-                  <Key size={12} style={{ marginRight: 4, verticalAlign: "middle" }} />
-                  Gemini API Key
-                </span>
-                <div className="form-field-icon api-key-wrapper">
-                  <Key size={14} className="field-icon" />
-                  <input
-                    type={showGeminiKey ? "text" : "password"}
-                    value={props.geminiApiKey}
-                    onChange={(event) => props.onGeminiApiKeyChange(event.target.value)}
-                    placeholder="AIza..."
-                  />
-                  <button
-                    type="button"
-                    className="api-key-toggle"
-                    onClick={() => setShowGeminiKey((v) => !v)}
-                    tabIndex={-1}
-                  >
-                    {showGeminiKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                  </button>
-                </div>
               </label>
             ) : null}
           </div>
@@ -662,7 +579,7 @@ export function OptionsPanel(props: OptionsPanelProps) {
         />
       </label>
 
-      <label className="form-field">
+      <label className="form-field instruction-section-field">
         <span>{t("options.instruction")}</span>
         <textarea
           rows={4}

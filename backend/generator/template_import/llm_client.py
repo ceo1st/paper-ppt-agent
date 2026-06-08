@@ -527,6 +527,7 @@ class LLMClient:
                 provider_name,
                 api_key,
                 base_url=model_config.get("base_url"),
+                artifact_thinking_mode=model_config.get("artifact_thinking_mode", "disabled"),
                 deepseek_settings=model_config.get("deepseek_settings"),
                 openai_settings=model_config.get("openai_settings"),
             )

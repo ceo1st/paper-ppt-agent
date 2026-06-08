@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import fields
 import json
 import logging
 import sys
@@ -45,7 +46,11 @@ def _request_from_payload(payload: dict[str, Any]) -> Any:
     data["file_path"] = Path(data["file_path"])
     if isinstance(data.get("research_config"), dict):
         data["research_config"] = ResearchConfig(**data["research_config"])
-    return GenerationRequest(**data)
+    allowed = {field.name for field in fields(GenerationRequest)}
+    ignored = sorted(set(data) - allowed)
+    if ignored:
+        logger.info("Ignoring deprecated/unknown generation request fields: %s", ", ".join(ignored))
+    return GenerationRequest(**{key: value for key, value in data.items() if key in allowed})
 
 
 async def _run(request_path: Path) -> int:

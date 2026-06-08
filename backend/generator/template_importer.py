@@ -2094,6 +2094,7 @@ async def _call_template_import_llm(model_config: dict[str, Any], payload: dict[
         model_config["provider"],
         model_config["api_key"],
         base_url=model_config.get("base_url"),
+        artifact_thinking_mode=model_config.get("artifact_thinking_mode", "disabled"),
         deepseek_settings=model_config.get("deepseek_settings"),
         openai_settings=model_config.get("openai_settings"),
     )
@@ -2185,6 +2186,7 @@ async def _call_template_design_spec_llm(
         model_config["provider"],
         model_config["api_key"],
         base_url=model_config.get("base_url"),
+        artifact_thinking_mode=model_config.get("artifact_thinking_mode", "disabled"),
         deepseek_settings=model_config.get("deepseek_settings"),
         openai_settings=model_config.get("openai_settings"),
     )

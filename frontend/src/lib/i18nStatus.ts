@@ -98,6 +98,7 @@ export function translateJobMessage(message: string | undefined, locale: Locale)
     "Agent is applying feedback...": "Agent 正在根据反馈调整...",
     "Agent pause requested. Send guidance to continue.": "已请求暂停 Agent。发送指导后可继续。",
     "Pausing Agent...": "正在暂停 Agent...",
+    "Cancelling Agent...": "正在取消 Agent...",
     "Agent paused. Send guidance to continue from the current workspace.": "Agent 已暂停。发送指导后将从当前工作区继续。",
     "Agent is applying guidance...": "Agent 正在根据指导继续...",
     "Interrupt requested. Waiting for the Agent to pause...": "已请求中断，正在等待 Agent 暂停...",

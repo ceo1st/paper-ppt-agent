@@ -11,11 +11,11 @@ _PAGE_TYPE_RE = re.compile(
 _HEADING_RE = re.compile(r"(?m)^#{1,3}\s+(.+?)\s*$")
 
 PageType = str
-DEFAULT_AUTO_SLIDE_RANGE = (16, 20)
+DEFAULT_AUTO_SLIDE_RANGE = (16, 24)
 DETAIL_AUTO_SLIDE_RANGES = {
-    "normal": (15, 22),
-    "high": (18, 28),
-    "very_high": (22, 34),
+    "normal": (16, 24),
+    "high": (22, 34),
+    "very_high": (28, 44),
 }
 
 
@@ -40,7 +40,11 @@ def normalize_manuscript_slide_delimiters(manuscript: str) -> str:
         return text
 
     delimiter_pages = [page.strip() for page in _SLIDE_DELIMITER_RE.split(text) if page.strip()]
-    if len(delimiter_pages) >= len(markers):
+    delimiters_already_valid = (
+        len(delimiter_pages) == len(markers)
+        and all(_PAGE_TYPE_RE.search(page) for page in delimiter_pages)
+    )
+    if delimiters_already_valid:
         return text
 
     prefix = text[: markers[0].start()].strip()
@@ -104,21 +108,41 @@ def page_type_budget(
     """Return the structural slide budget included in the total slide count."""
     if not num_pages:
         min_pages, _max_pages = auto_slide_range(detail_level)
-        return {"cover": 1, "chapter": 3, "content": min_pages - 5, "ending": 1}
+        chapter_count = {
+            "normal": 3,
+            "high": 4,
+            "very_high": 5,
+        }.get(detail_level, 3)
+        return {
+            "cover": 1,
+            "toc": 1,
+            "chapter": chapter_count,
+            "content": max(1, min_pages - 3 - chapter_count),
+            "ending": 1,
+        }
     if num_pages <= 1:
-        return {"cover": 0, "chapter": 0, "content": 1, "ending": 0}
+        return {"cover": 0, "toc": 0, "chapter": 0, "content": 1, "ending": 0}
     if num_pages == 2:
-        return {"cover": 1, "chapter": 0, "content": 0, "ending": 1}
+        return {"cover": 1, "toc": 1, "chapter": 0, "content": 0, "ending": 0}
+    if num_pages == 3:
+        return {"cover": 1, "toc": 1, "chapter": 0, "content": 1, "ending": 0}
 
-    chapter_count = 1
-    if num_pages >= 12:
+    chapter_count = 0
+    if num_pages >= 30:
+        chapter_count = 5
+    elif num_pages >= 18:
+        chapter_count = 4
+    elif num_pages >= 12:
         chapter_count = 3
     elif num_pages >= 9:
         chapter_count = 2
+    elif num_pages >= 5:
+        chapter_count = 1
 
-    content_count = max(1, num_pages - 2 - chapter_count)
+    content_count = max(1, num_pages - 3 - chapter_count)
     return {
         "cover": 1,
+        "toc": 1,
         "chapter": chapter_count,
         "content": content_count,
         "ending": 1,
@@ -131,36 +155,38 @@ def page_type_budget_guidance(
 ) -> str:
     budget = page_type_budget(num_pages, detail_level)
     if num_pages:
-        lead = f"Produce exactly {num_pages} slides; the structural pages are included in that total."
+        lead = f"Produce exactly {num_pages} slides total; reserve structural pages separately when planning content."
     else:
         min_pages, max_pages = auto_slide_range(detail_level)
-        lead = (
-            f"Choose {min_pages}-{max_pages} slides for detail level `{detail_level}` "
-            "based on paper complexity; structural pages are included."
-        )
+        lead = f"Choose {min_pages}-{max_pages} total slides; reserve structural pages separately when planning content."
         return (
             f"{lead}\n"
-            "- Planning: use chapter/transition slides only when they help the narrative; usually 2-5, or the user-requested chapter count if specified. Do not force a fixed chapter count.\n"
-            "- Put `<!-- page_type: cover|chapter|content|ending -->` at the top of every slide.\n"
-            "- Cover, chapter/transition, and ending pages are real slides, not styling guesses.\n"
+            "- The table of contents is mandatory and must be slide 2, immediately after the cover. Its chapter titles must match the final chapter plan.\n"
+            f"- Chapter count ceiling: use at most {budget['chapter']} chapter/transition slide(s).\n"
+            "- Chapter granularity: chapters are presentation-level sections, not paper subsection headings. Put local method parts, result groups, and discussion points on content slides.\n"
+            "- Planning: count structural pages separately and use the remaining content-slide budget to choose chapter boundaries.\n"
+            "- Put `<!-- page_type: cover|toc|chapter|content|ending -->` at the top of every slide.\n"
+            "- Never put a `---` delimiter immediately after a page_type metadata line; the slide content must follow the metadata line, and `---` appears only between complete slides.\n"
+            "- Cover, table-of-contents, chapter/transition, and ending pages are structural slides: count them in the total, but not in the content-slide budget.\n"
             "- Cover pages are lightweight title/meta slides: title, optional subtitle, paper metadata (authors/source/venue/date when available), and a few short context or thesis lines. Do not insert paper figures or turn the cover into a detailed content slide.\n"
             "- Chapter/ending pages are minimal structural slides: no bullets, numbered question lists, metrics/KPI blocks, paper figures, or labeled blocks such as `核心问题` / `本章看点`.\n"
             "- Keep all chapter/transition pages in the same shape: chapter title plus optional short subtitle/orientation phrase only.\n"
-            "- Place chapter/transition pages before major chapter blocks; each chapter divider should normally introduce at least 2 following content slides.\n"
-            "- If a section would have only 1 content slide, merge that topic into a neighboring section instead of creating a standalone chapter divider.\n"
             "- The ending page is a closing/thanks slide, not another content summary."
         )
     return (
         f"{lead}\n"
-        f"- Suggested structure: cover {budget['cover']}, about {budget['chapter']} chapter/transition slide(s), "
-        f"content about {budget['content']}, ending {budget['ending']}. Treat chapter count as a planning hint; follow any user-requested chapter count when specified.\n"
-        "- Put `<!-- page_type: cover|chapter|content|ending -->` at the top of every slide.\n"
-        "- Cover, chapter/transition, and ending pages are real slides, not styling guesses.\n"
+        f"- Planning budget: cover {budget['cover']}, table of contents {budget['toc']}, up to {budget['chapter']} chapter/transition slide(s), "
+        f"content about {budget['content']}, ending {budget['ending']}. Use the content-slide budget, not the structural slides, to decide chapter count.\n"
+        "- The table of contents is mandatory and must be slide 2, immediately after the cover. Its chapter titles must match the final chapter plan.\n"
+        f"- Chapter count ceiling: use at most {budget['chapter']} chapter/transition slide(s).\n"
+        "- Chapter granularity: chapters are presentation-level sections, not paper subsection headings. Put local method parts, result groups, and discussion points on content slides.\n"
+        "- Planning: count structural pages separately and use the remaining content-slide budget to choose chapter boundaries.\n"
+        "- Put `<!-- page_type: cover|toc|chapter|content|ending -->` at the top of every slide.\n"
+        "- Never put a `---` delimiter immediately after a page_type metadata line; the slide content must follow the metadata line, and `---` appears only between complete slides.\n"
+        "- Cover, table-of-contents, chapter/transition, and ending pages are structural slides: count them in the total, but not in the content-slide budget.\n"
         "- Cover pages are lightweight title/meta slides: title, optional subtitle, paper metadata (authors/source/venue/date when available), and a few short context or thesis lines. Do not insert paper figures or turn the cover into a detailed content slide.\n"
         "- Chapter/ending pages are minimal structural slides: no bullets, numbered question lists, metrics/KPI blocks, paper figures, or labeled blocks such as `核心问题` / `本章看点`.\n"
         "- Keep all chapter/transition pages in the same shape: chapter title plus optional short subtitle/orientation phrase only.\n"
-        "- Place chapter/transition pages before major chapter blocks; each chapter divider should normally introduce at least 2 following content slides.\n"
-        "- If a section would have only 1 content slide, merge that topic into a neighboring section instead of creating a standalone chapter divider.\n"
         "- The ending page is a closing/thanks slide, not another content summary."
     )
 

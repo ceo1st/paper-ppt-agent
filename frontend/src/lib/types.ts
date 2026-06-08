@@ -105,9 +105,6 @@ export interface GenerationOptions {
   enable_deep_research?: boolean;
   enable_visual_critic?: boolean;
   visual_qa_max_attempts?: number;
-  enable_icon?: boolean;
-  enable_icon_rag?: boolean;
-  gemini_api_key?: string;
   template_id?: string;
   research_config?: ResearchConfig;
 }
@@ -353,6 +350,7 @@ export interface GenerateRequestPayload {
     model: string;
     api_key: string;
     base_url?: string;
+    artifact_thinking_mode?: "disabled" | "default";
     deepseek_settings?: DeepSeekSettings;
     openai_settings?: OpenAISettings;
   };
@@ -537,6 +535,8 @@ export interface PreviewSlide {
   name: string;
   source: string;
   content: string;
+  svg_valid?: boolean;
+  svg_error?: string | null;
   notes?: string;
   document?: SlideDocument | null;
   render_url?: string | null;
@@ -766,6 +766,7 @@ export interface RefineRequestPayload {
     model: string;
     api_key: string;
     base_url?: string;
+    artifact_thinking_mode?: "disabled" | "default";
     deepseek_settings?: DeepSeekSettings;
     openai_settings?: OpenAISettings;
   };

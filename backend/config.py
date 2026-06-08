@@ -116,13 +116,19 @@ class Settings(BaseSettings):
     # while leaving headroom for slow reasoning calls (strategy ~227s seen,
     # may run longer for dense papers on slower models like Opus).
     llm_request_timeout: float = 420.0
+    # SVG generation often needs more than 8k output tokens for dense,
+    # editable slides. Keep this configurable because provider-compatible
+    # endpoints expose different per-model output caps.
+    svg_generation_max_tokens: int = 16384
+    svg_generation_max_tokens_ceiling: int = 32768
+    svg_repair_max_tokens: int = 8192
 
     # ── Job scheduling ───────────────────────────────────────────────────
     # Backlog cap for queued jobs; a 16th queued job returns 429.
     job_queue_capacity: int = 16
-    # Number of Huey consumer slots for provider-backed generation. When 0,
-    # the worker picks a conservative value from local CPU/memory.
-    generation_worker_concurrency: int = 0
+    # Number of concurrent provider-backed generation jobs. Keep the default
+    # independent of local CPU and memory so deployments behave consistently.
+    generation_worker_concurrency: int = 4
 
     # ── External tool timeouts (seconds) ─────────────────────────────────
     pandoc_timeout: int = 60

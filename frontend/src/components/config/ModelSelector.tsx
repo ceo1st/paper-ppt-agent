@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { DeepSeekSettings, OpenAISettings, ProviderListItem } from "../../lib/types";
 import { useLocale } from "../../i18n";
-import { Bot, Cpu, Zap, Globe, Key, Eye, EyeOff, BrainCircuit } from "lucide-react";
+import { Bot, Cpu, Zap, Globe, Key, Eye, EyeOff, BrainCircuit, HelpCircle } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -14,12 +14,14 @@ interface ModelSelectorProps {
   model: string;
   baseUrl: string;
   apiKey: string;
+  artifactThinkingMode: "disabled" | "default";
   deepSeekSettings: DeepSeekSettings;
   openAISettings: OpenAISettings;
   onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onBaseUrlChange: (baseUrl: string) => void;
   onApiKeyChange: (apiKey: string) => void;
+  onArtifactThinkingModeChange: (mode: "disabled" | "default") => void;
   onDeepSeekSettingsChange: (settings: DeepSeekSettings) => void;
   onOpenAISettingsChange: (settings: OpenAISettings) => void;
 }
@@ -30,12 +32,14 @@ export function ModelSelector({
   model,
   baseUrl,
   apiKey,
+  artifactThinkingMode,
   deepSeekSettings,
   openAISettings,
   onProviderChange,
   onModelChange,
   onBaseUrlChange,
   onApiKeyChange,
+  onArtifactThinkingModeChange,
   onDeepSeekSettingsChange,
   onOpenAISettingsChange,
 }: ModelSelectorProps) {
@@ -45,6 +49,7 @@ export function ModelSelector({
   const [showKey, setShowKey] = useState(false);
   const isDeepSeek = provider === "deepseek";
   const showOpenAISettings = provider === "openai" && isGpt5OrNewer(model);
+  const showArtifactThinking = (provider === "openai" || provider === "deepseek") && !showOpenAISettings;
   const selectedProviderIcon = getProviderIcon(provider, selectedProvider?.display_name);
 
   return (
@@ -55,7 +60,6 @@ export function ModelSelector({
             <Bot size={15} className="panel-title-icon" />
             <p className="panel-title">{t("model.title")}</p>
           </div>
-          <p className="panel-support-text">{selectedProvider?.display_name ?? t("model.waiting")}</p>
         </div>
       </div>
 
@@ -141,6 +145,34 @@ export function ModelSelector({
           </Button>
         </div>
       </label>
+
+      {showArtifactThinking ? (
+        <label className="form-field">
+          <span>
+            {t("model.artifactThinking")}
+            <HoverTooltip content={t("model.artifactThinkingTooltip")} className="config-help">
+              <HelpCircle size={13} aria-label={t("model.artifactThinkingTooltip")} />
+            </HoverTooltip>
+          </span>
+          <div className="form-field-icon">
+            <BrainCircuit size={14} className="field-icon" />
+            <Select
+              value={artifactThinkingMode}
+              onValueChange={(value) =>
+                onArtifactThinkingModeChange(value as "disabled" | "default")
+              }
+            >
+              <SelectTrigger className="pl-9">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="disabled">{t("model.artifactThinkingDisabled")}</SelectItem>
+                <SelectItem value="default">{t("model.artifactThinkingDefault")}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </label>
+      ) : null}
 
       {isDeepSeek ? (
         <div className="deepseek-settings">

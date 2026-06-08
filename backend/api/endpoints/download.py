@@ -76,12 +76,12 @@ async def reexport_presentation(job_id: str) -> ReexportResponse:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     canvas_format = job.canvas_format or "ppt169"
     output_path = project_dir / "exports" / f"presentation_{timestamp}.pptx"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     from backend.runtime import aoffload
 
     edited_deck = _edited_pptist_deck(project_dir) or _dirty_scene_deck(project_dir)
     if edited_deck is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
         await aoffload(shutil.copy2, edited_deck, output_path)
         await aoffload(sanitize_pptx_file, output_path)
         _raise_if_invalid_pptx(output_path)

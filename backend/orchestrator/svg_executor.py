@@ -26,6 +26,7 @@ from backend.generator.visual_critic import VisualCriticConfig, visual_check
 from backend.llm import LLMMessage, LLMProvider, LLMResponse
 from backend.orchestrator.deck_plan import (
     build_deck_plan,
+    deck_generation_context_markdown,
     deck_plan_markdown,
     slide_plan_markdown,
 )
@@ -33,10 +34,6 @@ from backend.orchestrator.manuscript import (
     extract_page_type,
     split_manuscript_pages,
     strip_page_type_metadata,
-)
-from backend.orchestrator.provider_guidance import (
-    deepseek_executor_guidance,
-    is_deepseek_provider,
 )
 from backend.usage.tracker import reset_usage_context, set_usage_context
 
@@ -60,6 +57,12 @@ FIGURE_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{\{[A-Z0-9_]+\}\}")
+TOC_TEMPLATE_PLACEHOLDER_RE = re.compile(
+    r"\{\{TOC_ITEM_\d+(?:_(?:TITLE|DESC))?\}\}"
+)
+NON_TOC_TEMPLATE_PLACEHOLDER_RE = re.compile(
+    r"\{\{(?!TOC_ITEM_\d+(?:_(?:TITLE|DESC))?\}\})[A-Z0-9_]+\}\}"
+)
 TEXT_BLOCK_RE = re.compile(r"<text\b(?P<attrs>[^>]*)>(?P<body>.*?)</text>", re.IGNORECASE | re.DOTALL)
 TEXT_X_ATTR_RE = re.compile(r'\bx=(["\'])(?P<value>[^"\']+)\1', re.IGNORECASE)
 TEXT_ANCHOR_ATTR_RE = re.compile(r"\btext-anchor\s*=", re.IGNORECASE)
@@ -76,19 +79,19 @@ PROMPT_PATH = Path(__file__).parent / "prompts" / "executor.md"
 # post-generation check. 0 disables review entirely.
 DEFAULT_MAX_CRITIC_ATTEMPTS = 0
 
-# Max prior page exchanges kept in the conversation (sliding window).
-# Each page generates 1 user + 1 assistant exchange plus bounded repair rounds.
-# Keeping 2 pages of context balances style consistency vs. token cost.
+# Maximum number of prior same-type SVGs used as continuity references.
 MAX_PRIOR_PAGES_IN_CONTEXT = 2
 
 # Initial response plus bounded same-page retries when no SVG can be extracted.
 MAX_SVG_EXTRACTION_ATTEMPTS = 3
-SVG_GENERATION_MAX_TOKENS = 8192
-SVG_REPAIR_MAX_TOKENS = 8192
+SVG_GENERATION_MAX_TOKENS = max(8192, int(settings.svg_generation_max_tokens or 16384))
+SVG_GENERATION_MAX_TOKENS_CEILING = max(
+    SVG_GENERATION_MAX_TOKENS,
+    int(settings.svg_generation_max_tokens_ceiling or 32768),
+)
+SVG_REPAIR_MAX_TOKENS = max(4096, int(settings.svg_repair_max_tokens or 8192))
 MAX_DESIGN_SECTION_CHARS = 1800
-MAX_PAGE_DESIGN_CHARS = 2600
 STRUCTURAL_PAGE_TYPES = frozenset({"cover", "chapter", "toc", "ending"})
-FIGURE_SAFETY_CRITIC_ATTEMPTS = 2
 
 CriticMetadata = dict[str, object]
 CriticCallback = Callable[
@@ -169,6 +172,17 @@ def _drop_paper_figure_tokens_for_structural_page(page_content: str) -> str:
 
 def _page_role_guidance(page_type: str) -> str:
     if page_type in STRUCTURAL_PAGE_TYPES:
+        if page_type == "toc":
+            return (
+                "- Page role boundary: render this as a table-of-contents page. "
+                "Use the title and the planned chapter/list items in order; do "
+                "not replace the list with a decorative title-only page.\n"
+                "- Content boundary: do not introduce template/example diagrams, "
+                "workflow charts, model architecture blocks, or non-TOC explanatory "
+                "visuals. Decoration is fine only when it does not become content.\n"
+                "- Chrome rule: if page numbering is visible, place it in the "
+                "footer only. Do not add top-left section/chapter/page counter labels."
+            )
         guidance = (
             "- Page role boundary: render this as a minimal structural page. "
             "Use the title, an optional short subtitle/key phrase, and sparse "
@@ -207,6 +221,17 @@ def _structural_page_override_block(page_type: str) -> str:
             "- Do not render extracted paper figures or turn the cover into a detailed "
             "background, contribution, metric, result, or evidence slide.\n"
         )
+    if page_type == "toc":
+        return (
+            "\n## Structural Page Override\n"
+            "- This override is stronger than decorative structural defaults for this page.\n"
+            "- Render the table of contents as title plus ordered chapter/list items from "
+            "the current manuscript or Page Design Contract.\n"
+            "- Only render the TOC title, list items, and restrained decorative chrome; "
+            "do not render template/sample diagrams or process-flow illustrations.\n"
+            "- Do not add paper figures, metrics, evidence cards, charts, KPI strips, or "
+            "dense article-content sections.\n"
+        )
     consistency = (
         "\n- For chapter pages, keep the same divider layout across all chapter "
         "slides. Vary only the section number, title, and optional subtitle/key phrase."
@@ -223,6 +248,94 @@ def _structural_page_override_block(page_type: str) -> str:
         "question lists, KPI strips, cards/panels, figures, charts, or mini-agendas "
         "on chapter/ending pages."
         f"{consistency}\n"
+    )
+
+
+def _factual_rendering_guardrails(page_type: str) -> str:
+    if page_type in STRUCTURAL_PAGE_TYPES:
+        if page_type == "toc":
+            return (
+                "\n## Factual Rendering Guardrails\n"
+                "- TOC pages may render only the planned chapter/list item titles and optional "
+                "short descriptors. Do not add metrics, evidence snippets, figures, charts, "
+                "workflow diagrams, model architecture blocks, or template example graphics.\n"
+            )
+        return (
+            "\n## Factual Rendering Guardrails\n"
+            "- Structural pages must not add metrics, charts, evidence cards, source snippets, "
+            "or retrieved-memory text. Render only title/meta/subtitle-level content.\n"
+        )
+    return (
+        "\n## Factual Rendering Guardrails\n"
+        "- Visible facts must come from the current page manuscript or Page Design Contract.\n"
+        "- Use Slide Context only to clarify this page's claim; do not introduce extra facts from it.\n"
+        "- Slide Context and evidence anchors are private grounding. Do not print card IDs, "
+        "section headings, raw snippets, or evidence-memory blocks as visible slide cards.\n"
+        "- Do not introduce new visible numbers, dates, percentages, sample sizes, ranks, "
+        "or axis tick values while drawing native SVG visuals.\n"
+        "- Preserve exact numeric precision from the page inputs. Do not round values "
+        "or invent chart scales unless they appear in the current page manuscript or Page Design Contract.\n"
+        "- If an exact chart would need invented ticks or interpolated values, draw a "
+        "qualitative diagram, ranked list, or bar comparison without numeric scale ticks.\n"
+    )
+
+
+def _layout_generation_guardrails(page_type: str, has_paper_figure: bool) -> str:
+    if page_type in STRUCTURAL_PAGE_TYPES:
+        return (
+            "\n## Layout Generation Guardrails\n"
+            "- Structural pages use centered or lightly asymmetric title composition only. "
+            "Do not create dense grids, figure/text splits, or bottom evidence callouts.\n"
+        )
+
+    figure_note = (
+        "- This page has a paper figure assignment: reserve the figure box first, then "
+        "calculate the final visible image rectangle from the actual aspect ratio before "
+        "allocating any text. Fit text/caption/callout regions around that rectangle. "
+        "Use a balanced image/text split "
+        "such as figure-left/text-right or figure-top/notes-bottom. Keep the figure "
+        "and text regions visually comparable in height; avoid a large blank quadrant.\n"
+        "- Do not center a small ratio-preserving image inside an oversized frame. "
+        "The visible image should occupy most of the reserved frame and normally fill "
+        "one inner dimension. If it would not, revise the region composition first.\n"
+        "- The assigned figure box height is a hard cap. The rendered image, its "
+        "caption, and any nearby callout text must fit inside the reserved region; "
+        "do not let a tall image push the next text block downward.\n"
+        if has_paper_figure
+        else "- If no paper figure is assigned, use a balanced text/diagram/card layout "
+        "rather than a sparse bullet list floating in empty space.\n"
+    )
+    return (
+        "\n## Layout Generation Guardrails\n"
+        "- Build the page from explicit rectangular regions before drawing details. "
+        "If the Page Design Contract includes `Region Plan`, follow those x/y/w/h boxes. "
+        "If it does not, choose one stable family: figure-left-text-right, "
+        "text-left-figure-right, two-column-evidence, three-card-grid, "
+        "process-flow-with-evidence, comparison-table-callout, or "
+        "full-width-chart-with-notes.\n"
+        "- Use shared gutters of 24-40px and align region edges. Content slides should "
+        "meaningfully occupy about 65-85% of the content area without edge crowding.\n"
+        "- Keep content boxes inside the content area; the footer band is not layout space.\n"
+        "- Avoid free-floating bullets, detached bottom callouts, and large blank bands. "
+        "A callout should align with the same column or span a clear full-width grid row.\n"
+        f"{figure_note}"
+        "- Wrap text dynamically from each actual region width, font size, and visual "
+        "share. Let ordinary non-final lines use most of their box width; avoid "
+        "conservative early breaks. Use semantic breaks and allow light raggedness.\n"
+        "- Text-box contract: place visible body/caption/callout text in an explicit "
+        "rectangle and keep every line inside it. Prefer wrapping related "
+        "text in `<g data-textbox=\"x y w h\" data-role=\"body|caption|callout|heading\">`; "
+        "keep headings and body paragraphs in separate groups. `data-*` attributes "
+        "are invisible and help post-processing preserve your intended boxes.\n"
+        "- Inline emphasis is allowed inside a sentence with `<tspan fill=\"...\">`, "
+        "but the complete sentence still belongs to one text box and must wrap as "
+        "a paragraph. Do not split an emphasized keyword into an isolated floating "
+        "line unless the phrase genuinely wraps there.\n"
+        "- While drawing text, keep baselines, descenders, padding, and right edges "
+        "inside the final Region Plan boxes.\n"
+        "- For tables, determine column widths from the longest visible label/cell first, "
+        "then place rows. Keep method names separate from numeric columns and right-align "
+        "numbers; never rely on guessed x positions that can overlap.\n"
     )
 
 
@@ -320,30 +433,61 @@ def _optimize_figure_choices(
     return optimized, notes
 
 
-def _figures_from_design_spec_for_page(
-    design_spec: str,
-    page_num: int,
+def _limit_figure_count_for_layout(
+    used_figures: list[dict],
+    *,
+    page_type: str,
+) -> tuple[list[dict], list[str]]:
+    """Keep figure-heavy slides readable without special-casing page numbers."""
+    if not used_figures:
+        return used_figures, []
+    if page_type in STRUCTURAL_PAGE_TYPES:
+        return [], [f"Removed {len(used_figures)} paper figure assignment(s) from structural page"]
+    if len(used_figures) <= 2:
+        return used_figures, []
+    kept = used_figures[:2]
+    omitted = used_figures[2:]
+    notes = [
+        "Limited paper figures to the 2 most central assignments so the slide can "
+        "preserve readable text and caption spacing."
+    ]
+    if omitted:
+        notes.append(
+            "Omitted figures on this slide: "
+            + ", ".join(Path(str(fig.get("path") or "")).stem for fig in omitted if fig.get("path"))
+        )
+    return kept, notes
+
+
+def _figures_from_page_references(
+    page_content: str,
     figure_inventory: list[dict] | None,
 ) -> list[dict]:
-    """Recover slide image assignments from the design spec as a safety net."""
+    """Resolve current-page figure/table labels to real inventory images."""
     if not figure_inventory:
         return []
-    page_pattern = (
-        rf"(?ims)^#+\s*(?:slide|page)\s*0*{page_num}\b.*?"
-        rf"(?=^#+\s*(?:slide|page)\s*0*\d+\b|\Z)"
-    )
-    page_match = re.search(page_pattern, design_spec)
-    if not page_match:
+
+    labels: list[tuple[str, str]] = []
+    seen_labels: set[tuple[str, str]] = set()
+    for match in FIGURE_LABEL_RE.finditer(page_content):
+        if match.group(1):
+            kind_raw = match.group(1).lower()
+            kind = "table" if kind_raw == "table" else "figure"
+            label = (kind, match.group(2))
+        else:
+            kind = "figure" if match.group(3) == "图" else "table"
+            label = (kind, match.group(4))
+        if label not in seen_labels:
+            seen_labels.add(label)
+            labels.append(label)
+    if not labels:
         return []
-    block = page_match.group(0)
-    image_ids = re.findall(r"(?im)^\s*-\s*\*\*Image\*\*\s*:\s*`([^`]+)`", block)
-    if not image_ids:
-        return []
-    by_id = _figure_alias_map(figure_inventory)
+
+    by_label = _figure_label_inventory(figure_inventory)
     figures: list[dict] = []
     seen: set[str] = set()
-    for image_id in image_ids:
-        fig = by_id.get(image_id.strip())
+    for label in labels:
+        fig = by_label.get(label)
         if not fig:
             continue
         stem = Path(str(fig.get("path") or "")).stem
@@ -352,6 +496,51 @@ def _figures_from_design_spec_for_page(
         seen.add(stem)
         figures.append(fig)
     return figures
+
+
+def _figure_label_inventory(
+    figure_inventory: list[dict],
+) -> dict[tuple[str, str], dict]:
+    candidates: dict[tuple[str, str], list[dict]] = {}
+    for fig in figure_inventory:
+        label = _extract_figure_label(str(fig.get("caption") or ""))
+        if label:
+            candidates.setdefault(label, []).append(fig)
+    return {
+        label: sorted(figs, key=lambda fig: _figure_label_rank(fig, label), reverse=True)[0]
+        for label, figs in candidates.items()
+    }
+
+
+def _figure_label_rank(fig: dict, label: tuple[str, str]) -> tuple[float, float, float, float]:
+    kind, number = label
+    caption = str(fig.get("caption") or "")
+    official = _caption_starts_with_label(caption, kind, number)
+    method = str(fig.get("extraction_method") or "")
+    flags = {str(flag) for flag in (fig.get("review_flags") or [])}
+    quality = _safe_float(fig.get("quality_score"), 0.0)
+    area = _safe_float(fig.get("natural_width"), 0.0) * _safe_float(
+        fig.get("natural_height"),
+        0.0,
+    )
+    method_score = 1.0 if method in {"embedded_image", "vector_page"} else 0.0
+    flag_score = 0.0 if flags.intersection({"low_graphic_coverage", "page_level_fallback"}) else 1.0
+    return (official, method_score, flag_score, quality + min(area / 1_000_000.0, 1.0))
+
+
+def _caption_starts_with_label(caption: str, kind: str, number: str) -> float:
+    if kind == "table":
+        pattern = rf"^\s*(?:table|表)\s*\.?\s*{re.escape(number)}\s*[:：|]"
+    else:
+        pattern = rf"^\s*(?:fig(?:ure)?|图)\s*\.?\s*{re.escape(number)}\s*[:：|]"
+    return 1.0 if re.search(pattern, caption, re.IGNORECASE) else 0.0
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _icon_from_inventory_table(design_spec: str, page_num: int) -> dict | None:
@@ -443,6 +632,7 @@ def _icon_from_design_spec_for_page(design_spec: str, page_num: int) -> dict | N
 
     Looks in Section IX first (Icon: line), then Section VI inventory table.
     """
+    return None
     # Primary: Section IX Icon: line
     page_pattern = (
         rf"(?ims)^#+\s*(?:slide|page)\s*0*{page_num}\b.*?"
@@ -485,16 +675,10 @@ def _icon_guidance_block(icon_assignment: dict | None) -> str:
     if not icon_assignment:
         return (
             "## Icon Guidance\n"
-            "- This slide has no explicit design-spec icon assignment. Do not add "
-            "`<use data-icon=\"...\"/>` placeholders or decorative icons.\n"
-            "- Do not simulate icons with standalone letter/symbol badges inside "
-            "small squares or circles, such as `P`, `Δ`, `!`, `G`, `?`, or `i`.\n"
-            "- If cards need structure, use plain numbered markers only when the "
-            "design spec asks for `Card Marker: numbered`; otherwise use title text "
-            "and spacing.\n"
-            "- If a technical concept needs a visual cue, draw a micro diagram that "
-            "shows structure, such as distribution bins, residual arrows, error "
-            "growth, gate sliders, stage flow, or mini charts."
+            "- No icon is assigned. Do not add icon placeholders, emoji, Unicode "
+            "symbols, punctuation badges, or single-character glyphs as icons.\n"
+            "- Use numbered step markers only for ordered steps; otherwise use "
+            "plain labels, shapes, lines, or small mechanism diagrams."
         )
 
     name = str(icon_assignment["name"])
@@ -523,7 +707,7 @@ def _icon_guidance_block(icon_assignment: dict | None) -> str:
         f"height=\"{size}\" fill=\"{color}\"/>`.\n"
         "- Keep it visually integrated with that anchor. Do not float it in an unrelated corner, use it as wallpaper, or overlay it on charts/figures.\n"
         "- Keep it sparse and purposeful; use no other icon placeholders on this slide.\n"
-        "- Do not add extra standalone letter/symbol badges as fake icons in cards."
+        "- Do not add emoji, symbols, punctuation badges, or single-character glyphs as extra icons."
     )
 
 
@@ -555,6 +739,12 @@ def _figure_guidance_block(
         lines.append(
             "- The design spec explicitly assigns the following paper figure(s) to this slide. "
             "Include them unless the slide would become unreadable; preserve the listed aspect ratio."
+        )
+    if len(used) > 2:
+        lines.append(
+            "- This slide has more paper-figure candidates than can fit cleanly. "
+            "Render at most 2 paper figures, choose the most central ones, and "
+            "summarize the rest as native SVG text or omit them."
         )
     for fig in used:
         path = fig.get("path") or ""
@@ -603,89 +793,998 @@ def _figure_guidance_block(
     return "\n".join(lines)
 
 
-# -- Character budget & image layout helpers ----------------------------------
+# -- Dynamic text layout & image layout helpers -------------------------------
 
 # Content area defaults for PPT 16:9 (may be overridden by design_spec)
 _DEFAULT_CONTENT_AREA = {"x": 40, "y": 100, "width": 1200, "height": 520}
 
-
-def _estimate_capacity(width: int, height: int, font_size: int = 16) -> int:
-    """Estimate max characters that fit in a content area."""
-    line_height = int(font_size * 1.3)
-    max_lines = max(1, height // line_height)
-    # Average char width: blend of CJK (1.0) and Latin (0.55), assume 0.75
-    avg_char_w = font_size * 0.75
-    chars_per_line = max(1, int(width / avg_char_w))
-    return max_lines * chars_per_line
-
-
-# Width presets for common layout scenarios (content area = 1200×520)
-_LAYOUT_WIDTHS = {
-    "full": 1200,          # full-width body text
-    "half_left": 560,      # left column in two-column
-    "half_right": 560,     # right column in two-column
-    "card": 480,           # card content area
-    "card_narrow": 380,    # narrow card (3-column)
-}
 
 # Regex to identify structural elements in manuscript Markdown
 _HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
 _BULLET_RE = re.compile(r"^[\s]*[-*•]\s+(.+)$", re.MULTILINE)
 
 
-def _char_budget_block(manuscript_page: str) -> str:
-    """Return a per-element character budget guide for the page.
-
-    Instead of a single whole-page estimate, this analyses the manuscript
-    structure (headings, bullets, paragraphs) and tells the LLM how many
-    characters fit per line for each common layout scenario.
-    """
+def _dynamic_text_layout_block(
+    manuscript_page: str,
+    page_design_block: str,
+    *,
+    has_paper_figure: bool,
+) -> str:
+    """Describe page-local wrapping without fixed character-capacity heuristics."""
     text = manuscript_page.strip()
-    est_chars = len(text)
-
-    # Whole-page capacity for density warning
-    total_capacity = _estimate_capacity(
-        _DEFAULT_CONTENT_AREA["width"],
-        _DEFAULT_CONTENT_AREA["height"],
-    )
-    ratio = est_chars / total_capacity if total_capacity else 0
-
-    # Per-layout character-per-line estimates at common font sizes
-    lines = []
-    lines.append("## Character Budget Per Line")
-    lines.append("Use these limits to decide when to wrap text. "
-                 "Do NOT wrap prematurely when >40% of line width is unused.")
-    lines.append("")
-    lines.append("| Layout | Width | font 16 cpl | font 18 cpl | font 22 cpl |")
-    lines.append("|--------|-------|-------------|-------------|-------------|")
-    for name, w in _LAYOUT_WIDTHS.items():
-        cpl16 = int(w / (16 * 0.75))
-        cpl18 = int(w / (18 * 0.75))
-        cpl22 = int(w / (22 * 0.75))
-        lines.append(f"| {name} | {w}px | {cpl16} | {cpl18} | {cpl22} |")
-
-    # Count structural elements for a concrete hint
     headings = _HEADING_RE.findall(text)
     bullets = _BULLET_RE.findall(text)
-    if headings or bullets:
-        lines.append("")
-        lines.append(f"Page structure: {len(headings)} heading(s), "
-                     f"{len(bullets)} bullet(s), ~{est_chars} total chars.")
+    region_widths = [
+        int(float(value))
+        for value in re.findall(r"(?i)\bw\s*=\s*(\d+(?:\.\d+)?)", page_design_block)
+        if float(value) > 0
+    ]
+    width_note = (
+        f"The page contract exposes region widths from {min(region_widths)}px to "
+        f"{max(region_widths)}px; wrap each region independently."
+        if region_widths
+        else "No reliable text width is precomputed; choose final regions first, then wrap against them."
+    )
+    visual_note = (
+        "A paper figure is assigned, so reserve its final frame before sizing the remaining text regions."
+        if has_paper_figure
+        else "No paper figure is assigned, so text and native SVG visuals may share the content area according to the page argument."
+    )
+    return (
+        "## Dynamic Text Layout\n"
+        f"- Page structure: {len(headings)} heading(s), {len(bullets)} bullet(s), "
+        f"about {len(text)} source characters.\n"
+        f"- {width_note}\n"
+        f"- {visual_note}\n"
+        "- Do not use a fixed characters-per-line target. Let ordinary non-final "
+        "lines occupy roughly 65-90% of their actual text-box width.\n"
+        "- Sparse pages may use larger type and wider measures. Text-heavy pages may "
+        "use smaller type, tighter spacing, or more columns when readable.\n"
+        "- Preserve sentence-level colored emphasis for important keywords; do not "
+        "isolate a colored word onto its own line unless the phrase naturally wraps.\n"
+        "- Use explicit invisible text boxes for body, caption, and callout paragraphs: "
+        "`<g data-textbox=\"x y w h\" data-role=\"body\">...text lines...</g>`. "
+        "Heading/subheading text must use its own `data-role=\"heading\"` box, not "
+        "the body paragraph box.\n"
+        "- For each text box, choose line breaks after the final x/y/w/h are known. "
+        "A line is invalid if its estimated right edge exceeds `x + w`, even if the "
+        "slide otherwise looks spacious.\n"
+        "- Break at semantic punctuation or phrase boundaries. Light raggedness is "
+        "acceptable; repair only real clipping, overlap, or clearly wasteful wrapping."
+    )
 
-    # Density warning
-    if ratio > 0.8:
-        lines.append("")
-        lines.append(
-            f"⚠ **Density warning**: ~{est_chars} chars / ~{total_capacity} capacity "
-            f"({ratio:.0%}). Consider splitting across multiple slides or condensing."
-        )
-    else:
-        lines.append("")
-        lines.append(
-            f"Density: ~{est_chars} chars / ~{total_capacity} capacity ({ratio:.0%})."
-        )
 
-    return "\n".join(lines)
+def _write_generation_response_debug(
+    project_dir: Path,
+    *,
+    prefix: str,
+    page_num: int,
+    attempt: int,
+    content: str,
+    max_tokens: int | None = None,
+    note: str | None = None,
+) -> None:
+    try:
+        debug_dir = project_dir / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        response_file = debug_dir / f"{prefix}_page_{page_num:02d}_response_attempt_{attempt}.md"
+        header = ""
+        if max_tokens is not None or note:
+            header = (
+                f"<!-- max_tokens={max_tokens if max_tokens is not None else ''}; "
+                f"note={note or ''} -->\n\n"
+            )
+        response_file.write_text(header + content, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _is_max_token_limit_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    token_terms = (
+        "max_tokens",
+        "max_completion_tokens",
+        "max output",
+        "output token",
+        "completion token",
+        "maximum context",
+        "context length",
+        "context window",
+        "tokens exceed",
+        "too many tokens",
+    )
+    limit_terms = (
+        "exceed",
+        "exceeded",
+        "greater than",
+        "maximum",
+        "too large",
+        "invalid",
+        "limit",
+        "not support",
+        "unsupported",
+    )
+    return any(term in text for term in token_terms) and any(term in text for term in limit_terms)
+
+
+def _completion_near_limit(response: LLMResponse, requested_max_tokens: int) -> bool:
+    usage = response.usage
+    if usage is None or requested_max_tokens <= 0:
+        return False
+    return usage.completion_tokens >= int(requested_max_tokens * 0.96)
+
+
+def _svg_response_looks_truncated(content: str) -> bool:
+    text = content.strip()
+    if "</svg>" in text:
+        return False
+    return "<svg" in text or text.endswith((">", "/>", "</g>", "</text>", "</rect>"))
+
+
+def _next_higher_svg_max_tokens(current: int) -> int:
+    if current >= SVG_GENERATION_MAX_TOKENS_CEILING:
+        return current
+    return min(SVG_GENERATION_MAX_TOKENS_CEILING, max(current + 2048, current * 2))
+
+
+def _next_lower_svg_max_tokens(current: int) -> int:
+    if current <= 4096:
+        return current
+    return max(4096, current // 2)
+
+
+async def _chat_svg_generation(
+    llm: LLMProvider,
+    conversation: list[LLMMessage],
+    model: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+    project_dir: Path,
+    debug_prefix: str,
+    page_num: int,
+    attempt: int,
+) -> tuple[LLMResponse, int]:
+    requested_max_tokens = max_tokens
+    while True:
+        snapshot = set_usage_context(
+            stage="generation",
+            page=page_num,
+            attempt=attempt,
+        )
+        try:
+            response = await llm.chat(
+                conversation,
+                model,
+                temperature=temperature,
+                max_tokens=requested_max_tokens,
+            )
+        except BaseException as exc:
+            reset_usage_context(snapshot)
+            if _is_max_token_limit_error(exc):
+                lowered = _next_lower_svg_max_tokens(requested_max_tokens)
+                _write_generation_response_debug(
+                    project_dir,
+                    prefix=debug_prefix,
+                    page_num=page_num,
+                    attempt=attempt,
+                    content=str(exc),
+                    max_tokens=requested_max_tokens,
+                    note=f"max token limit rejected; retrying with {lowered}",
+                )
+                if lowered < requested_max_tokens:
+                    requested_max_tokens = lowered
+                    continue
+            raise
+        else:
+            reset_usage_context(snapshot)
+            _write_generation_response_debug(
+                project_dir,
+                prefix=debug_prefix,
+                page_num=page_num,
+                attempt=attempt,
+                content=response.content,
+                max_tokens=requested_max_tokens,
+            )
+            return response, requested_max_tokens
+
+
+def _normalize_obvious_short_text_lines(svg: str, page_design_block: str) -> str:
+    """Wrap overlong text without merging intentional line breaks."""
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError:
+        return svg
+    namespace = _namespace_uri(root.tag)
+    if namespace:
+        ET.register_namespace("", namespace)
+    regions = _merged_text_regions(root, page_design_block)
+    if not regions:
+        return svg
+
+    changed = _wrap_overlong_text_elements(root, regions)
+
+    if not changed:
+        return svg
+    return ET.tostring(root, encoding="unicode")
+
+
+def _merged_text_regions(root: ET.Element, page_design_block: str) -> list[dict[str, float]]:
+    regions = _page_design_regions(page_design_block)
+    regions.extend(_svg_declared_text_regions(root))
+    regions.extend(_svg_rect_text_regions(root))
+    return _dedupe_regions(regions)
+
+
+def _dedupe_regions(regions: list[dict[str, float]]) -> list[dict[str, float]]:
+    deduped: list[dict[str, float]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for region in regions:
+        key = (
+            round(region["x"]),
+            round(region["y"]),
+            round(region["w"]),
+            round(region["h"]),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(region)
+    return deduped
+
+
+def _svg_declared_text_regions(root: ET.Element) -> list[dict[str, float]]:
+    regions: list[dict[str, float]] = []
+    for element in root.iter():
+        region = _parse_textbox_attr(element)
+        if region is not None:
+            regions.append(region)
+    return regions
+
+
+def _parse_textbox_attr(element: ET.Element) -> dict[str, float] | None:
+    raw = (
+        element.attrib.get("data-textbox")
+        or element.attrib.get("data-box")
+        or element.attrib.get("data-region")
+        or ""
+    )
+    if not raw:
+        return None
+    named = {
+        match.group(1).lower(): float(match.group(2))
+        for match in re.finditer(r"\b(x|y|w|h|width|height)\s*[:=]\s*(-?\d+(?:\.\d+)?)", raw)
+    }
+    if named:
+        w = named.get("w", named.get("width"))
+        h = named.get("h", named.get("height"))
+        x = named.get("x")
+        y = named.get("y")
+        if x is not None and y is not None and w is not None and h is not None:
+            if w >= 80 and h >= 20:
+                return {"x": x, "y": y, "w": w, "h": h}
+            return None
+    values = [float(match.group(0)) for match in NUMBER_RE.finditer(raw)]
+    if len(values) >= 4 and values[2] >= 80 and values[3] >= 20:
+        return {"x": values[0], "y": values[1], "w": values[2], "h": values[3]}
+    return None
+
+
+def _svg_rect_text_regions(root: ET.Element) -> list[dict[str, float]]:
+    regions: list[dict[str, float]] = []
+    for element in root.iter():
+        if _local_name(element.tag) != "rect":
+            continue
+        x = _svg_float_attr(element, "x")
+        y = _svg_float_attr(element, "y")
+        w = _svg_float_attr(element, "width")
+        h = _svg_float_attr(element, "height")
+        if w < 160 or h < 36:
+            continue
+        if w > 1220 and h > 560:
+            continue
+        pad = min(18.0, max(8.0, min(w, h) * 0.08))
+        regions.append({"x": x + pad, "y": y + pad, "w": w - pad * 2, "h": h - pad * 2})
+    return regions
+
+
+def _wrap_overlong_text_elements(root: ET.Element, regions: list[dict[str, float]]) -> bool:
+    parent_map = {child: parent for parent in root.iter() for child in list(parent)}
+    changed = False
+    for element in list(root.iter()):
+        if _local_name(element.tag) != "text":
+            continue
+        if element.attrib.get("text-anchor") or "transform" in element.attrib:
+            continue
+        text = _element_text(element)
+        if len(text) < 4:
+            continue
+        parent = parent_map.get(element)
+        if parent is None:
+            continue
+        x = _svg_float_attr(element, "x")
+        y = _svg_float_attr(element, "y")
+        region = _explicit_or_best_text_region(element, parent_map, regions)
+        if region is None:
+            continue
+        available = region["x"] + region["w"] - x - 6
+        if available < 80:
+            continue
+        font_size = _svg_font_size(element)
+        if _estimate_text_width(text, font_size) <= available * 0.98:
+            continue
+
+        fragments = _styled_text_fragments(element)
+        tokens = _styled_tokens(fragments, available, font_size)
+        lines = _pack_styled_tokens(tokens, available, font_size)
+        if len(lines) <= 1:
+            continue
+
+        line_height = _text_line_height(element, font_size)
+        bottom = region["y"] + region["h"]
+        if y + line_height * (len(lines) - 1) + font_size * 0.25 > bottom:
+            fit_height = max(font_size, bottom - y)
+            desired = line_height * (len(lines) - 1) + font_size
+            if desired > 0:
+                scale = max(0.82, min(1.0, fit_height / desired))
+                if scale < 0.995:
+                    font_size *= scale
+                    element.attrib["font-size"] = _format_svg_number(font_size)
+                    tokens = _styled_tokens(fragments, available, font_size)
+                    lines = _pack_styled_tokens(tokens, available, font_size)
+                    line_height = _text_line_height(element, font_size)
+
+        if _replace_text_element_with_lines(parent, element, lines, line_height):
+            changed = True
+    return changed
+
+
+def _has_positioned_text_children(element: ET.Element) -> bool:
+    for child in element.iter():
+        if child is element:
+            continue
+        if any(attr in child.attrib for attr in ("x", "y", "dx", "dy")):
+            return True
+    return False
+
+
+def _explicit_or_best_text_region(
+    element: ET.Element,
+    parent_map: dict[ET.Element, ET.Element],
+    regions: list[dict[str, float]],
+) -> dict[str, float] | None:
+    current: ET.Element | None = element
+    while current is not None:
+        explicit = _parse_textbox_attr(current)
+        if explicit is not None:
+            return explicit
+        current = parent_map.get(current)
+    return _best_region_for_text(
+        _svg_float_attr(element, "x"),
+        _svg_float_attr(element, "y"),
+        regions,
+    )
+
+
+def _styled_text_fragments(element: ET.Element) -> list[tuple[str, dict[str, str]]]:
+    fragments: list[tuple[str, dict[str, str]]] = []
+
+    def add(text: str | None, attrs: dict[str, str] | None = None) -> None:
+        if text:
+            fragments.append((text, attrs or {}))
+
+    add(element.text, {})
+    for child in list(element):
+        attrs = {
+            key: value
+            for key, value in child.attrib.items()
+            if key not in {"x", "y", "dx", "dy"}
+        }
+        add(child.text, attrs)
+        add(child.tail, {})
+    return fragments
+
+
+def _styled_tokens(
+    fragments: list[tuple[str, dict[str, str]]],
+    available: float,
+    font_size: float,
+) -> list[tuple[str, dict[str, str]]]:
+    tokens: list[tuple[str, dict[str, str]]] = []
+    token_re = re.compile(r"\s+|[A-Za-z0-9_./×+\-~≈=<>%]+|[\u4e00-\u9fff]+|[^\s]")
+    for text, attrs in fragments:
+        for match in token_re.finditer(text):
+            token = match.group(0)
+            if not token:
+                continue
+            if not token.isspace() and _estimate_text_width(token, font_size) > available:
+                tokens.extend((char, attrs) for char in token)
+            else:
+                tokens.append((token, attrs))
+    return tokens
+
+
+def _pack_styled_tokens(
+    tokens: list[tuple[str, dict[str, str]]],
+    available: float,
+    font_size: float,
+) -> list[list[tuple[str, dict[str, str]]]]:
+    lines: list[list[tuple[str, dict[str, str]]]] = []
+    current: list[tuple[str, dict[str, str]]] = []
+    for token in tokens:
+        text = token[0]
+        if text.isspace() and not current:
+            continue
+        candidate = _trim_styled_tokens(current + [token])
+        if current and _styled_tokens_width(candidate, font_size) > available:
+            trimmed = _trim_styled_tokens(current)
+            if trimmed:
+                lines.append(trimmed)
+            current = [] if text.isspace() else [token]
+        else:
+            current.append(token)
+    trimmed = _trim_styled_tokens(current)
+    if trimmed:
+        lines.append(trimmed)
+    return lines
+
+
+def _trim_styled_tokens(
+    tokens: list[tuple[str, dict[str, str]]],
+) -> list[tuple[str, dict[str, str]]]:
+    trimmed = list(tokens)
+    while trimmed and trimmed[0][0].isspace():
+        trimmed.pop(0)
+    while trimmed and trimmed[-1][0].isspace():
+        trimmed.pop()
+    return trimmed
+
+
+def _styled_tokens_width(tokens: list[tuple[str, dict[str, str]]], font_size: float) -> float:
+    return _estimate_text_width("".join(text for text, _ in tokens), font_size)
+
+
+def _text_line_height(element: ET.Element, font_size: float) -> float:
+    value = element.attrib.get("data-line-height") or element.attrib.get("line-height")
+    match = NUMBER_RE.search(str(value))
+    if match:
+        return max(font_size * 1.05, float(match.group(0)))
+    return font_size * 1.36
+
+
+def _replace_text_element_with_lines(
+    parent: ET.Element,
+    element: ET.Element,
+    lines: list[list[tuple[str, dict[str, str]]]],
+    line_height: float,
+) -> bool:
+    children = list(parent)
+    try:
+        index = children.index(element)
+    except ValueError:
+        return False
+    base_y = _svg_float_attr(element, "y")
+    base_attrs = dict(element.attrib)
+    parent.remove(element)
+    for line_index, line_tokens in enumerate(lines):
+        attrs = dict(base_attrs)
+        attrs["y"] = _format_svg_number(base_y + line_height * line_index)
+        if len(lines) > 1:
+            attrs.pop("id", None)
+        line_element = ET.Element(element.tag, attrs)
+        _populate_text_line(line_element, line_tokens)
+        parent.insert(index + line_index, line_element)
+    return True
+
+
+def _populate_text_line(
+    element: ET.Element,
+    tokens: list[tuple[str, dict[str, str]]],
+) -> None:
+    last_child: ET.Element | None = None
+    tspan_tag = _qualified_child_tag(element, "tspan")
+    for text, attrs in tokens:
+        if not text:
+            continue
+        if attrs:
+            child = ET.SubElement(element, tspan_tag, attrs)
+            child.text = text
+            last_child = child
+        elif last_child is None:
+            element.text = (element.text or "") + text
+        else:
+            last_child.tail = (last_child.tail or "") + text
+
+
+def _qualified_child_tag(parent: ET.Element, local_name: str) -> str:
+    namespace = _namespace_uri(parent.tag)
+    return f"{{{namespace}}}{local_name}" if namespace else local_name
+
+
+def _page_design_regions(page_design_block: str) -> list[dict[str, float]]:
+    regions: list[dict[str, float]] = []
+    pattern = re.compile(
+        r"(?i)\bx\s*=\s*(?P<x>-?\d+(?:\.\d+)?)\s+"
+        r"y\s*=\s*(?P<y>-?\d+(?:\.\d+)?)\s+"
+        r"w\s*=\s*(?P<w>\d+(?:\.\d+)?)\s+"
+        r"h\s*=\s*(?P<h>\d+(?:\.\d+)?)"
+    )
+    for match in pattern.finditer(page_design_block):
+        region = {key: float(match.group(key)) for key in ("x", "y", "w", "h")}
+        if region["w"] >= 120 and region["h"] >= 40:
+            regions.append(region)
+    return regions
+
+
+def _local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _namespace_uri(tag: str) -> str | None:
+    if tag.startswith("{") and "}" in tag:
+        return tag[1:].split("}", 1)[0]
+    return None
+
+
+def _svg_float_attr(element: ET.Element, name: str) -> float:
+    value = element.attrib.get(name, "")
+    match = NUMBER_RE.search(value)
+    return float(match.group(0)) if match else 0.0
+
+
+def _svg_font_size(element: ET.Element) -> float:
+    value = element.attrib.get("font-size", "")
+    match = NUMBER_RE.search(value)
+    return float(match.group(0)) if match else 18.0
+
+
+def _text_style_key(element: ET.Element) -> tuple[str, ...]:
+    return (
+        element.attrib.get("font-size", ""),
+        element.attrib.get("font-family", ""),
+        element.attrib.get("font-weight", ""),
+        element.attrib.get("fill", ""),
+        element.attrib.get("class", ""),
+    )
+
+
+def _can_merge_text_nodes(left: ET.Element, right: ET.Element) -> bool:
+    if left.attrib.get("text-anchor") or right.attrib.get("text-anchor"):
+        return False
+    if "transform" in left.attrib or "transform" in right.attrib:
+        return False
+    if _text_style_key(left) != _text_style_key(right):
+        return False
+    x_delta = abs(_svg_float_attr(left, "x") - _svg_float_attr(right, "x"))
+    if x_delta > 2:
+        return False
+    font_size = max(_svg_font_size(left), _svg_font_size(right), 1.0)
+    y_delta = _svg_float_attr(right, "y") - _svg_float_attr(left, "y")
+    return font_size * 0.85 <= y_delta <= font_size * 1.8
+
+
+def _rewrap_text_run(
+    parent: ET.Element,
+    run: list[ET.Element],
+    regions: list[dict[str, float]],
+) -> bool:
+    text_parts = [(node.text or "").strip() for node in run]
+    if any(not part for part in text_parts):
+        return False
+    first = run[0]
+    x = _svg_float_attr(first, "x")
+    y = _svg_float_attr(first, "y")
+    font_size = _svg_font_size(first)
+    region = _best_region_for_text(x, y, regions)
+    if region is None:
+        return False
+    available = region["x"] + region["w"] - x - 10
+    if available < 160:
+        return False
+    widths = [_estimate_text_width(part, font_size) for part in text_parts]
+    if max(widths) > available * 0.92:
+        return False
+    if sum(widths) / len(widths) > available * 0.68:
+        return False
+    merged = _join_text_lines(text_parts)
+    rewrapped = _wrap_text_to_width(merged, available, font_size)
+    if not rewrapped or len(rewrapped) > len(run):
+        return False
+    if len(rewrapped) == len(run) and rewrapped == text_parts:
+        return False
+
+    line_height = _svg_float_attr(run[1], "y") - _svg_float_attr(run[0], "y")
+    for idx, node in enumerate(run):
+        if idx < len(rewrapped):
+            node.text = rewrapped[idx]
+            node.attrib["y"] = _format_svg_number(y + line_height * idx)
+        else:
+            try:
+                parent.remove(node)
+            except ValueError:
+                pass
+    return True
+
+
+def _rewrap_inline_emphasis_runs(root: ET.Element, regions: list[dict[str, float]]) -> bool:
+    """Move simple inline text segments onto better lines without flattening style."""
+    parent_map = {child: parent for parent in root.iter() for child in list(parent)}
+    by_parent: dict[ET.Element, list[ET.Element]] = {}
+    for element in root.iter():
+        if _local_name(element.tag) != "text":
+            continue
+        if not _is_reflowable_inline_text(element):
+            continue
+        parent = parent_map.get(element)
+        if parent is None:
+            continue
+        by_parent.setdefault(parent, []).append(element)
+
+    changed = False
+    for parent, elements in by_parent.items():
+        lines = _visual_text_lines(elements)
+        for paragraph in _paragraph_lines(lines, regions):
+            if _rewrap_inline_paragraph(paragraph, regions):
+                changed = True
+    return changed
+
+
+def _is_reflowable_inline_text(element: ET.Element) -> bool:
+    if element.attrib.get("text-anchor") or "transform" in element.attrib:
+        return False
+    text = _element_text(element)
+    if not text or "\n" in text or len(text) > 180:
+        return False
+    for child in element.iter():
+        if child is element:
+            continue
+        if any(attr in child.attrib for attr in ("x", "y", "dx", "dy")):
+            return False
+    return True
+
+
+def _visual_text_lines(elements: list[ET.Element]) -> list[list[ET.Element]]:
+    ordered = sorted(elements, key=lambda node: (_svg_float_attr(node, "y"), _svg_float_attr(node, "x")))
+    lines: list[list[ET.Element]] = []
+    for element in ordered:
+        y = _svg_float_attr(element, "y")
+        font_size = _svg_font_size(element)
+        placed = False
+        for line in lines:
+            base_y = _svg_float_attr(line[0], "y")
+            if abs(y - base_y) <= max(4, font_size * 0.35):
+                line.append(element)
+                placed = True
+                break
+        if not placed:
+            lines.append([element])
+    return [sorted(line, key=lambda node: _svg_float_attr(node, "x")) for line in lines]
+
+
+def _paragraph_lines(
+    lines: list[list[ET.Element]],
+    regions: list[dict[str, float]],
+) -> list[list[list[ET.Element]]]:
+    paragraphs: list[list[list[ET.Element]]] = []
+    current: list[list[ET.Element]] = []
+    previous_y: float | None = None
+    previous_font = 0.0
+    previous_region: dict[str, float] | None = None
+    previous_was_label = False
+    for line in lines:
+        text = _line_text(line)
+        x = _svg_float_attr(line[0], "x")
+        y = _svg_float_attr(line[0], "y")
+        font = _svg_font_size(line[0])
+        region = _best_region_for_text(x, y, regions)
+        is_label = _line_is_standalone_label(line)
+        starts_new_bullet = text.startswith(("•", "-", "·")) and bool(current)
+        region_changed = previous_region is not None and region is not previous_region
+        y_gap = (
+            previous_y is not None
+            and y - previous_y > max(previous_font, font, 1.0) * 2.0
+        )
+        font_changed = previous_font and abs(previous_font - font) > 2
+        if current and (
+            starts_new_bullet
+            or region_changed
+            or y_gap
+            or font_changed
+            or previous_was_label
+            or is_label
+        ):
+            paragraphs.append(current)
+            current = []
+        current.append(line)
+        previous_y = y
+        previous_font = font
+        previous_region = region
+        previous_was_label = is_label
+    if current:
+        paragraphs.append(current)
+    return paragraphs
+
+
+def _rewrap_inline_paragraph(
+    paragraph: list[list[ET.Element]],
+    regions: list[dict[str, float]],
+) -> bool:
+    if not paragraph:
+        return False
+    segments = [node for line in paragraph for node in line]
+    if len(segments) < 2:
+        return False
+    first = segments[0]
+    start_x = _svg_float_attr(first, "x")
+    start_y = _svg_float_attr(first, "y")
+    font_size = _svg_font_size(first)
+    region = _best_region_for_text(start_x, start_y, regions)
+    if region is None:
+        return False
+    right = region["x"] + region["w"] - 10
+    available = right - start_x
+    if available < 160:
+        return False
+
+    line_widths = [_line_visual_width(line, font_size) for line in paragraph]
+    if len(paragraph) == 1 and max(line_widths, default=0) > available * 0.72:
+        return False
+    if len(paragraph) > 1 and not _paragraph_has_wasteful_break(paragraph, right, font_size):
+        return False
+
+    line_height = _paragraph_line_height(paragraph, font_size)
+    continuation_x = _continuation_x(paragraph, start_x)
+    current_x = start_x
+    current_y = start_y
+    previous_text = ""
+    placements: list[tuple[ET.Element, float, float]] = []
+    for index, node in enumerate(segments):
+        text = _element_text(node)
+        width = _estimate_text_width(text, font_size)
+        gap = 0.0 if index == 0 else _inline_segment_gap(previous_text, text, font_size)
+        candidate_x = current_x + gap
+        line_start_x = start_x if not _is_continuation_context(placements, paragraph) else continuation_x
+        if candidate_x > line_start_x and candidate_x + width > right:
+            current_y += line_height
+            current_x = continuation_x
+            candidate_x = current_x
+        if current_y > start_y + line_height * (len(paragraph) + 1):
+            return False
+        placements.append((node, candidate_x, current_y))
+        current_x = candidate_x + width
+        previous_text = text
+
+    if len({round(y, 2) for _, _, y in placements}) > len(paragraph):
+        return False
+
+    changed = False
+    for node, x, y in placements:
+        old_x = _svg_float_attr(node, "x")
+        old_y = _svg_float_attr(node, "y")
+        if abs(old_x - x) > 1 or abs(old_y - y) > 1:
+            node.attrib["x"] = _format_svg_number(x)
+            node.attrib["y"] = _format_svg_number(y)
+            changed = True
+    return changed
+
+
+def _paragraph_has_wasteful_break(
+    paragraph: list[list[ET.Element]],
+    right: float,
+    font_size: float,
+) -> bool:
+    for line_index in range(len(paragraph) - 1):
+        line = paragraph[line_index]
+        next_line = paragraph[line_index + 1]
+        if not line or not next_line:
+            continue
+        line_right = _line_right_edge(line, font_size)
+        first_next = next_line[0]
+        first_next_width = _estimate_text_width(_element_text(first_next), font_size)
+        if line_right + first_next_width <= right - 4:
+            return True
+    return False
+
+
+def _paragraph_line_height(paragraph: list[list[ET.Element]], font_size: float) -> float:
+    ys = sorted({_svg_float_attr(line[0], "y") for line in paragraph if line})
+    deltas = [ys[idx + 1] - ys[idx] for idx in range(len(ys) - 1) if ys[idx + 1] > ys[idx]]
+    if deltas:
+        return min(max(deltas[0], font_size * 1.1), font_size * 1.7)
+    return font_size * 1.45
+
+
+def _continuation_x(paragraph: list[list[ET.Element]], start_x: float) -> float:
+    first_text = _line_text(paragraph[0]) if paragraph else ""
+    if first_text.startswith(("•", "-", "·")):
+        return start_x + 16
+    return start_x
+
+
+def _is_continuation_context(
+    placements: list[tuple[ET.Element, float, float]],
+    paragraph: list[list[ET.Element]],
+) -> bool:
+    if not placements or not paragraph:
+        return False
+    first_text = _line_text(paragraph[0])
+    if not first_text.startswith(("•", "-", "·")):
+        return False
+    first_y = placements[0][2]
+    return placements[-1][2] > first_y
+
+
+def _line_text(line: list[ET.Element]) -> str:
+    return "".join(_element_text(node) for node in line).strip()
+
+
+def _line_is_standalone_label(line: list[ET.Element]) -> bool:
+    if not line:
+        return False
+    text = _line_text(line)
+    if not text or text.startswith(("•", "-", "·")):
+        return False
+    if len(text) > 24:
+        return False
+    if any(_looks_like_emphasis_color(node.attrib.get("fill", "")) for node in line):
+        return False
+    bold_nodes = [
+        node
+        for node in line
+        if "bold" in str(node.attrib.get("font-weight", "")).lower()
+        or str(node.attrib.get("font-weight", "")).isdigit()
+        and int(str(node.attrib.get("font-weight", "0"))) >= 600
+    ]
+    return len(bold_nodes) == len(line)
+
+
+def _looks_like_emphasis_color(fill: str) -> bool:
+    value = fill.strip().lower()
+    if not value.startswith("#"):
+        return False
+    neutral_or_heading = {
+        "#111",
+        "#111111",
+        "#222",
+        "#222222",
+        "#2d3436",
+        "#2d3748",
+        "#333",
+        "#333333",
+        "#1a365d",
+        "#1a3c6d",
+        "#1a5ad7",
+    }
+    if value in neutral_or_heading:
+        return False
+    if len(value) == 4:
+        value = "#" + "".join(ch * 2 for ch in value[1:])
+    if len(value) != 7:
+        return False
+    try:
+        r = int(value[1:3], 16)
+        g = int(value[3:5], 16)
+        b = int(value[5:7], 16)
+    except ValueError:
+        return False
+    return max(r, g, b) - min(r, g, b) >= 45
+
+
+def _element_text(element: ET.Element) -> str:
+    return re.sub(r"\s+", " ", "".join(element.itertext())).strip()
+
+
+def _line_visual_width(line: list[ET.Element], font_size: float) -> float:
+    if not line:
+        return 0.0
+    left = min(_svg_float_attr(node, "x") for node in line)
+    return _line_right_edge(line, font_size) - left
+
+
+def _line_right_edge(line: list[ET.Element], font_size: float) -> float:
+    return max(
+        _svg_float_attr(node, "x") + _estimate_text_width(_element_text(node), font_size)
+        for node in line
+    )
+
+
+def _inline_segment_gap(previous: str, current: str, font_size: float) -> float:
+    if not previous or not current:
+        return 0.0
+    prev = previous[-1]
+    curr = current[0]
+    if prev.isspace() or curr.isspace():
+        return 0.0
+    if ("\u4e00" <= prev <= "\u9fff") or ("\u4e00" <= curr <= "\u9fff"):
+        return 0.0
+    if curr in "，。；：、,.!?;:)]）】":
+        return 0.0
+    return font_size * 0.3
+
+
+def _best_region_for_text(
+    x: float,
+    y: float,
+    regions: list[dict[str, float]],
+) -> dict[str, float] | None:
+    candidates = [
+        region
+        for region in regions
+        if region["x"] - 4 <= x <= region["x"] + region["w"]
+        and region["y"] - 36 <= y <= region["y"] + region["h"] + 36
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda region: abs(x - region["x"]) + abs(y - region["y"]))
+
+
+def _estimate_text_width(text: str, font_size: float) -> float:
+    width = 0.0
+    for char in text:
+        code = ord(char)
+        if char.isspace():
+            width += font_size * 0.35
+        elif 0x4E00 <= code <= 0x9FFF or 0x3040 <= code <= 0x30FF or 0xAC00 <= code <= 0xD7AF:
+            width += font_size
+        elif char in "，。；：、,.!?;:()（）[]【】":
+            width += font_size * 0.55
+        else:
+            width += font_size * 0.58
+    return width
+
+
+def _join_text_lines(lines: list[str]) -> str:
+    text = "".join(
+        part if idx == 0 or _starts_with_cjk_or_punct(part) else f" {part}"
+        for idx, part in enumerate(lines)
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _starts_with_cjk_or_punct(text: str) -> bool:
+    if not text:
+        return False
+    char = text[0]
+    return "\u4e00" <= char <= "\u9fff" or char in "，。；：、,.!?;:)]）】"
+
+
+def _wrap_text_to_width(text: str, width: float, font_size: float) -> list[str]:
+    chunks = re.findall(r"[A-Za-z0-9_./×+\-]+|[\u4e00-\u9fff]+|[^\s]", text)
+    lines: list[str] = []
+    current = ""
+    for chunk in chunks:
+        pieces = [chunk]
+        if _estimate_text_width(chunk, font_size) > width:
+            pieces = list(chunk)
+        for piece in pieces:
+            candidate = _append_text_chunk(current, piece)
+            if current and _estimate_text_width(candidate, font_size) > width:
+                lines.append(current)
+                current = piece
+            else:
+                current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _append_text_chunk(current: str, chunk: str) -> str:
+    if not current:
+        return chunk
+    if _starts_with_cjk_or_punct(chunk):
+        return current + chunk
+    if "\u4e00" <= current[-1] <= "\u9fff":
+        return current + chunk
+    return current + " " + chunk
+
+
+def _format_svg_number(value: float) -> str:
+    rounded = round(value, 2)
+    if rounded.is_integer():
+        return str(int(rounded))
+    return f"{rounded:.2f}".rstrip("0").rstrip(".")
 
 
 def _figure_layout_guidance(used_figures: list[dict]) -> str:
@@ -1168,6 +2267,13 @@ def _generation_static_report(
     return _merge_reports(*reports)
 
 
+def _static_attempt_limit_for_report(
+    max_critic_attempts: int,
+    report: CriticReport | None,
+) -> int:
+    return max(0, int(max_critic_attempts))
+
+
 def _pseudo_icon_badge_violations(svg_content: str) -> list[Violation]:
     try:
         root = ET.fromstring(svg_content)
@@ -1345,6 +2451,64 @@ async def _emit_critic(
         await on_critic(page_num, attempt, report, repair_prompt, archive_path)  # type: ignore[misc]
 
 
+def _load_existing_svg_history(
+    svg_output_dir: Path,
+    pages: list[str],
+) -> dict[int, tuple[str, str, str]]:
+    history: dict[int, tuple[str, str, str]] = {}
+    for page_num, page in enumerate(pages, start=1):
+        matches = sorted(svg_output_dir.glob(f"{page_num:02d}_*.svg"))
+        if not matches:
+            continue
+        try:
+            svg_content = matches[0].read_text(encoding="utf-8")
+        except OSError:
+            continue
+        history[page_num] = (
+            _classify_page_type(page),
+            _make_page_name(page_num, page),
+            svg_content,
+        )
+    return history
+
+
+def _same_type_svg_history_message(
+    history: dict[int, tuple[str, str, str]],
+    *,
+    current_page_num: int,
+    current_page_type: str,
+) -> str:
+    if current_page_type not in {"chapter", "content"}:
+        return ""
+    references = [
+        (page_num, title, svg)
+        for page_num, (page_type, title, svg) in sorted(history.items())
+        if page_num < current_page_num and page_type == current_page_type
+    ][-MAX_PRIOR_PAGES_IN_CONTEXT:]
+    if not references:
+        return ""
+
+    label = "Chapter" if current_page_type == "chapter" else "Content"
+    parts = [
+        f"## Prior {label} Page SVG References",
+        "",
+        f"Use these prior {current_page_type} pages only for typography, spacing, "
+        "color, shape language, and layout continuity. The current manuscript and "
+        "Page Design Contract remain authoritative. Do not copy old facts or text.",
+    ]
+    for page_num, title, svg in references:
+        parts.extend(
+            [
+                "",
+                f"### Slide {page_num:02d}: {title}",
+                "```svg",
+                svg,
+                "```",
+            ]
+        )
+    return "\n".join(parts)
+
+
 async def generate_svg_pages(
     design_spec: str,
     manuscript: str,
@@ -1387,6 +2551,7 @@ async def generate_svg_pages(
         detail_level=detail_level,
     )
     deck_plan_block = deck_plan_markdown(deck_plan)
+    generation_context_block = deck_generation_context_markdown(deck_plan)
     compact_design_spec = _parallel_global_design_context(design_spec)
     try:
         (project_dir / "deck_plan.md").write_text(deck_plan_block, encoding="utf-8")
@@ -1404,21 +2569,18 @@ async def generate_svg_pages(
     extra_sections = []
     if extra_instruction:
         extra_sections.append(extra_instruction)
-    if is_deepseek_provider(llm, model):
-        extra_sections.append(deepseek_executor_guidance(detail_level))
     if template_context:
         extra_sections.append(template_context)
     extra_block = "\n\n" + "\n\n".join(extra_sections) if extra_sections else ""
-    conversation: list[LLMMessage] = [
+    base_conversation: list[LLMMessage] = [
         LLMMessage.system(system_prompt),
         LLMMessage.user(
             f"## Compact Global Design Specification\n\n{compact_design_spec}\n\n"
-            f"## Structured Deck Plan (authoritative)\n\n{deck_plan_block}\n\n"
+            f"## Deck Generation Context\n\n{generation_context_block}\n\n"
             f"## SVG Technical Standards\n\n{standards}\n\n"
             f"## Fixed Runtime Configuration\n\n"
             f"- Selected style preset: {style}\n"
             f"- Selected language: {language}\n"
-            f"- Selected detail level: {detail_level}\n"
             f"- Do not replace the requested style with another preset.\n"
             f"- All visible SVG text must follow the selected language unless a proper noun must stay in its original form.\n\n"
             f"Total pages to generate: {len(pages)}\n\n"
@@ -1438,33 +2600,32 @@ async def generate_svg_pages(
         debug_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = debug_dir / "executor_prompt.md"
         parts = []
-        for msg in conversation:
+        for msg in base_conversation:
             parts.append(f"--- ROLE: {msg.role} ---\n\n{msg.content}")
         prompt_file.write_text("\n\n".join(parts), encoding="utf-8")
     except Exception:
         pass
 
-    # Track how many page exchanges we've appended beyond the preamble
-    # (system + design-spec user + ack assistant = 3 preamble messages).
-    _preamble_len = len(conversation)
+    generated_history = _load_existing_svg_history(
+        svg_output_dir,
+        pages,
+    )
 
     for i, page_content in enumerate(pages):
         page_num = i + 1
         if target_pages is not None and page_num not in target_pages:
             continue
 
-        # Sliding window: trim old page exchanges, keeping only the most
-        # recent ones to avoid unbounded context growth.  Each page
-        # produces up to max_critic_attempts * 2 messages
-        # (user prompt + assistant SVG per round).
-        _max_context_msgs = MAX_PRIOR_PAGES_IN_CONTEXT * max(1, max_critic_attempts) * 2
-        _beyond_preamble = len(conversation) - _preamble_len
-        if _beyond_preamble > _max_context_msgs:
-            _trim = _beyond_preamble - _max_context_msgs
-            conversation[:] = conversation[:_preamble_len] + conversation[_preamble_len + _trim:]
-
         page_name = _make_page_name(page_num, page_content)
         page_type = _classify_page_type(page_content)
+        conversation = list(base_conversation)
+        continuity_message = _same_type_svg_history_message(
+            generated_history,
+            current_page_num=page_num,
+            current_page_type=page_type,
+        )
+        if continuity_message:
+            conversation.append(LLMMessage.user(continuity_message))
         is_structural_page = page_type in STRUCTURAL_PAGE_TYPES
         visible_page_content = strip_page_type_metadata(page_content)
         if is_structural_page:
@@ -1481,21 +2642,20 @@ async def generate_svg_pages(
         )
         figure_source = "manuscript"
         if not used_figures and not is_structural_page:
-            design_spec_figures = _figures_from_design_spec_for_page(
-                design_spec,
-                page_num,
+            referenced_figures = _figures_from_page_references(
+                visible_page_content,
                 figure_inventory,
             )
-            if design_spec_figures:
-                figure_source = "design_spec"
-                used_figures = design_spec_figures
-                fallback_refs = "\n".join(
-                    _paper_figure_reference_line(fig) for fig in design_spec_figures
+            if referenced_figures:
+                figure_source = "manuscript_reference"
+                used_figures = referenced_figures
+                reference_lines = "\n".join(
+                    _paper_figure_reference_line(fig) for fig in referenced_figures
                 )
                 rewritten_content = (
                     f"{rewritten_content}\n\n"
-                    "Design spec image assignment recovered for this slide:\n"
-                    f"{fallback_refs}"
+                    "Paper figure references resolved from this slide manuscript:\n"
+                    f"{reference_lines}"
                 )
         used_figures, optimized_figure_notes = _optimize_figure_choices(
             used_figures,
@@ -1508,6 +2668,18 @@ async def generate_svg_pages(
                 "(use these instead of any earlier figure assignment lines):\n"
                 + "\n".join(_paper_figure_reference_line(fig) for fig in used_figures)
             )
+        used_figures, limited_figure_notes = _limit_figure_count_for_layout(
+            used_figures,
+            page_type=page_type,
+        )
+        rejected_figures.extend(limited_figure_notes)
+        if limited_figure_notes and used_figures:
+            rewritten_content += (
+                "\n\nFigure budget note:\n"
+                + "\n".join(f"- {note}" for note in limited_figure_notes)
+                + "\n"
+                + "\n".join(_paper_figure_reference_line(fig) for fig in used_figures)
+            )
         figure_guidance = _figure_guidance_block(
             used_figures,
             rejected_figures,
@@ -1518,10 +2690,14 @@ async def generate_svg_pages(
             str(icon_assignment["name"]) if icon_assignment is not None else None
         )
         icon_guidance = _icon_guidance_block(icon_assignment)
-        char_budget = _char_budget_block(rewritten_content)
         img_layout = _figure_layout_guidance(used_figures)
         page_role_guidance = _page_role_guidance(page_type)
         structural_override = _structural_page_override_block(page_type)
+        factual_guardrails = _factual_rendering_guardrails(page_type)
+        layout_guardrails = _layout_generation_guardrails(
+            page_type,
+            has_paper_figure=bool(used_figures),
+        )
         structural_figure_policy = (
             "\n- Structural page paper-figure policy: do not place extracted "
             "paper figures (`../sources/images/fig_*.png`) on cover, chapter, "
@@ -1536,15 +2712,17 @@ async def generate_svg_pages(
         if template_skeletons:
             skeleton_svg = template_skeletons.get(page_type)
             if skeleton_svg:
-                skeleton_svg = _resolve_template_skeleton_placeholders(
+                skeleton_svg = _prepare_template_skeleton(
+                    page_type,
                     skeleton_svg,
                     template_vars.get(page_num),
                 )
-                skeleton_block = (
-                    _template_skeleton_instruction(page_type)
-                    +
-                    f"```svg\n{skeleton_svg}\n```"
-                )
+                if skeleton_svg:
+                    skeleton_block = (
+                        _template_skeleton_instruction(page_type)
+                        +
+                        f"```svg\n{skeleton_svg}\n```"
+                    )
 
         slide_plan_block = slide_plan_markdown(deck_plan, page_num)
         page_design_block = _extract_page_design_block(design_spec, page_num)
@@ -1553,6 +2731,11 @@ async def generate_svg_pages(
                 page_design_block,
                 page_type,
             )
+        text_layout = _dynamic_text_layout_block(
+            rewritten_content,
+            page_design_block,
+            has_paper_figure=bool(used_figures),
+        )
         page_design_section = (
             f"## Page Design Contract\n\n{page_design_block}\n\n"
             if page_design_block
@@ -1574,12 +2757,13 @@ async def generate_svg_pages(
                 f"## Runtime Reminders\n"
                 f"- Style preset: {style}\n"
                 f"- Language: {language}\n"
-                f"- Detail level: {detail_level}\n"
                 f"- Page type: {page_type}. Use this type only for template selection; do not render metadata comments.\n"
                 f"- Keep all visible text in the requested language.\n"
                 f"{page_role_guidance}\n"
                 f"{structural_override}"
-                f"- {char_budget}"
+                f"{factual_guardrails}"
+                f"{layout_guardrails}"
+                f"{text_layout}\n"
                 f"{structural_figure_policy}\n\n"
                 f"{figure_guidance}\n\n"
                 f"{icon_guidance}\n\n"
@@ -1587,12 +2771,10 @@ async def generate_svg_pages(
                 f"## Output Complexity Budget\n"
                 f"- Keep the SVG compact and editable; target under {SVG_GENERATION_MAX_TOKENS} output tokens.\n"
                 f"- Prefer grouped primitives, reusable styles, and concise text. Avoid huge decorative path dumps or duplicate off-canvas elements.\n\n"
-                f"## Pre-Generation Boundary Check\n"
-                f"Before writing SVG, mentally plan y-coordinates and image boxes:\n"
-                f"- Content area: y=100 to y=620 (520px). This is the preferred limit.\n"
+                f"## Layout Budget\n"
+                f"- Fit content before drawing elements; preferred content area is y=100..620.\n"
                 f"- Paper figures must stay fully visible inside x=0..1260 and y=80..640.\n"
-                f"- Do not make an image larger than its visible frame and hide it with clip-path or off-canvas overflow.\n"
-                f"- If the plan does not fit, shrink the figure, use fewer text blocks, or redraw a native summary visual.\n\n"
+                f"- If content does not fit, change regions, spacing, or wording before drawing; do not use the footer as content space.\n\n"
                 f"Generate the complete SVG code for this page. "
                 f"Output ONLY the SVG code, wrapped in ```svg code block."
                 f"{skeleton_block}"
@@ -1607,21 +2789,28 @@ async def generate_svg_pages(
         except OSError:
             pass
 
-        snapshot = set_usage_context(stage="generation", page=page_num, attempt=1)
-        try:
-            response: LLMResponse = await llm.chat(
-                conversation,
-                model,
-                temperature=0.3,
-                max_tokens=SVG_GENERATION_MAX_TOKENS,
-            )
-        finally:
-            reset_usage_context(snapshot)
+        generation_max_tokens = SVG_GENERATION_MAX_TOKENS
+        response, generation_max_tokens = await _chat_svg_generation(
+            llm,
+            conversation,
+            model,
+            temperature=0.3,
+            max_tokens=generation_max_tokens,
+            project_dir=project_dir,
+            debug_prefix="executor",
+            page_num=page_num,
+            attempt=1,
+        )
 
         svg_content = _extract_svg(response.content)
         for extraction_attempt in range(2, MAX_SVG_EXTRACTION_ATTEMPTS + 1):
             if svg_content:
                 break
+            if (
+                _completion_near_limit(response, generation_max_tokens)
+                and _svg_response_looks_truncated(response.content)
+            ):
+                generation_max_tokens = _next_higher_svg_max_tokens(generation_max_tokens)
             conversation.append(LLMMessage.assistant(response.content))
             conversation.append(
                 LLMMessage.user(
@@ -1634,30 +2823,29 @@ async def generate_svg_pages(
                     )
                 )
             )
-            snapshot = set_usage_context(
-                stage="generation", page=page_num, attempt=extraction_attempt
+            response, generation_max_tokens = await _chat_svg_generation(
+                llm,
+                conversation,
+                model,
+                temperature=0.2,
+                max_tokens=generation_max_tokens,
+                project_dir=project_dir,
+                debug_prefix="executor",
+                page_num=page_num,
+                attempt=extraction_attempt,
             )
-            try:
-                response = await llm.chat(
-                    conversation,
-                    model,
-                    temperature=0.2,
-                    max_tokens=SVG_GENERATION_MAX_TOKENS,
-                )
-            finally:
-                reset_usage_context(snapshot)
             svg_content = _extract_svg(response.content)
 
         if svg_content:
+            svg_content = _normalize_obvious_short_text_lines(svg_content, page_design_block)
             conversation.append(LLMMessage.assistant(f"```svg\n{svg_content}\n```"))
 
             best_svg = svg_content
             visual_attempts = 0
             critic_attempt = 1
-            static_attempt_limit = (
-                max_critic_attempts
-                if max_critic_attempts > 0
-                else FIGURE_SAFETY_CRITIC_ATTEMPTS
+            static_attempt_limit = _static_attempt_limit_for_report(
+                max_critic_attempts,
+                None,
             )
             while True:
                 report: CriticReport | None = None
@@ -1673,11 +2861,15 @@ async def generate_svg_pages(
                         required_icon=required_icon,
                         include_general_svg_checks=max_critic_attempts > 0,
                     )
+                    static_attempt_limit = _static_attempt_limit_for_report(
+                        max_critic_attempts,
+                        report,
+                    )
                     if report.passed and max_critic_attempts <= 0:
                         report = None
                     report_metadata = {"source": "static"}
                     event_attempt = critic_attempt
-                    if report is not None and not report.passed and critic_attempt >= static_attempt_limit:
+                    if report is not None and not report.passed and critic_attempt > static_attempt_limit:
                         archive_rel = _archive_repair_svg(
                             repair_archive_dir,
                             page_num=page_num,
@@ -1852,6 +3044,11 @@ async def generate_svg_pages(
 
             svg_path = svg_output_dir / f"{page_num:02d}_{page_name}.svg"
             svg_path.write_text(best_svg, encoding="utf-8")
+            generated_history[page_num] = (
+                page_type,
+                page_name,
+                best_svg,
+            )
             for href in IMAGE_HREF_RE.findall(best_svg):
                 key = _paper_figure_key_from_href(href)
                 if key is not None:
@@ -1859,10 +3056,11 @@ async def generate_svg_pages(
             yield page_num, best_svg
         else:
             conversation.append(LLMMessage.assistant(response.content))
-            raise RuntimeError(
+            failure_message = (
                 f"Failed to generate parseable SVG for page {page_num}/{len(pages)} "
                 f"({page_name}) after {MAX_SVG_EXTRACTION_ATTEMPTS} attempts"
             )
+            raise RuntimeError(failure_message)
 
 
 def _extract_design_section(design_spec: str, roman: str) -> str:
@@ -1887,11 +3085,7 @@ def _extract_page_design_block(design_spec: str, page_num: int) -> str:
         rf"|^#+\s*[IVXLCDM]+\.\s+|\Z)"
     )
     match = re.search(pattern, design_spec)
-    return _compact_prompt_block(
-        match.group(0).strip(),
-        MAX_PAGE_DESIGN_CHARS,
-        label=f"page {page_num} design block",
-    ) if match else ""
+    return match.group(0).strip() if match else ""
 
 
 def _extract_page_section_heading(design_spec: str, page_num: int) -> str:
@@ -2059,6 +3253,22 @@ def _minimal_structural_page_content(page_content: str, page_type: str) -> str:
     """Reduce structural manuscript pages to the text they are allowed to render."""
     visible = strip_page_type_metadata(page_content).strip()
     title, subtitle = _extract_page_title_parts(visible)
+    if page_type == "toc":
+        toc_items: list[str] = []
+        for line in visible.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("<!--") or "[[FIG:" in stripped:
+                continue
+            if re.match(r"^#{1,6}\s+(.+?)\s*$", stripped):
+                continue
+            if not STRUCTURAL_LIST_LINE_RE.match(stripped):
+                continue
+            item = _clean_structural_phrase(stripped)
+            if item and item != title and item not in toc_items:
+                toc_items.append(item)
+        lines = [f"# {title or '目录'}"]
+        lines.extend(f"- {item}" for item in toc_items[:8])
+        return "\n\n".join(lines)
 
     if not subtitle:
         title_seen = False
@@ -2122,34 +3332,52 @@ def _sanitize_structural_page_design_block(
         first_line = f"#### Structural {page_type.title()} Page"
 
     preserved: list[str] = []
-    forbidden = (
-        re.compile(
+    if page_type == "toc":
+        forbidden = re.compile(
+            r"(?i)(\[\[FIG:|paper figure|extracted figure|dense article|"
+            r"detailed evidence|detailed result|chart|table|metric|kpi|"
+            r"question list|evidence|bullet grid|template example|sample diagram|"
+            r"workflow diagram|process[-\s]*flow|architecture block|"
+            r"single llm call|autonomous agents)"
+        )
+    elif page_type == "cover":
+        forbidden = re.compile(
             r"(?i)(\[\[FIG:|paper figure|extracted figure|dense article|"
             r"detailed evidence|detailed result|multi-column evidence)"
         )
-        if page_type == "cover"
-        else re.compile(
+    else:
+        forbidden = re.compile(
             r"(?i)(\[\[FIG:|paper figure|chart|table|metric|kpi|核心问题|本章看点|"
             r"question list|mini-agenda|agenda grid|evidence|bullet grid)"
         )
-    )
     allowed_label = re.compile(
         r"(?i)^\s*[-*]\s*(?:\*\*)?"
         r"(page type|type|title|subtitle|layout|layout family|style family|"
         r"visual family|visual treatment|background|composition|typography|"
         r"color|palette|accent|motif|chrome|footer|spacing|template|"
-        r"metadata|authors|source|venue|date|context|ornament)"
+        r"metadata|authors|source|venue|date|context|ornament|"
+        r"content|text strategy|region plan)"
         r"(?:\*\*)?\s*[:：]"
     )
+    keep_toc_content_lines = False
     for raw_line in block.splitlines()[1:]:
         line = raw_line.rstrip()
         stripped = line.strip()
         if not stripped:
+            keep_toc_content_lines = False
+            continue
+        if page_type == "toc" and keep_toc_content_lines and STRUCTURAL_LIST_LINE_RE.match(stripped):
+            preserved.append(line)
             continue
         if forbidden.search(stripped):
             continue
         if allowed_label.search(stripped):
             preserved.append(line)
+            keep_toc_content_lines = page_type == "toc" and bool(
+                re.match(r"(?i)^\s*[-*]\s*(?:\*\*)?content(?:\*\*)?\s*[:：]", stripped)
+            )
+        else:
+            keep_toc_content_lines = False
 
     if page_type == "chapter":
         layout = (
@@ -2161,6 +3389,11 @@ def _sanitize_structural_page_design_block(
             "Lightweight cover page; title, optional subtitle, available metadata, "
             "and a modest context/accent treatment."
         )
+    elif page_type == "toc":
+        layout = (
+            "Table-of-contents page; render the title plus the planned chapter/list "
+            "items in order. Do not introduce evidence, metrics, paper figures, or charts."
+        )
     else:
         layout = f"Minimal structural {page_type} page; title plus optional short subtitle/key phrase only."
     lines = [
@@ -2171,20 +3404,24 @@ def _sanitize_structural_page_design_block(
     ]
     if preserved:
         lines.extend(["", "### Preserved Planner Style Fields", *preserved])
-    lines.extend(
-        [
-            "",
-            (
-                "- **Content Boundary**: title, optional subtitle, paper metadata, and "
-                "a few short context/thesis lines. No extracted paper figures or dense "
-                "article-content sections."
-                if page_type == "cover"
-                else "- **Content Boundary**: title and at most one short subtitle/key phrase. "
-                "No cards, KPI strips, question lists, mini-agendas, paper figures, charts, "
-                "or labeled blocks such as `核心问题` / `本章看点`."
-            ),
-        ]
-    )
+    if page_type == "cover":
+        boundary = (
+            "- **Content Boundary**: title, optional subtitle, paper metadata, and "
+            "a few short context/thesis lines. No extracted paper figures or dense "
+            "article-content sections."
+        )
+    elif page_type == "toc":
+        boundary = (
+            "- **Content Boundary**: title plus ordered chapter/list items only. "
+            "No paper figures, metrics, evidence cards, charts, or dense article sections."
+        )
+    else:
+        boundary = (
+            "- **Content Boundary**: title and at most one short subtitle/key phrase. "
+            "No cards, KPI strips, question lists, mini-agendas, paper figures, charts, "
+            "or labeled blocks such as `核心问题` / `本章看点`."
+        )
+    lines.extend(["", boundary])
     return "\n".join(lines)
 
 
@@ -2192,18 +3429,25 @@ def _template_vars_by_page(pages: list[str]) -> dict[int, dict[str, str]]:
     result: dict[int, dict[str, str]] = {}
     chapter_index = 0
     current_chapter = {"num": "", "title": "", "desc": ""}
-    toc_items: list[str] = []
-    fallback_items: list[str] = []
+    toc_items: list[tuple[str, str]] = []
+    fallback_items: list[tuple[str, str]] = []
+
+    for page in pages:
+        if extract_page_type(page) != "toc":
+            continue
+        toc_items = _toc_items_from_page(page)
+        if toc_items:
+            break
 
     for page in pages:
         page_type = extract_page_type(page)
-        title, _subtitle = _extract_page_title_parts(page)
+        title, subtitle = _extract_page_title_parts(page)
         if not title:
             continue
-        if page_type == "chapter":
-            toc_items.append(title)
+        if page_type == "chapter" and not toc_items:
+            toc_items.append((title, subtitle))
         elif page_type not in {"cover", "toc", "ending"}:
-            fallback_items.append(title)
+            fallback_items.append((title, subtitle))
     if not toc_items:
         toc_items = fallback_items
 
@@ -2246,12 +3490,77 @@ def _template_vars_by_page(pages: list[str]) -> dict[int, dict[str, str]]:
             "ENDING_TITLE": title,
             "ENDING_MESSAGE": subtitle,
         }
-        for idx in range(5):
-            variables[f"TOC_ITEM_{idx + 1}"] = toc_items[idx] if idx < len(toc_items) else ""
+        variables["TOC_ITEM_COUNT"] = str(len(toc_items))
+        for idx in range(max(12, len(toc_items))):
+            item_title = toc_items[idx][0] if idx < len(toc_items) else ""
+            item_desc = toc_items[idx][1] if idx < len(toc_items) else ""
+            variables[f"TOC_ITEM_{idx + 1}"] = item_title
+            variables[f"TOC_ITEM_{idx + 1}_TITLE"] = item_title
+            variables[f"TOC_ITEM_{idx + 1}_DESC"] = item_desc
         if page_type == "cover":
             variables.update(_extract_cover_metadata(page, title, subtitle))
         result[page_num] = variables
     return result
+
+
+def _toc_items_from_page(page: str) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    for raw_line in page.splitlines():
+        line = re.sub(r"^\s*[-*•]\s*", "", raw_line).strip()
+        match = re.match(r"^\s*\d+[\.\)、]\s*(.+)$", line)
+        if not match:
+            continue
+        body = match.group(1).strip()
+        bold = re.match(r"\*\*(.+?)\*\*\s*[:：]?\s*(.*)$", body)
+        if bold:
+            title = _plain_inline_text(bold.group(1))
+            desc = _plain_inline_text(bold.group(2))
+        else:
+            parts = re.split(r"\s*[:：]\s*", body, maxsplit=1)
+            title = _plain_inline_text(parts[0])
+            desc = _plain_inline_text(parts[1]) if len(parts) > 1 else ""
+        if title:
+            items.append((title, desc))
+    return items
+
+
+def _plain_inline_text(value: str) -> str:
+    text = re.sub(r"[*_`]+", "", value or "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" \t\r\n:：")
+
+
+def _prepare_template_skeleton(
+    page_type: str,
+    skeleton_svg: str,
+    variables: dict[str, str] | None,
+) -> str:
+    raw = _normalize_template_placeholder_text_slots(skeleton_svg)
+    if page_type == "toc":
+        item_count = _safe_int((variables or {}).get("TOC_ITEM_COUNT"))
+        capacity = _toc_template_capacity(raw)
+        if item_count and capacity and capacity < item_count:
+            return ""
+        raw = _strip_non_toc_template_content(raw)
+    return _resolve_template_skeleton_placeholders(raw, variables)
+
+
+def _safe_int(value: str | None) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _toc_template_capacity(skeleton_svg: str) -> int:
+    slots = [
+        int(match.group(1))
+        for match in re.finditer(
+            r"\{\{TOC_ITEM_(\d+)(?:_(?:TITLE|DESC))?\}\}",
+            skeleton_svg,
+        )
+    ]
+    return max(slots, default=0)
 
 
 def _resolve_template_skeleton_placeholders(
@@ -2273,6 +3582,130 @@ def _resolve_template_skeleton_placeholders(
     for key, value in variables.items():
         resolved = resolved.replace(f"{{{{{key}}}}}", html_escape(value, quote=True))
     return resolved
+
+
+def _strip_non_toc_template_content(skeleton_svg: str) -> str:
+    if not NON_TOC_TEMPLATE_PLACEHOLDER_RE.search(skeleton_svg):
+        return skeleton_svg
+    try:
+        root = ET.fromstring(skeleton_svg)
+    except ET.ParseError:
+        return skeleton_svg
+    namespace = _namespace_uri(root.tag)
+    if namespace:
+        ET.register_namespace("", namespace)
+
+    parent_map = {child: parent for parent in root.iter() for child in list(parent)}
+    placeholder_nodes: list[ET.Element] = []
+    placeholder_points: list[tuple[float, float]] = []
+    for element in root.iter():
+        local = _local_name(element.tag)
+        serialized = ET.tostring(element, encoding="unicode")
+        if not NON_TOC_TEMPLATE_PLACEHOLDER_RE.search(serialized):
+            continue
+        if local == "text":
+            placeholder_nodes.append(element)
+            placeholder_points.append(
+                (_svg_float_attr(element, "x"), _svg_float_attr(element, "y"))
+            )
+
+    removals: set[ET.Element] = set()
+    for node in placeholder_nodes:
+        candidate = node
+        parent = parent_map.get(node)
+        while parent is not None and parent is not root:
+            serialized = ET.tostring(parent, encoding="unicode")
+            if TOC_TEMPLATE_PLACEHOLDER_RE.search(serialized):
+                break
+            if _local_name(parent.tag) == "g":
+                candidate = parent
+            parent = parent_map.get(parent)
+        removals.add(candidate)
+
+    region = _expanded_point_region(placeholder_points)
+    if region is not None:
+        for element in list(root.iter()):
+            if element in removals or element is root:
+                continue
+            if _element_in_non_toc_region(element, region):
+                removals.add(element)
+
+    for element in removals:
+        parent = parent_map.get(element)
+        if parent is None:
+            continue
+        try:
+            parent.remove(element)
+        except ValueError:
+            pass
+    return ET.tostring(root, encoding="unicode")
+
+
+def _expanded_point_region(
+    points: list[tuple[float, float]],
+) -> tuple[float, float, float, float] | None:
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return (
+        max(0.0, min(xs) - 220.0),
+        max(90.0, min(ys) - 120.0),
+        min(1280.0, max(xs) + 220.0),
+        min(640.0, max(ys) + 100.0),
+    )
+
+
+def _element_in_non_toc_region(
+    element: ET.Element,
+    region: tuple[float, float, float, float],
+) -> bool:
+    if TOC_TEMPLATE_PLACEHOLDER_RE.search(ET.tostring(element, encoding="unicode")):
+        return False
+    bbox = _simple_element_bbox(element)
+    if bbox is None:
+        return False
+    x, y, w, h = bbox
+    if w >= 1200 or h >= 600:
+        return False
+    if y < 90 or y + h > 650:
+        return False
+    rx1, ry1, rx2, ry2 = region
+    bx2 = x + w
+    by2 = y + h
+    return not (bx2 < rx1 or x > rx2 or by2 < ry1 or y > ry2)
+
+
+def _simple_element_bbox(element: ET.Element) -> tuple[float, float, float, float] | None:
+    local = _local_name(element.tag)
+    if local in {"rect", "image"}:
+        return (
+            _svg_float_attr(element, "x"),
+            _svg_float_attr(element, "y"),
+            _svg_float_attr(element, "width"),
+            _svg_float_attr(element, "height"),
+        )
+    if local == "line":
+        x1 = _svg_float_attr(element, "x1")
+        y1 = _svg_float_attr(element, "y1")
+        x2 = _svg_float_attr(element, "x2")
+        y2 = _svg_float_attr(element, "y2")
+        return (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+    if local == "circle":
+        r = _svg_float_attr(element, "r")
+        return (
+            _svg_float_attr(element, "cx") - r,
+            _svg_float_attr(element, "cy") - r,
+            r * 2,
+            r * 2,
+        )
+    if local == "text":
+        x = _svg_float_attr(element, "x")
+        y = _svg_float_attr(element, "y")
+        font_size = _svg_font_size(element)
+        width = max(20.0, _estimate_text_width(_element_text(element), font_size))
+        return (x, y - font_size, width, font_size * 1.3)
+    return None
 
 
 def _normalize_template_placeholder_text_slots(skeleton_svg: str) -> str:
@@ -2299,12 +3732,19 @@ def _normalize_template_placeholder_text_slots(skeleton_svg: str) -> str:
 
 
 def _template_skeleton_instruction(page_type: str) -> str:
+    structural_note = (
+        " For structural pages, keep role-matching chrome and omit template "
+        "content placeholders that do not belong to this page role."
+        if page_type in STRUCTURAL_PAGE_TYPES
+        else ""
+    )
     return (
         f"\n\n## Template Skeleton ({page_type} page)\n"
         "Use this SVG as your already data-bound starting point. If any "
         "placeholder token remains, replace it with the current slide plan value. "
         "Preserve ALL decorative elements, gradients, structural chrome, and local "
-        "`assets/...` image hrefs. Do NOT invent image paths or swap template "
+        "`assets/...` image hrefs."
+        f"{structural_note} Do NOT invent image paths or swap template "
         "images for `../sources/images/...` files. Do NOT rewrite from scratch. "
         "Every `<image>` element in the skeleton is structural brand chrome; keep "
         "its href, x/y, width/height, transform, opacity, and preserveAspectRatio "
@@ -2326,10 +3766,10 @@ def _parallel_global_design_context(design_spec: str) -> str:
             MAX_DESIGN_SECTION_CHARS,
             label=f"design section {roman}",
         )
-        for roman in ("I", "II", "III", "IV", "V", "VI")
+        for roman in ("I", "II", "III", "IV", "V")
     ]
     compact = "\n\n".join(section for section in sections if section)
-    return compact or design_spec[:12000]
+    return compact or design_spec
 
 
 def _parallel_page_inventory(pages: list[str]) -> str:
@@ -2347,7 +3787,6 @@ def _build_parallel_context_document(
     pages: list[str],
     style: str,
     language: str,
-    detail_level: str,
     mode: str,
     deck_plan_block: str = "",
 ) -> str:
@@ -2366,8 +3805,7 @@ def _build_parallel_context_document(
         "## Runtime\n\n"
         f"- Generation mode: {mode}\n"
         f"- Style preset: {style}\n"
-        f"- Language: {language}\n"
-        f"- Detail level: {detail_level}\n\n"
+        f"- Language: {language}\n\n"
         "## Global Design Contract\n\n"
         f"{_parallel_global_design_context(design_spec)}\n\n"
         "## Page Inventory\n\n"
@@ -2518,21 +3956,20 @@ def _prepare_parallel_page_inputs(
     )
     figure_source = "manuscript"
     if not used_figures and not is_structural_page:
-        design_spec_figures = _figures_from_design_spec_for_page(
-            design_spec,
-            page_num,
+        referenced_figures = _figures_from_page_references(
+            visible_page_content,
             figure_inventory,
         )
-        if design_spec_figures:
-            figure_source = "design_spec"
-            used_figures = design_spec_figures
-            fallback_refs = "\n".join(
-                _paper_figure_reference_line(fig) for fig in design_spec_figures
+        if referenced_figures:
+            figure_source = "manuscript_reference"
+            used_figures = referenced_figures
+            reference_lines = "\n".join(
+                _paper_figure_reference_line(fig) for fig in referenced_figures
             )
             rewritten_content = (
                 f"{rewritten_content}\n\n"
-                "Design spec image assignment recovered for this slide:\n"
-                f"{fallback_refs}"
+                "Paper figure references resolved from this slide manuscript:\n"
+                f"{reference_lines}"
             )
 
     used_figures, optimized_figure_notes = _optimize_figure_choices(
@@ -2544,6 +3981,18 @@ def _prepare_parallel_page_inputs(
         rewritten_content += (
             "\n\nOptimized paper figure assignment for generation "
             "(use these instead of any earlier figure assignment lines):\n"
+            + "\n".join(_paper_figure_reference_line(fig) for fig in used_figures)
+        )
+    used_figures, limited_figure_notes = _limit_figure_count_for_layout(
+        used_figures,
+        page_type=page_type,
+    )
+    rejected_figures.extend(limited_figure_notes)
+    if limited_figure_notes and used_figures:
+        rewritten_content += (
+            "\n\nFigure budget note:\n"
+            + "\n".join(f"- {note}" for note in limited_figure_notes)
+            + "\n"
             + "\n".join(_paper_figure_reference_line(fig) for fig in used_figures)
         )
 
@@ -2640,10 +4089,14 @@ async def _generate_parallel_page(
     ) or _icon_from_design_spec_for_page(base_context, page_num)
     required_icon = str(icon_assignment["name"]) if icon_assignment is not None else None
     icon_guidance = _icon_guidance_block(icon_assignment)
-    char_budget = _char_budget_block(rewritten_content)
     img_layout = _figure_layout_guidance(used_figures)
     page_role_guidance = _page_role_guidance(page_type)
     structural_override = _structural_page_override_block(page_type)
+    factual_guardrails = _factual_rendering_guardrails(page_type)
+    layout_guardrails = _layout_generation_guardrails(
+        page_type,
+        has_paper_figure=bool(used_figures),
+    )
     structural_figure_policy = (
         "\n- Structural page paper-figure policy: do not place extracted "
         "paper figures (`../sources/images/fig_*.png`) on cover, chapter, "
@@ -2657,15 +4110,17 @@ async def _generate_parallel_page(
     if template_skeletons:
         skeleton_svg = template_skeletons.get(page_type)
         if skeleton_svg:
-            skeleton_svg = _resolve_template_skeleton_placeholders(
+            skeleton_svg = _prepare_template_skeleton(
+                page_type,
                 skeleton_svg,
                 template_vars,
             )
-            skeleton_block = (
-                _template_skeleton_instruction(page_type)
-                +
-                f"```svg\n{skeleton_svg}\n```"
-            )
+            if skeleton_svg:
+                skeleton_block = (
+                    _template_skeleton_instruction(page_type)
+                    +
+                    f"```svg\n{skeleton_svg}\n```"
+                )
 
     slide_plan_section = (
         f"\n\n## Current Structured Slide Plan\n\n{slide_plan}"
@@ -2681,6 +4136,11 @@ async def _generate_parallel_page(
         f"\n\n## Page Design Contract\n\n{page_design_block}"
         if page_design_block
         else ""
+    )
+    text_layout = _dynamic_text_layout_block(
+        rewritten_content,
+        page_design_block,
+        has_paper_figure=bool(used_figures),
     )
     previous_layout_section = (
         "\n\n## Previous Page Layout Continuity (same chapter)\n\n"
@@ -2700,7 +4160,6 @@ async def _generate_parallel_page(
             f"## Fixed Runtime Configuration\n\n"
             f"- Selected style preset: {style}\n"
             f"- Selected language: {language}\n"
-            f"- Selected detail level: {detail_level}\n"
             f"- Generate page {page_num}/{total_pages} independently, but match the global design contract exactly.\n"
             f"- All visible SVG text must follow the selected language unless a proper noun must stay in its original form.\n"
             f"- Use the Typography System from the global design contract as the single source of truth for fonts and size hierarchy."
@@ -2714,12 +4173,13 @@ async def _generate_parallel_page(
             f"## Runtime Reminders\n"
             f"- Style preset: {style}\n"
             f"- Language: {language}\n"
-            f"- Detail level: {detail_level}\n"
             f"- Page type: {page_type}. Use this type only for template selection; do not render metadata comments.\n"
             f"- Keep all visible text in the requested language.\n"
             f"{page_role_guidance}\n"
             f"{structural_override}"
-            f"- {char_budget}"
+            f"{factual_guardrails}"
+            f"{layout_guardrails}"
+            f"{text_layout}\n"
             f"{structural_figure_policy}\n\n"
             f"{figure_guidance}\n\n"
             f"{icon_guidance}\n\n"
@@ -2727,12 +4187,10 @@ async def _generate_parallel_page(
             f"## Output Complexity Budget\n"
             f"- Keep the SVG compact and editable; target under {SVG_GENERATION_MAX_TOKENS} output tokens.\n"
             f"- Prefer grouped primitives, reusable styles, and concise text. Avoid huge decorative path dumps or duplicate off-canvas elements.\n\n"
-            f"## Pre-Generation Boundary Check\n"
-            f"Before writing SVG, mentally plan y-coordinates top to bottom:\n"
-            f"- Content area: y=100 to y=620 (520px). This is a hard limit.\n"
-            f"- Track cumulative height as you place each element.\n"
-            f"- If total exceeds 520px: shrink images, reduce font size, or cut content.\n"
-            f"- Footer (y=660+) is reserved for page number only -- no content there.\n\n"
+            f"## Layout Budget\n"
+            f"- Fit content before drawing elements; content area is y=100..620.\n"
+            f"- If content does not fit, change regions, spacing, or wording before drawing.\n"
+            f"- Footer (y=660+) is reserved for page number only.\n\n"
             f"Generate the complete SVG code for this page. "
             f"Output ONLY the SVG code, wrapped in ```svg code block."
             f"{skeleton_block}"
@@ -2750,21 +4208,28 @@ async def _generate_parallel_page(
     except OSError:
         pass
 
-    snapshot = set_usage_context(stage="generation", page=page_num, attempt=1)
-    try:
-        response: LLMResponse = await llm.chat(
-            conversation,
-            model,
-            temperature=0.3,
-            max_tokens=SVG_GENERATION_MAX_TOKENS,
-        )
-    finally:
-        reset_usage_context(snapshot)
+    generation_max_tokens = SVG_GENERATION_MAX_TOKENS
+    response, generation_max_tokens = await _chat_svg_generation(
+        llm,
+        conversation,
+        model,
+        temperature=0.3,
+        max_tokens=generation_max_tokens,
+        project_dir=project_dir,
+        debug_prefix="parallel",
+        page_num=page_num,
+        attempt=1,
+    )
 
     svg_content = _extract_svg(response.content)
     for extraction_attempt in range(2, MAX_SVG_EXTRACTION_ATTEMPTS + 1):
         if svg_content:
             break
+        if (
+            _completion_near_limit(response, generation_max_tokens)
+            and _svg_response_looks_truncated(response.content)
+        ):
+            generation_max_tokens = _next_higher_svg_max_tokens(generation_max_tokens)
         conversation.append(LLMMessage.assistant(response.content))
         conversation.append(
             LLMMessage.user(
@@ -2777,29 +4242,28 @@ async def _generate_parallel_page(
                 )
             )
         )
-        snapshot = set_usage_context(
-            stage="generation",
-            page=page_num,
+        response, generation_max_tokens = await _chat_svg_generation(
+            llm,
+            conversation,
+            model,
+            temperature=0.2,
+            max_tokens=generation_max_tokens,
+            project_dir=project_dir,
+            debug_prefix="parallel",
+            page_num=page_num,
             attempt=extraction_attempt,
         )
-        try:
-            response = await llm.chat(
-                conversation,
-                model,
-                temperature=0.2,
-                max_tokens=SVG_GENERATION_MAX_TOKENS,
-            )
-        finally:
-            reset_usage_context(snapshot)
         svg_content = _extract_svg(response.content)
 
     if not svg_content:
         conversation.append(LLMMessage.assistant(response.content))
-        raise RuntimeError(
+        failure_message = (
             f"Failed to generate parseable SVG for page {page_num}/{total_pages} "
             f"({page_name}) after {MAX_SVG_EXTRACTION_ATTEMPTS} attempts"
         )
+        raise RuntimeError(failure_message)
 
+    svg_content = _normalize_obvious_short_text_lines(svg_content, page_design_block)
     conversation.append(LLMMessage.assistant(f"```svg\n{svg_content}\n```"))
 
     best_svg = svg_content
@@ -2807,10 +4271,9 @@ async def _generate_parallel_page(
     critic_attempt = 1
     max_critic_attempts = max(0, int(max_critic_attempts))
     visual_qa_max_attempts = max(0, int(visual_qa_max_attempts or 0))
-    static_attempt_limit = (
-        max_critic_attempts
-        if max_critic_attempts > 0
-        else FIGURE_SAFETY_CRITIC_ATTEMPTS
+    static_attempt_limit = _static_attempt_limit_for_report(
+        max_critic_attempts,
+        None,
     )
 
     while True:
@@ -2827,9 +4290,13 @@ async def _generate_parallel_page(
                 required_icon=required_icon,
                 include_general_svg_checks=max_critic_attempts > 0,
             )
+            static_attempt_limit = _static_attempt_limit_for_report(
+                max_critic_attempts,
+                report,
+            )
             if report.passed and max_critic_attempts <= 0:
                 report = None
-            if report is not None and not report.passed and critic_attempt >= static_attempt_limit:
+            if report is not None and not report.passed and critic_attempt > static_attempt_limit:
                 archive_rel = _archive_repair_svg(
                     repair_archive_dir,
                     page_num=page_num,
@@ -3053,17 +4520,18 @@ async def generate_svg_pages_parallel(
         detail_level=detail_level,
     )
     deck_plan_block = deck_plan_markdown(deck_plan)
+    generation_context_block = deck_generation_context_markdown(deck_plan)
     try:
         (project_dir / "deck_plan.md").write_text(deck_plan_block, encoding="utf-8")
     except OSError:
         pass
     base_context = _parallel_global_design_context(design_spec)
-    base_context = f"{base_context}\n\n## Structured Deck Plan (authoritative)\n\n{deck_plan_block}"
+    base_context = (
+        f"{base_context}\n\n## Deck Generation Context\n\n"
+        f"{generation_context_block}"
+    )
     if template_context:
         base_context = f"{base_context}\n\n## Template Reference\n\n{template_context}"
-    if is_deepseek_provider(llm, model):
-        base_context = f"{base_context}\n\n{deepseek_executor_guidance(detail_level)}"
-
     try:
         (project_dir / "parallel_executor_context.md").write_text(
             _build_parallel_context_document(
@@ -3071,9 +4539,8 @@ async def generate_svg_pages_parallel(
                 pages=pages,
                 style=style,
                 language=language,
-                detail_level=detail_level,
                 mode=mode,
-                deck_plan_block=deck_plan_block,
+                deck_plan_block=generation_context_block,
             ),
             encoding="utf-8",
         )
@@ -3247,6 +4714,8 @@ def _build_svg_extraction_retry_prompt(
         "- The current page has not been generated yet.\n\n"
         "## Regeneration Instructions\n"
         f"- Regenerate page {page_num}/{total_pages} only; do not move to another page.\n"
+        "- Start from a clean SVG document instead of continuing or patching the previous response; it may have been truncated.\n"
+        "- Do not spend tokens on hidden reasoning, analysis, explanations, or empty output. Emit visible SVG code immediately.\n"
         "- Preserve the page content below; do not invent a different slide.\n"
         "- Keep the SVG concise: prefer native text/rect/path groups, avoid excessive decorative paths, and stay well below the token limit.\n"
         "- Return one complete SVG document, wrapped in a ```svg code block.\n"

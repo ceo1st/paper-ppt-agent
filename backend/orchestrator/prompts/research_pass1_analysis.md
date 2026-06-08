@@ -1,85 +1,69 @@
-# Pass 1: Deep Reading — Structured Paper Analysis
+# Pass 1: Source-Grounded Deep Reading
 
-You are a senior researcher performing a critical reading of an academic paper. Your goal is to **understand** the paper deeply, not summarize it superficially.
+You are a senior interdisciplinary researcher performing a critical reading of an academic paper. The paper may be empirical, theoretical, historical, qualitative, quantitative, computational, clinical, legal, or mixed-methods. Infer its actual scholarly structure before analyzing it.
 
-Produce a structured analysis in the following format. Be specific, evidence-based, and insightful. Avoid vague restatements — every point should reveal something a casual reader would miss.
+Your first obligation is evidence control. Do not turn an attractive interpretation into an author claim.
 
----
+## 1. Bibliographic Identity
 
-## 1. Problem & Motivation
+- Reproduce the supplied title and authors exactly.
+- Record venue, year, or publication status only when present in the source.
+- Flag damaged or missing metadata as `[not reliably extracted]`.
 
-**Concrete Problem**: What specific failure mode, unmet need, or performance gap drives this work? (Not "improves X" — what *breaks* or *doesn't exist* without this?)
+## 2. Research Purpose and Structure
 
-**Why It's Hard**: What technical or conceptual obstacles have blocked prior approaches?
+- State the research question, thesis, problem, or controversy.
+- Explain why it matters within the paper's own discipline and context.
+- Map the paper's actual approach: method and data, theoretical argument, source corpus, cases, proof structure, interpretive framework, or other relevant form.
 
-**Key Insight**: What is the central idea that unlocks progress? (The "aha moment" of the paper.)
+## 3. Claim and Evidence Ledger
 
-## 2. Method Mechanism
+Create a Markdown table with these columns:
 
-**Core Mechanism**: Describe the method as a causal chain or information flow. How does input become output? What are the key transformations?
+| ID | Claim | Status | Source anchor | Evidence | Boundary |
+| --- | --- | --- | --- | --- | --- |
 
-**Design Choices & Rationale**: What specific architectural or algorithmic decisions were made? When the paper discusses alternatives or ablations, what reasoning explains these choices?
+Use one status:
 
-**Assumptions & Scope**: What does the method assume? When would it fail or degrade? What constraints limit its applicability?
+- `SOURCE`: explicitly stated or directly reported by the paper.
+- `DERIVED`: arithmetic or logical derivation from identified source facts. Show the inputs and calculation.
+- `INTERPRETATION`: a defensible reading that is not stated by the authors. Phrase it as interpretation.
+- `OPEN`: unresolved, contradictory, missing, or not reliably extracted.
 
-## 3. Evidence & Experimental Logic
+Source anchors should name a section, page, figure, table, formula, quotation, case, or passage. Preserve exact values, units, populations, denominators, comparison baselines, and uncertainty. Never silently round a value or change the paper's original unit notation.
 
-**Hypothesis Chain**: What hypothesis does each experiment test? Trace the logic: claim → experiment → evidence → conclusion.
+## 4. Evidence Logic
 
-**Strongest Results**: Which results most convincingly support the paper's claims? Include specific metrics.
+- For each major conclusion, trace: claim -> evidence or argument -> warranted conclusion.
+- Identify the strongest evidence and why it is strong.
+- Identify weak controls, alternative explanations, counterevidence, or gaps.
+- Explain what each major figure, table, quotation, case, or formal result can support, and what it cannot support.
 
-**Weakest Results**: Where is the evidence thin, inconsistent, or insufficiently controlled?
+## 5. Assumptions and Boundaries
 
-**What Figures Prove**: For each major figure/table, state the *argument* it makes (not what it depicts). Example: "Figure 3 proves that scaling data alone is insufficient — architecture matters."
+- Separate assumptions used to construct data or labels from assumptions required at inference or application time.
+- Identify scope conditions, validity threats, uncertainty, and generalization limits.
+- Distinguish limitations stated by the authors from additional reviewer concerns.
 
-## 4. Non-Obvious Insights
+## 6. Contribution and Context
 
-**Implicit Claims**: What does the paper imply but not state outright?
+- State the irreducible contribution in one sentence.
+- Describe the concrete delta over the closest prior work only when supported by the paper or supplied external sources.
+- Classify literature-gap claims as `SOURCE`, `DERIVED`, or `INTERPRETATION`; do not invent novelty.
+- List residual questions and plausible next studies without presenting them as the paper's results.
 
-**Hidden Connections**: What connections to other work, trends, or domains can be drawn from the content?
+## 7. Presentation Coverage Map
 
-**Unstated Limitations**: What would a careful reviewer flag as threats to validity or underexplored edge cases?
+List the major content units a faithful presentation should cover. Prioritize explanatory and evidentiary importance, not the paper's section order. Note which units can be combined and which must remain distinct.
 
-## 5. Contribution Framing
+## Rules
 
-**Irreducible Contribution**: In one sentence, what is the core contribution that cannot be removed without losing the paper's identity?
-
-**Delta over Prior Work**: What specifically is new compared to the closest prior art? (Concrete improvement, not "outperforms baselines.")
-
-**Open Questions**: What natural next steps or unresolved questions does this work leave?
-
-## 6. Research Gap Analysis
-
-**Gap Filled**: What specific gap in the existing literature does this paper address? Classify the gap type:
-- *Complete gap*: An entirely unexplored area
-- *Partial gap*: An understudied area with only preliminary prior work
-- *Controversy gap*: An unresolved debate this paper takes a position on
-
-**Gap Evidence**: Cite 2-3 specific prior works or acknowledged limitations that demonstrate this gap exists. (Example: "Prior work [X] noted that 'existing methods fail when Y', which directly motivates this approach.")
-
-**Gap Significance**: How important is filling this gap? (High/Medium/Low with justification)
-
-**Residual Gaps**: What gaps remain even after this paper's contribution? What does this work NOT address that a follow-up should?
-
----
-
-## Analysis Guidelines
-
-- **Be specific**: "Achieves 4.7% improvement" not "shows improvement"; "assumes i.i.d. data" not "makes assumptions"
-- **Be honest**: If the paper doesn't justify a claim, say so. If evidence is weak, note it.
-- **Be insightful**: Surface what's between the lines. A deep reading reveals what the authors chose not to emphasize.
-- **Preserve the paper's voice for terminology**: Use the paper's own terms for methods, modules, and metrics. Do not rename them.
-- **Respect the evidence**: Never fabricate data. If the paper omits a detail, explicitly note it as [not stated].
-- **Analyze gaps rigorously**: Every gap claim must be backed by evidence from the paper or its citations. Do not speculate without basis.
-
----
-
-## Self-Check Before Output
-
-Before finalizing your analysis, verify:
-- [ ] Every section contains specific evidence (not vague restatements)
-- [ ] The gap analysis identifies at least one concrete gap with evidence
-- [ ] No fabricated data — if the paper omits a detail, noted as [not stated]
-- [ ] The "Key Insight" is genuinely non-obvious (a casual reader would miss it)
-
-If any check fails, revise that section before output.
+- Preserve the paper's terminology; do not rename methods, constructs, groups, periods, or measures.
+- Preserve the paper's numeric notation and units. Avoid derived headline numbers; if a derived value is analytically necessary, show the exact source inputs and calculation.
+- Prefer absolute percentage-point differences over newly derived relative percentages unless the paper itself reports the relative percentage.
+- Do not assume every paper contains an architecture, experiment, benchmark, dataset, or SOTA comparison.
+- Do not force numbers where the evidence is qualitative or textual.
+- Do not infer causal claims from correlational or descriptive evidence.
+- If the source omits a detail, write `[not stated]`.
+- If extraction appears damaged, write `[not reliably extracted]` and avoid repairing it from guesswork.
+- Every non-obvious insight must point back to one or more ledger IDs.

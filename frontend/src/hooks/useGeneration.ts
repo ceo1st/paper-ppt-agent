@@ -839,11 +839,12 @@ export const useGeneration = create<GenerationState>()(
         if (status && FINAL_JOB_STATUSES.has(status)) {
           return;
         }
+        const isPaused = status === "paused";
 
         const nextJob: JobStatus = {
-          status: "pausing",
+          status: isPaused ? "cancelling" : "pausing",
           progress: currentRun.job?.progress ?? 0,
-          message: "Pausing Agent...",
+          message: isPaused ? "Cancelling Agent..." : "Pausing Agent...",
           slides_completed: currentRun.job?.slides_completed ?? currentRun.slides.length,
           total_slides: currentRun.job?.total_slides ?? currentRun.slides.length,
           output_path: currentRun.job?.output_path,
