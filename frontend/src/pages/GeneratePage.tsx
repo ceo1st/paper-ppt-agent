@@ -617,6 +617,7 @@ export function GeneratePage() {
   const activeAgentGeneration = Boolean(
     jobId && selectedRunConfig?.provider?.startsWith("agent:") && job,
   );
+  const sideConfigLabel = activeAgentGeneration ? "Agent" : t("config.title");
   const requestGenerationBackend = (nextBackend: "provider" | "agent") => {
     if (nextBackend === "provider") {
       setShowAgentModeConfirm(false);
@@ -642,7 +643,7 @@ export function GeneratePage() {
   return (
     <Layout showSidebar={false} contentClassName="studio-page scholarly-workspace-page">
       <section className="scholarly-workspace" data-side-tab={workspaceSideTab}>
-        <div className="workspace-side-tabs" role="tablist" aria-label={`${t("source.title")} / ${t("config.title")}`}>
+        <div className="workspace-side-tabs" role="tablist" aria-label={`${t("source.title")} / ${sideConfigLabel}`}>
           <button
             type="button"
             className={`workspace-side-tab ${workspaceSideTab === "sources" ? "workspace-side-tab-active" : ""}`}
@@ -660,8 +661,8 @@ export function GeneratePage() {
             role="tab"
             onClick={() => setWorkspaceSideTab("config")}
           >
-            <Settings2 size={16} />
-            <span>{t("config.title")}</span>
+            {activeAgentGeneration ? <Bot size={16} /> : <Settings2 size={16} />}
+            <span>{sideConfigLabel}</span>
           </button>
         </div>
         <SourcesPanel
@@ -1108,7 +1109,7 @@ export function GenerationAgentConsole({
   };
 
   return (
-    <aside className="generation-agent-console">
+    <aside className="configuration-panel generation-agent-console">
       <div className="generation-agent-console-header">
         <div className="workspace-panel-title">
           <Bot size={18} />
