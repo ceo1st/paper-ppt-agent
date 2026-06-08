@@ -299,6 +299,10 @@ const openImageLibPanel = () => {
   font-size: 13px;
   user-select: none;
   min-width: 0;
+  container-type: inline-size;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 .left-handler, .more {
   display: flex;
@@ -327,9 +331,12 @@ const openImageLibPanel = () => {
 .add-element-handler {
   display: flex;
   flex: 1 1 auto;
-  justify-content: center;
+  justify-content: flex-start;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
 
   & > div {
     flex-shrink: 0;
@@ -341,6 +348,7 @@ const openImageLibPanel = () => {
     margin: 0 2px;
     padding: 0 10px;
     display: flex;
+    flex: 0 0 auto;
     justify-content: center;
     align-items: center;
     border-radius: $borderRadius;
@@ -443,6 +451,74 @@ const openImageLibPanel = () => {
       }
       .text {
         display: none;
+      }
+    }
+  }
+}
+
+@container (width <= 900px) {
+  .canvas-tool {
+    gap: 6px;
+    padding: 0 6px;
+  }
+  .add-element-handler {
+    .insert-handler-item {
+      margin: 0 1px;
+      padding: 0 7px;
+
+      .icon {
+        margin-right: 0;
+      }
+      .text {
+        display: none;
+      }
+
+      &.group-btn {
+        margin-right: 3px;
+
+        .group-btn-main {
+          padding: 0 5px;
+        }
+      }
+    }
+  }
+  .handler-item {
+    margin: 0 1px;
+  }
+}
+
+@container (width <= 640px) {
+  .left-handler,
+  .right-handler {
+    .handler-item {
+      height: 28px;
+      padding: 0 6px;
+    }
+  }
+  .right-handler .text {
+    display: none;
+  }
+  .more > .handler-item {
+    display: none;
+  }
+  .more-icon {
+    display: block;
+  }
+  .add-element-handler {
+    .insert-handler-item {
+      height: 28px;
+      padding: 0 5px;
+
+      &.group-btn {
+        margin-right: 2px;
+
+        .group-btn-main {
+          padding: 0 4px;
+        }
+
+        .arrow {
+          font-size: 11px;
+        }
       }
     }
   }
