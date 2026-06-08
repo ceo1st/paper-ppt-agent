@@ -293,13 +293,20 @@ const openImageLibPanel = () => {
   background-color: #fff;
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  gap: 8px;
   padding: 0 10px;
   font-size: 13px;
   user-select: none;
+  min-width: 0;
 }
 .left-handler, .more {
   display: flex;
   align-items: center;
+}
+.left-handler,
+.right-handler {
+  flex: 0 0 auto;
 }
 .more-icon {
   display: none;
@@ -318,11 +325,11 @@ const openImageLibPanel = () => {
   }
 }
 .add-element-handler {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
   display: flex;
+  flex: 1 1 auto;
+  justify-content: center;
+  min-width: 0;
+  overflow: hidden;
 
   & > div {
     flex-shrink: 0;
@@ -428,34 +435,7 @@ const openImageLibPanel = () => {
   }
 }
 
-@media screen and (width <= 1500px) {
-  .canvas-tool {
-    gap: 6px;
-    padding: 0 6px;
-  }
-  .left-handler,
-  .right-handler {
-    flex: 0 0 auto;
-  }
-  .add-element-handler {
-    position: static;
-    flex: 1 1 auto;
-    min-width: 0;
-    justify-content: center;
-    overflow: hidden;
-    transform: none;
-
-    .insert-handler-item {
-      margin: 0 1px;
-      padding: 0 7px;
-    }
-  }
-  .handler-item {
-    margin: 0 1px;
-  }
-}
-
-@media screen and (width <= 1600px) {
+@media screen and (width <= 1800px) {
   .add-element-handler {
     .insert-handler-item {
       .icon {
@@ -467,6 +447,25 @@ const openImageLibPanel = () => {
     }
   }
 }
+
+@media screen and (width <= 1500px) {
+  .canvas-tool {
+    gap: 6px;
+    padding: 0 6px;
+  }
+  .add-element-handler {
+    justify-content: center;
+
+    .insert-handler-item {
+      margin: 0 1px;
+      padding: 0 7px;
+    }
+  }
+  .handler-item {
+    margin: 0 1px;
+  }
+}
+
 @media screen and (width <= 1366px) {
   .add-element-handler {
     .insert-handler-item {
