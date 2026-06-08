@@ -40,32 +40,29 @@ Every page MUST follow this three-region structure. Content area boundary is a *
 3. Use proper text sizing: titles large, body readable, captions small
 4. Include decorative elements sparingly (dividers, subtle backgrounds)
 5. Data visualizations: use SVG shapes directly (rect bars, circle pies, path lines)
-6. Images: reference with `<image href="path" x="" y="" width="" height=""/>`. The `href` MUST point to a real file path that exists (e.g. `../sources/images/fig_001_p1.png`). Do NOT invent filenames. If no real image is available, use native SVG shapes/charts/icons instead. **When Paper Figure Guidance includes `actual dimensions: WxH (ratio R)`, you MUST use that ratio for width/height.** For example, if actual dimensions are 974x269 (ratio 3.62), use width=500 height=138 (500/3.62≈138), NOT arbitrary values.
+6. Images: reference with `<image href="path" x="" y="" width="" height=""/>`. The `href` MUST point to a real file path that exists (e.g. `../sources/images/fig_001_p1.png`). Do NOT invent filenames. If no real image is available, use native SVG shapes, charts, or diagrams instead. **When Paper Figure Guidance includes `actual dimensions: WxH (ratio R)`, calculate the final visible image rectangle from that ratio.** Do not center a small image inside a much larger empty frame — revise the image/text regions before drawing. Treat the assigned image box height as a hard cap that must include the visible image and any nearby caption.
 7. **Content area boundary**: All text and essential visual elements MUST remain within the content area (x=40, y=100, width=1200, height=520). Account for text width when positioning—longer text needs more left margin. When in doubt, leave breathing room rather than risk clipping.
 8. For a single visual line of copy, use exactly one `<text>` element. Do not place multiple sibling `<text>` elements at the same or nearly the same x/y position to fake inline styling.
 9. Use inline `<tspan>` only for style emphasis within one line. Highlighted keywords must stay inside the same `<text>` as the surrounding sentence, e.g. `学习 <tspan fill="#2563EB">功能相似性</tspan> 的向量表示`. Never place a colored keyword as a separate `<text>` with a guessed x-coordinate; it will drift away from the sentence.
 10. Never use HTML `<span>` inside SVG. Inline emphasis must be SVG `<tspan>`, otherwise browser preview can leak the span text outside the slide.
 11. If a bullet line is long, wrap it onto a new line by changing `y` or using a new block, never by stacking multiple same-position text nodes.
-12. For extracted paper figures, use only hrefs explicitly allowed in the current page's Paper Figure Guidance. Do not reuse a paper figure from an earlier page. If no allowed paper figure is listed, use native SVG shapes/charts/icons instead of `<image href="../sources/images/...">`.
+12. For extracted paper figures, use only hrefs explicitly allowed in the current page's Paper Figure Guidance. Do not reuse a paper figure from an earlier page. If no allowed paper figure is listed, use native SVG shapes, charts, or diagrams instead of `<image href="../sources/images/...">`.
 13. Ensure sufficient contrast: dark text on light backgrounds, light text on dark backgrounds. Never pair light text with light fill or dark text with dark fill.
 14. For KPI, metric, or callout rows that pair a large number with a smaller label on the same visual line, use the same SVG text baseline: the number `<text>` and label `<text>` must have the same `y` value. Do not move the smaller label down to visually center it; SVG `y` is a baseline, so offsets like `label y = number y + 10` make the row look misaligned. If the label should sit below the number, place it on a clearly separate line with enough vertical gap.
 15. **Text density**: Balance text against the current page's figure, diagram, chart, and whitespace needs. Do not fill the entire content area with text. If content feels crowded, reflow regions, widen useful boxes, tune spacing, or tighten wording while preserving the manuscript substance.
 16. **CJK emphasis — avoid `font-weight: bold` in `<tspan>`**: Bold CJK glyphs are ~1.05-1.1× wider than regular, causing visible spacing jumps at tspan boundaries. Instead, emphasize CJK text with a contrasting `fill` color (e.g. `<tspan fill="#2B6CB0">重点词</tspan>`). Only use `font-weight="bold"` on standalone title/heading `<text>` elements, never inline inside a body-text line.
 17. **Line wrapping**: Wrap text by the local container width, not the full page width. A card, column, callout, or diagram label is a hard text box. Keep manual line breaks if they prevent overflow; do not merge lines just to fill width.
 18. **Icon-text vertical alignment**: When an explicitly assigned icon or structural marker sits beside a text label on the same visual row, SVG `y` is the baseline, not the visual center. To center text with a circle marker, use: `text_y = circle_cy + font_size × 0.35`. Example: circle at cy=200, font_size=18 → text y = 200 + 6.3 ≈ 206. Do NOT set text y equal to circle cy.
-19. **No fake card icons**: If the current page's Icon Guidance says there is no explicit icon assignment, do not create standalone letter/symbol badges such as `P`, `Δ`, `!`, `G`, `?`, or `i` inside small squares/circles. For technical cards, use numbered markers or small mechanism diagrams instead.
+19. **No fake card icons**: Do not use letters, symbols, emoji, Unicode glyphs, dingbats, stars, checkmarks, arrows, or punctuation as icon substitutes. If no real icon is assigned, use numbered markers or small mechanism diagrams instead.
 20. **Static SVG only**: Do not use SVG/CSS animation, transitions, SMIL elements, keyframes, or animated decorative effects. The browser preview and exported PPTX must show the same static page.
 21. **Chrome consistency**: Page numbers belong in the footer only. Do not add top-left administrative labels such as section counters, chapter counters, or page-number labels unless they are part of a provided template skeleton.
 22. **Respect page roles**: Cover/chapter/ending pages are structural and minimal. Content pages must not use chapter-divider layouts, oversized chapter numerals, or transition-slide treatment.
-23. **Factual rendering**: Visible facts must come from the current page manuscript or supplied page context. Do not add new metrics, dates, percentages, sample sizes, ranks, axis tick values, or rounded values while drawing native SVG visuals.
+23. **Factual rendering**: Visible facts must come from the current page manuscript or Page Design Contract. Use supplied memory only to clarify that page's claim, not to add extra facts. Do not add new metrics, dates, percentages, sample sizes, ranks, axis tick values, or rounded values while drawing native SVG visuals.
 24. **Evidence context is private grounding**: Do not print evidence-card IDs, section labels, retrieved snippets, or source-memory blocks as visible slide cards. Synthesize them into the slide's claim, explanation, diagram, or exact cited figure/table reference.
-25. **Native charts without invented numbers**: If drawing a chart from manuscript/context numbers, preserve exact precision. Do not round `90.37%` to `90.4%`, do not create unlabeled scale ticks such as `70%/80%/90%` unless those exact ticks are present in the page inputs, and prefer qualitative bars/flows when exact chart encoding would require invented scale values.
-26. **Layout before drawing**: Instantiate the page's Region Plan first. Place major regions on a shared grid with consistent gutters before placing text, figures, cards, or callouts. Do not improvise free-floating elements outside that plan.
+25. **Native charts without invented numbers**: If drawing a chart from manuscript/context numbers, preserve exact precision. Do not round source values or create unlabeled scale ticks unless those exact ticks are present in the page inputs; prefer qualitative bars/flows when exact chart encoding would require invented scale values.
+26. **Layout before drawing**: Instantiate the page's Region Plan first. On pages with paper figures, calculate and place the final visible image rectangles from their actual aspect ratios before allocating text, cards, or callouts. Then place all major regions on a shared grid with consistent gutters. If a Region Plan produces a tiny image floating in a large frame, repair the region composition before drawing text rather than faithfully reproducing the bad occupancy.
 27. **Balanced occupancy**: Content slides should normally use 65-85% of the content area. Avoid empty quadrants, a lone short bullet list beside a large blank region, or a bottom callout that is detached from the main grid. If content is sparse, enlarge the figure, convert bullets into grouped callouts, or use a simple supported diagram.
 28. **Dynamic CJK wrapping**: Wrap against each text box's actual width, font size, and visual share. Let ordinary non-final lines use most of the available width, break at semantic boundaries, and allow light raggedness. Adjust regions or typography only for real clipping, overlap, or clearly wasteful early breaks.
-29. **Image + text balance**: For paper-figure pages, reserve the figure region first and balance it with a text region of comparable visual height. Keep caption, bullets, and callout aligned to the same column/grid; do not leave a large blank band above or below either side.
-30. **Text-capacity preflight**: Before writing any `<text>`, budget the assigned box: heading height + gap + body line count × line-height + caption/source + top/bottom padding. Estimate each visible line width and require `text_right <= region_right - padding`; require the final baseline plus descender space to stay above `region_bottom - padding`. A card is not valid merely because its first line fits.
-31. **Table column preflight**: Measure the longest visible method/label/cell in every column before choosing x positions. Allocate the label column first, right-align numeric columns, and preserve gutters. Never let a long method name collide with the first value column.
 
 ## CJK Text Layout Reference
 
@@ -81,7 +78,7 @@ Do not over-wrap Chinese text by using a narrow box when horizontal room exists.
 
 ## Image-Text Layout Formulas
 
-When a page contains images, calculate layout based on the image's original aspect ratio. Never use arbitrary splits.
+When a page contains images, calculate the final visible image rectangles based on the original aspect ratios before placing any text. Never use arbitrary splits or oversized frames around small centered images.
 
 **Layout Decision** (content area W=1200, H=520):
 
@@ -94,7 +91,7 @@ When a page contains images, calculate layout based on the image's original aspe
 **Left-Right**: Image height=H, width=H×R. Text area width=W-image_width-20. Constraint: ≥280px.
 **Multi-Image Grid**: cell_w=(W-(cols-1)×20)/cols, cell_h=(H-(rows-1)×20)/rows.
 
-### Boundary Enforcement (Mandatory)
+### Layout Budget (Mandatory)
 
 The content area (y=100, h=520) ends at y=620. Every element you place has a y-coordinate and height -- their sum must stay under 620. When stacking multiple images or cards, divide the 520px among them before placing text. If the math does not fit, shrink images or reduce content. Never place anything in the footer region (y=660+) except the page number.
 
@@ -110,8 +107,9 @@ When a page message includes a `## Template Skeleton` block, follow these rules:
 4. **Do not derive chapter numbers from page numbers** — `PAGE_NUM` is for footer pagination only. `SECTION_NUM` / `CHAPTER_NUM` are planned chapter indices and may differ from the page number.
 5. **Preserve ALL decorative elements** — gradients, glow effects, grid lines, accent bars, decorative shapes, neural network lines, node circles, etc. must remain unchanged.
 6. **Preserve structural chrome** — headers, footers, sidebars, accent decorations, and brand identifiers from the skeleton must be kept.
-7. **Preserve template images and transforms** — every `<image>` in the skeleton is structural brand chrome unless the slide plan explicitly names it as replaceable content. Keep its `href`, x/y, width/height, opacity, `preserveAspectRatio`, and transform unchanged. Keep path/polygon transforms and orientation unchanged; do not mirror, flip, rotate, or relocate corner decorations.
-8. **Content area** — add your page-specific content (text, images, charts) inside the content area boundary only. Do not overflow beyond the content area.
-9. **Colors and fonts** — match the skeleton's color scheme and font-family exactly. Do not substitute different colors or fonts.
-10. **Content pages** — if no skeleton is provided for a content page, follow the color scheme and layout style from the content page skeleton reference provided in the initial context.
-11. **Layout contract** — follow the layout type declared for the page in Section IX. Do not switch a top-bottom page to left-right, or a fixed card grid to another structure, unless the page would otherwise be impossible to render without overflow.
+7. **Respect structural roles** — on cover, TOC, chapter, and ending pages, omit template content placeholders that do not belong to that page role.
+8. **Preserve template images and transforms** — every `<image>` in the skeleton is structural brand chrome unless the slide plan explicitly names it as replaceable content. Keep its `href`, x/y, width/height, opacity, `preserveAspectRatio`, and transform unchanged. Keep path/polygon transforms and orientation unchanged; do not mirror, flip, rotate, or relocate corner decorations.
+9. **Content area** — add your page-specific content (text, images, charts) inside the content area boundary only. Do not overflow beyond the content area.
+10. **Colors and fonts** — match the skeleton's color scheme and font-family exactly. Do not substitute different colors or fonts.
+11. **Content pages** — if no skeleton is provided for a content page, follow the color scheme and layout style from the content page skeleton reference provided in the initial context.
+12. **Layout contract** — follow the layout type declared for the page in Section IX. Do not switch a top-bottom page to left-right, or a fixed card grid to another structure, unless the page would otherwise be impossible to render without overflow.

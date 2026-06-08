@@ -766,6 +766,7 @@ class PersistentAgentSession:
                         data={"runtime": "codex", "thread_id": thread.id},
                     )
                 )
+                first_turn = True
                 while self._active:
                     try:
                         prompt = self._prompt_queue.get(timeout=1.0)
@@ -785,8 +786,10 @@ class PersistentAgentSession:
                             data={"runtime": "codex", "thread_id": thread.id},
                         )
                     )
+                    turn_prompt = prompt if first_turn else _live_feedback_prompt(prompt)
+                    first_turn = False
                     turn = await thread.turn(
-                        [SkillInput(name=_AGENT_SKILL_NAME, path=skill_path), TextInput(prompt)],
+                        [SkillInput(name=_AGENT_SKILL_NAME, path=skill_path), TextInput(turn_prompt)],
                         approval_mode=ApprovalMode.auto_review,
                         cwd=str(self._project_dir),
                         effort=effort,
@@ -844,6 +847,7 @@ class PersistentAgentSession:
                             interrupt_watcher.cancel()
                         await asyncio.gather(interrupt_watcher, return_exceptions=True)
                     if turn_interrupted:
+                        self._accepting_feedback = True
                         continue
                     # A finished Codex turn completes generation. Feedback sent
                     # after export resumes this saved thread in a new run.
@@ -1879,7 +1883,6 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "language": request.language,
             "target_pages": request.num_pages,
             "style": request.style,
-            "icon_library": getattr(request, "icon_library", "chunk"),
             "template_id": request.template_id,
             "user_instruction": request.instruction,
             "style_overrides": request.style_overrides,
@@ -1945,7 +1948,6 @@ def _build_agent_task(project_dir: Path, source_target: Path, request: Any, agen
             "selected_template": f"templates/{request.template_id}" if request.template_id else None,
             "source_assets": "source_assets",
             "source_asset_extractor": f"skills/{_AGENT_SKILL_NAME}/scripts/extract_paper_assets.py",
-            "icon_search": f"skills/{_AGENT_SKILL_NAME}/scripts/search_icons.py",
             "source_paper_markdown": "source_assets/paper.md",
             "source_figures_json": "source_assets/figures.json",
             "source_figures_markdown": "source_assets/figures.md",
@@ -3475,12 +3477,13 @@ Workspace contract:
 - Use subagents/parallel work when the runtime supports it. When deep research is enabled, SubAgents are required unless the Task/SubAgent tool is unavailable or fails.
 - External research: {external}. Deep research: {deep}. Agent post-generation review: {review}.
 - Deck budget contract: {detail_profile["slide_count_guidance"]} The detail selector affects only slide count and source/summary retrieval budgets. It does not set per-slide density, bullet count, evidence count, typography, or layout.
-- Structural contract: slide 1 is the cover and slide 2 is a mandatory table of contents whose chapter titles match the final chapter plan.
+- Structural contract: slide 1 is the cover and slide 2 is a mandatory table of contents whose chapter titles match the final chapter plan. Count structural pages separately and use the remaining content-slide budget to choose chapter boundaries.
+- Chapter contract: use at most {detail_profile["page_type_budget"]["chapter"]} chapter dividers. Chapters are presentation-level sections, not paper subsection headings; local method parts, result groups, and discussion points belong on content slides.
 - Per-slide authoring contract: author every `svg_output/slide_###.svg` directly as a separate file. Do not create or run a Python/JavaScript/TypeScript/shell/PowerShell/batch/Ruby program that generates multiple slides. Do not use loops, a `SLIDES`/maker registry, shared `base_svg`/`title`/card rendering functions, or template expansion to emit the deck. Shared palette, typography, margins, and recurring chrome may be documented, but each slide must have an explicit slide-specific Region Plan and explicit SVG markup chosen from that slide's claim and evidence. Read-only validation/render/export scripts remain allowed.
-- Layout contract: before writing SVG, put concrete Region Plans in `design_spec.md` for every content slide. Build from aligned rectangular regions first; content slides should normally occupy 65-85% of the content area and avoid empty quadrants or detached bottom callouts. Wrap dynamically from each region's actual width, font size, visual share, and content density; avoid conservative early breaks and allow light raggedness. Check actual line edges, baselines, captions, and padding against the final boxes. Size table columns from their longest visible cells.
+- Layout contract: put concrete Region Plans in `design_spec.md` for every content slide. Build from aligned rectangular regions first; content slides should normally occupy 65-85% of the content area and avoid empty quadrants or detached bottom callouts. Wrap dynamically from each region's actual width, font size, visual share, and content density. Keep line edges, baselines, captions, and padding inside the final boxes. Size table columns from their longest visible cells.
 - Continuity contract: before writing a chapter slide, read at most the two most recent earlier chapter-slide SVGs. Before writing a content slide, read at most the two most recent earlier content-slide SVGs, skipping cover, TOC, chapter, and ending slides. Use them for style continuity only; the current manuscript and Region Plan remain authoritative.
-- Factual rendering contract: preserve exact source numbers and units. Do not abbreviate values into K/M/B shorthand unless the paper itself uses that shorthand; for example, keep `12,282,034` rather than `12.28M`. Do not invent or round metrics, chart axes, ticks, dates, sample sizes, or settings. Mark derived values explicitly and show their source inputs/calculation nearby. Evidence-card ids and retrieval snippets are private grounding, not visible slide copy.
-- Icon contract: icons are optional visual aids, not decoration. Use them only when they clarify repeated semantic labels, process steps, comparison dimensions, legends, or diagram nodes. Before using icons, define a small vocabulary in `design_spec.md` (concept -> existing local file -> size/style/color), search `agent_task.json.paths.icons`, reuse the same icon for the same concept, keep to one icon family/style, and color icons with the template/deck palette. Avoid scattering one-off icons or multi-color icon accents across unrelated slides. Never use letters, initials, ASCII/Unicode symbols, emoji, dingbats, or decorative characters as icon substitutes; omit the icon or use a non-icon shape if no matching asset exists.
+- Factual rendering contract: preserve exact source numbers, notation, precision, and units. Do not abbreviate, invent, or round metrics, chart axes, ticks, dates, sample sizes, or settings. Mark derived values explicitly and show their source inputs/calculation nearby. Evidence-card ids and retrieval snippets are private grounding, not visible slide copy.
+- Icon contract: icons are optional decorative/semantic visual aids. Add them only when they make the slide clearer or more polished, such as repeated semantic labels, process steps, comparison dimensions, legends, or diagram nodes. Before using icons, define a small vocabulary in `design_spec.md` (concept -> existing local SVG file -> size/style/color). Use filesystem commands against `agent_task.json.paths.icons` to list and match available `.svg` files directly; do not use icon search scripts, icon metadata files, `index_meta.json`, or vector indexes. Reuse the same icon for the same concept, keep to one icon family/style, and color icons with the template/deck palette. Avoid scattering one-off icons or multi-color icon accents across unrelated slides. Never use letters, initials, ASCII/Unicode symbols, emoji, dingbats, or decorative characters as icon substitutes; omit the icon or use a non-icon shape if no matching asset exists.
 - SubAgent contract: do not split work just to satisfy ordinary slide count or budget selection. When deep research is enabled, launch focused research SubAgents if the Task tool is available; use separate readers for background/related work, method, experiments, and critique when the paper is complex. When Agent review is enabled, run one focused review SubAgent after the first full deck is drafted; it should review the whole deck for layout overflow, missing assets, icon-policy violations, and narrative gaps instead of checking pages one by one. If you skip a required deep-research or review SubAgent, write a concrete reason in `agent_report.json.subagents`; the main Agent must merge results and keep final narrative/design consistency.
 - External research contract: if external research is enabled, use the `{_RESEARCH_SKILL_NAME}` skill after reading the paper. You, not the backend, must choose search queries from paper understanding before calling its script/API helpers. It is mandatory to produce `research/raw_external_results.json`, `research/sources.json`, and `research/brief.md` before writing any manuscript, design specification, notes, report, or slide SVG. Read `research/external_search_summary.json` before sampling raw results. Sparse or zero directly relevant external results are acceptable when `research/sources.json` records a concrete limitation; do not repeat searches merely to satisfy the gate or increase counts. For web results, open/read relevant pages deeply enough to understand the source; do not cite titles/snippets alone.
 - Deep research contract: if deep research is enabled, use the `{_DEEP_RESEARCH_SKILL_NAME}` skill for focused paper-reading passes, SubAgent/task decomposition, and slide-ready synthesis. It is mandatory to produce `research/deep/notes_index.json` and `research/deep/brief.md` before writing any manuscript, design specification, notes, report, or slide SVG.
@@ -3600,14 +3603,21 @@ def _agent_icon_policy() -> dict[str, Any]:
     return {
         "search_only_after_identifying_a_concrete_need": True,
         "use_icons_only_when_they_clarify": True,
-        "metadata_only_search": True,
-        "do_not_enumerate_icon_directories": True,
-        "do_not_read_svg_content_during_selection": True,
-        "recommended_search_commands": [
-            "<configured-python> skills/paper-ppt-generate/scripts/search_icons.py --task agent_task.json --query \"short English concept\" --limit 8",
+        "filesystem_command_matching_required": True,
+        "metadata_or_vector_search_forbidden": True,
+        "forbidden_search_sources": [
+            "skills/paper-ppt-generate/scripts/search_icons.py",
+            "index_meta.json",
+            "index.npz",
+            "any icon metadata file or vector index",
         ],
+        "selection_method": (
+            "Use shell/filesystem commands against agent_task.json.paths.icons to "
+            "list available .svg filenames and match by concrete concept/name. "
+            "Verify the selected SVG file exists before referencing it."
+        ),
         "when_to_use": [
-            "Use icons for repeated semantic labels, process steps, comparison dimensions, legend keys, and compact section markers.",
+            "Use icons as restrained decorative/semantic aids for repeated labels, process steps, comparison dimensions, legend keys, and compact section markers.",
             "Do not add icons as filler decoration to ordinary bullet lists, paragraph cards, dense evidence slides, or places where a label alone is clearer.",
             "Prefer one consistent icon system for a repeated pattern; if only one slide would use an icon, consider omitting it.",
         ],
@@ -3764,7 +3774,7 @@ def _agent_factual_rendering_policy() -> dict[str, Any]:
         "rules": [
             "Do not invent metrics, chart ticks, axes, sample sizes, dates, model settings, or causal claims.",
             "Preserve the source number and unit exactly unless the slide explicitly shows a transparent derivation.",
-            "Do not compress 12,282,034 into 12.28M, 3,939,754 into 3.94M, or use K/M/B shorthand unless that exact shorthand appears in the source.",
+            "Do not compress exact counts into shorthand unless that exact notation appears in the source.",
             "Derived values must be marked as derived and show the source inputs or calculation nearby.",
             "Evidence cards are private grounding; do not print card ids, retrieval snippets, or provenance plumbing as slide content.",
         ],

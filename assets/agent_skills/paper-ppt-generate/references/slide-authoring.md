@@ -28,11 +28,10 @@ Layout:
 
 Icons:
 
-- Search only after identifying a concrete icon need. Use `skills/paper-ppt-generate/scripts/search_icons.py --task agent_task.json --query "<short English concept>" --limit 8`.
-- The search helper reads pre-built metadata only. Do not enumerate icon directories or read SVG contents while choosing an icon.
-- Allowed icons are existing local SVG/icon files or template-provided vector assets that actually exist.
-- Do not use letters, initials, ASCII characters, Unicode symbols, dingbats, stars, checkmarks, arrows, pictographs, or emoji as icon substitutes.
-- If no suitable local icon exists, omit the icon or use a neutral non-icon shape/accent. Never fake an icon with text such as `P`, `F`, `A`, or a star glyph.
+- Match icons only after identifying a concrete icon need. Use filesystem commands against `agent_task.json.paths.icons` to list and match available `.svg` filenames directly.
+- Do not use `skills/paper-ppt-generate/scripts/search_icons.py`, `index_meta.json`, `index.npz`, icon metadata files, or vector indexes while choosing an icon.
+- Allowed icons are existing local SVG/icon files or template-provided vector assets that actually exist. Verify the file exists before referencing it.
+- Do not use text glyphs (letters, emoji, Unicode symbols, arrows, stars) as icon substitutes. If no suitable icon exists, omit it or use a neutral shape.
 - Keep `design_spec.md` or `agent_report.json` aware of the icon choices so QA can check missing assets and policy violations.
 
 Text:

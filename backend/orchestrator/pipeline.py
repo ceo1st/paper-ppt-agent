@@ -132,13 +132,9 @@ class GenerationRequest:
     max_critic_attempts: int = 0
     style_overrides: dict | None = None  # {palette: [...], font: "...", density: "..."}
     enable_deep_research: bool = False
-    icon_library: str = "chunk"  # chunk / tabler-filled / tabler-outline
     deepseek_settings: dict | None = None
     openai_settings: dict | None = None
     enable_visual_critic: bool = False
-    enable_icon: bool = False
-    enable_icon_rag: bool = False
-    gemini_api_key: str | None = None
     visual_qa_max_attempts: int = 1
     template_id: str | None = None  # Template ID from assets/templates/layouts/
     research_config: ResearchConfig | None = None  # Optional external research enrichment
@@ -413,11 +409,7 @@ async def run_pipeline(
             style=request.style,
             language=request.language,
             detail_level=request.detail_level,
-            icon_library=request.icon_library,
             style_overrides=request.style_overrides,
-            enable_icon=request.enable_icon,
-            enable_icon_rag=request.enable_icon_rag,
-            gemini_api_key=request.gemini_api_key,
             figure_inventory=figure_inventory,
             debug_dir=project_dir / "debug",
             template_context=template_context_strat or None,
@@ -789,13 +781,9 @@ class RefineRequest:
     target_pages: list[int] | None = None
     allow_structure_changes: bool = False
     style_overrides: dict | None = None
-    icon_library: str = "chunk"
     deepseek_settings: dict | None = None
     openai_settings: dict | None = None
     enable_visual_critic: bool = False
-    enable_icon: bool = False
-    enable_icon_rag: bool = False
-    gemini_api_key: str | None = None
     visual_qa_max_attempts: int = 1
     template_id: str | None = None
 
@@ -900,11 +888,7 @@ async def run_refine_pipeline(
             style=request.style,
             language=request.language,
             detail_level=request.detail_level,
-            icon_library=request.icon_library,
             style_overrides=request.style_overrides,
-            enable_icon=request.enable_icon,
-            enable_icon_rag=request.enable_icon_rag,
-            gemini_api_key=request.gemini_api_key,
             figure_inventory=refine_figure_inventory,
         )
         await awrite_text(design_spec_path, design_spec, encoding="utf-8")

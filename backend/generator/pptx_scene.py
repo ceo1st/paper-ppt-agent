@@ -702,7 +702,16 @@ def _bbox_for_element(elem: etree._Element, slide_size: tuple[int, int]) -> dict
 def _shape_text(elem: etree._Element) -> str:
     paragraphs: list[str] = []
     for paragraph in elem.findall(".//a:p", namespaces=NS):
-        text = "".join(t.text or "" for t in paragraph.findall(".//a:t", namespaces=NS))
+        parts: list[str] = []
+        for child in paragraph:
+            child_tag = _local(child)
+            if child_tag == "br":
+                parts.append("\n")
+            elif child_tag == "r":
+                parts.extend(t.text or "" for t in child.findall(".//a:t", namespaces=NS))
+            elif child_tag == "fld":
+                parts.extend(t.text or "" for t in child.findall(".//a:t", namespaces=NS))
+        text = "".join(parts)
         if text:
             paragraphs.append(text)
     return "\n".join(paragraphs)

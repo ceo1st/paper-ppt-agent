@@ -94,16 +94,12 @@ class GenerationOptions(BaseModel):
     detail_level: str = "normal"
     generation_mode: Literal["sequential", "chapter_parallel", "page_parallel"] = "sequential"
     parallel_concurrency: int = Field(default=3, ge=1, le=8)
-    icon_library: str = "chunk"  # chunk / tabler-filled / tabler-outline
     timeout_seconds: int | None = Field(default=None, ge=1)
     max_critic_attempts: int = Field(default=0, ge=0, le=10)
     style_overrides: StyleOverrides | None = None
     enable_deep_research: bool = False
     enable_visual_critic: bool = False
     visual_qa_max_attempts: int = Field(default=1, ge=0, le=10)
-    enable_icon: bool = False
-    enable_icon_rag: bool = False
-    gemini_api_key: str | None = None
     template_id: str | None = None  # Template ID from assets/templates/layouts/
     research_config: ResearchConfig | None = None
 
@@ -161,6 +157,8 @@ class PreviewSlide(BaseModel):
     name: str
     source: str  # "output" or "final"
     content: str
+    svg_valid: bool = True
+    svg_error: str | None = None
     notes: str = ""
     document: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
     render_url: str | None = None

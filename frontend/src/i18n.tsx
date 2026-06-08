@@ -78,9 +78,9 @@ const translations: Record<Locale, Dictionary> = {
     "model.baseUrl": "Base URL",
     "model.baseUrlPlaceholder": "Leave blank to use the default endpoint",
     "model.modelPlaceholder": "Enter a model name",
-    "model.artifactThinking": "Artifact generation thinking",
-    "model.artifactThinkingTooltip": "Disabling thinking is recommended for direct design-spec and SVG output. Research reading still uses the model default. If the endpoint rejects this control or generation behaves abnormally, switch to Model default.",
-    "model.artifactThinkingDisabled": "Disabled (recommended)",
+    "model.artifactThinking": "Thinking mode",
+    "model.artifactThinkingTooltip": "If the endpoint rejects this control or generation behaves abnormally, switch to Model default.",
+    "model.artifactThinkingDisabled": "Off",
     "model.artifactThinkingDefault": "Model default",
     "model.deepseekTitle": "DeepSeek thinking",
     "model.deepseekBody": "Applies only to DeepSeek requests.",
@@ -150,12 +150,6 @@ const translations: Record<Locale, Dictionary> = {
       "Render each slide as an image and have a multimodal LLM inspect it for layout, image/content fit, and decorative-line issues. Runs independently from static review passes. Requires a vision-capable model. Text-only models will silently skip this step.",
     "options.agentReviewTooltip":
       "After the Agent drafts the full deck, ask a focused SubAgent to review the whole presentation for layout overflow, missing assets, icon-policy violations, and narrative gaps. No retry count is used.",
-    "options.enableIcon": "Enable Icon Decoration",
-    "options.enableIconTooltip":
-      "Insert icons into generated slides. When disabled, all visual elements use plain SVG shapes only.",
-    "options.iconRag": "RAG Semantic Search",
-    "options.iconRagTooltip":
-      "Use Gemini Embedding to semantically match icons to slide content. Requires GEMINI_API_KEY. When disabled, the executor picks icons directly from the library. (Disabling may cause icon mismatch)",
     "options.researchEnrichment": "External Research",
     "options.researchEnrichmentTooltip":
       "Inject related-work context into the manuscript analysis so the LLM can position the paper against existing literature.",
@@ -857,8 +851,6 @@ const translations: Record<Locale, Dictionary> = {
     "config.visualCritic": "Visual critic",
     "config.maxCriticAttempts": "Max review passes",
     "config.visualQaMaxAttempts": "Max visual QA passes",
-    "config.enableIcon": "Icon Decoration",
-    "config.iconRag": "RAG Search",
     "config.researchEnrichment": "External Research",
     "config.deepResearch": "Deep Research",
     "config.template": "Template",
@@ -972,9 +964,9 @@ const translations: Record<Locale, Dictionary> = {
     "model.baseUrl": "Base URL",
     "model.baseUrlPlaceholder": "留空则使用默认地址",
     "model.modelPlaceholder": "输入模型名称",
-    "model.artifactThinking": "产物生成思考模式",
-    "model.artifactThinkingTooltip": "直接生成设计规范和 SVG 时建议关闭思考。论文阅读研究阶段仍使用模型默认。如果接口不兼容该参数或生成出现异常，请改为“模型默认”。",
-    "model.artifactThinkingDisabled": "关闭（推荐）",
+    "model.artifactThinking": "思考模式",
+    "model.artifactThinkingTooltip": "如果接口不兼容该参数或生成出现异常，请改为“模型默认”。",
+    "model.artifactThinkingDisabled": "关闭",
     "model.artifactThinkingDefault": "模型默认",
     "model.deepseekTitle": "DeepSeek 思考设置",
     "model.deepseekBody": "仅在 DeepSeek 接口下生效。",
@@ -1044,12 +1036,6 @@ const translations: Record<Locale, Dictionary> = {
       "把每页渲染成图像，再调用多模态 LLM 检查布局、图片与内容匹配、装饰线等视觉问题。它与静态审查次数独立。需要支持视觉的模型，纯文本模型会自动跳过此步骤。",
     "options.agentReviewTooltip":
       "Agent 生成完整 deck 后，启动一个聚焦的 SubAgent 对整份演示进行审查，检查布局溢出、缺失素材、图标策略违规和叙事缺口。不使用次数限制。",
-    "options.enableIcon": "图标装饰",
-    "options.enableIconTooltip":
-      "在生成的幻灯片中插入图标。关闭后所有视觉元素仅使用纯 SVG 形状。",
-    "options.iconRag": "RAG 语义搜索",
-    "options.iconRagTooltip":
-      "使用 Gemini Embedding 语义匹配图标与幻灯片内容。需要配置 GEMINI_API_KEY。关闭后由 executor 直接从图标库中选取。（关闭可能导致 icon 丢失）",
     "options.researchEnrichment": "外部研究增强",
     "options.researchEnrichmentTooltip":
       "将相关工作信息注入文稿分析，让 LLM 将本文与已有文献对比定位。",
@@ -1750,8 +1736,6 @@ const translations: Record<Locale, Dictionary> = {
     "config.visualCritic": "视觉审查",
     "config.maxCriticAttempts": "最大审查次数",
     "config.visualQaMaxAttempts": "最大视觉QA次数",
-    "config.enableIcon": "图标装饰",
-    "config.iconRag": "RAG 搜索",
     "config.researchEnrichment": "外部研究",
     "config.deepResearch": "深度研究",
     "config.template": "模板",

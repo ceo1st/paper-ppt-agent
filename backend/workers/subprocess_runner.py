@@ -101,4 +101,5 @@ def _copy_stderr(job_id: str, proc: subprocess.Popen[str]) -> None:
     for line in proc.stderr:
         text = line.rstrip()
         if text:
+            append_job_message(job_id, {"type": "worker_stderr", "payload": text})
             logger.info("job %s worker: %s", job_id, text)

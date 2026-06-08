@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = {"complete", "error", "cancelled"}
 _offsets: dict[str, int] = {}
 _locks: dict[str, asyncio.Lock] = {}
+_worker_stderr: dict[str, list[str]] = {}
 
 
 @dataclass
@@ -87,6 +88,14 @@ async def _apply_message(job_id: str, message: dict[str, Any]) -> None:
         await _apply_worker_message(job_id, worker_message)
         return
 
+    if msg_type == "worker_stderr":
+        payload = str(message.get("payload") or "").strip()
+        if payload:
+            lines = _worker_stderr.setdefault(job_id, [])
+            lines.append(payload)
+            del lines[:-20]
+        return
+
     if msg_type == "worker_timeout":
         _record_error(job_id, str(message.get("message") or "Generation worker timed out."))
         return
@@ -94,7 +103,21 @@ async def _apply_message(job_id: str, message: dict[str, Any]) -> None:
     if msg_type == "worker_exit":
         returncode = int(message.get("returncode", 0) or 0)
         if returncode != 0:
-            _record_error(job_id, f"Generation worker exited with code {returncode}.")
+            stderr_tail = _worker_stderr.get(job_id) or []
+            detail = _best_worker_stderr_detail(stderr_tail)
+            suffix = f" {detail}" if detail else ""
+            _record_error(job_id, f"Generation worker exited with code {returncode}.{suffix}")
+
+
+def _best_worker_stderr_detail(lines: list[str]) -> str:
+    for line in reversed(lines):
+        text = line.strip()
+        if not text:
+            continue
+        if text.startswith(("INFO:", "WARNING:")):
+            continue
+        return text[:500]
+    return ""
 
 
 async def _apply_worker_message(job_id: str, message: dict[str, Any]) -> None:

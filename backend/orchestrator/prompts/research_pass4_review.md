@@ -7,8 +7,7 @@ Act as an independent reviewer. Do not trust the manuscript or the earlier analy
 Inspect every slide for:
 
 1. Wrong or invented title, authors, venue, date, source, or paper identity.
-2. Numbers absent from the source, silently rounded values, missing units or denominators, or derived values presented as source facts.
-   Also treat unit conversion drift as blocking: exact record counts such as `12,282,034` must not become `1228万`, `12.28万`, or `over 12 million` unless the source itself uses that expression.
+2. Numbers absent from the source, silently rounded values, missing units or denominators, or derived values presented as source facts. Also treat unit conversion drift as blocking — do not reformat the paper's original numbers into different unit systems.
 3. Claims attributed to the authors that are only interpretations.
 4. Causal, comparative, novelty, or generalization claims stronger than the evidence.
 5. Confusion between data/label construction assumptions and deployment/application assumptions.

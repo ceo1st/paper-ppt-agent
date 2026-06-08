@@ -30,7 +30,7 @@ Use one status:
 - `INTERPRETATION`: a defensible reading that is not stated by the authors. Phrase it as interpretation.
 - `OPEN`: unresolved, contradictory, missing, or not reliably extracted.
 
-Source anchors should name a section, page, figure, table, formula, quotation, case, or passage. Preserve exact values, units, populations, denominators, comparison baselines, and uncertainty. Never silently round a value. Do not convert exact counts into shorthand units unless the source uses the same unit; for example, keep `12,282,034 records` rather than rewriting it as `1228万`, `12.28万`, or `over 12 million`.
+Source anchors should name a section, page, figure, table, formula, quotation, case, or passage. Preserve exact values, units, populations, denominators, comparison baselines, and uncertainty. Never silently round a value or change the paper's original unit notation.
 
 ## 4. Evidence Logic
 

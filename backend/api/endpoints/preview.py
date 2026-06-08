@@ -644,15 +644,25 @@ async def _build_preview_response_locked(
             # Preparing render-ready SVG rewrites href base64 inlines etc.
             # Keep temp-file creation/read/cleanup in one offloaded call so a
             # transient temp path cannot disappear between awaits.
+            prepare_error: str | None = None
             try:
                 content = await aoffload(prepare_svg_file_content_for_render, svg_path)
             except FileNotFoundError:
                 continue
+            except Exception as exc:
+                prepare_error = f"SVG render preparation failed: {exc}"
+                try:
+                    content = await aread_text(svg_path, encoding="utf-8")
+                except OSError:
+                    continue
+            svg_error = _svg_parse_error(content) or prepare_error
             slide_payload: dict[str, Any] = dict(
                 index=index,
                 name=svg_path.stem,
                 source=source,
                 content=content,
+                svg_valid=svg_error is None,
+                svg_error=svg_error,
                 notes=_read_slide_notes(project_dir, svg_path),
                 document=_read_slide_document(project_dir, svg_path),
             )
@@ -1070,8 +1080,8 @@ def _editable_slide_files(project_dir: Path) -> tuple[list[Path], str]:
 
 
 def _validated_svg(content: str) -> str:
-    svg = content.strip()
-    if not re.match(r"^<svg[\s>]", svg):
+    svg = content.lstrip("\ufeff")
+    if not svg.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Expected an SVG document.")
     try:
         root = ET.fromstring(svg)
@@ -1081,6 +1091,20 @@ def _validated_svg(content: str) -> str:
     if tag != "svg":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Expected an SVG root element.")
     return svg
+
+
+def _svg_parse_error(content: str) -> str | None:
+    svg = content.lstrip("\ufeff")
+    if not svg.strip():
+        return "Expected an SVG document."
+    try:
+        root = ET.fromstring(svg)
+    except ET.ParseError as exc:
+        return f"Invalid SVG: {exc}"
+    tag = root.tag.rsplit("}", 1)[-1].lower()
+    if tag != "svg":
+        return "Expected an SVG root element."
+    return None
 
 
 def _slide_document_path(project_dir: Path, svg_path: Path) -> Path:

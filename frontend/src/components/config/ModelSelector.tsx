@@ -49,6 +49,7 @@ export function ModelSelector({
   const [showKey, setShowKey] = useState(false);
   const isDeepSeek = provider === "deepseek";
   const showOpenAISettings = provider === "openai" && isGpt5OrNewer(model);
+  const showArtifactThinking = (provider === "openai" || provider === "deepseek") && !showOpenAISettings;
   const selectedProviderIcon = getProviderIcon(provider, selectedProvider?.display_name);
 
   return (
@@ -145,7 +146,7 @@ export function ModelSelector({
         </div>
       </label>
 
-      {provider === "openai" || provider === "deepseek" ? (
+      {showArtifactThinking ? (
         <label className="form-field">
           <span>
             {t("model.artifactThinking")}

@@ -18,22 +18,33 @@ Follow this structure exactly:
 
 ### IV. Typography System
 - Font plan: heading font, body font, code font
-- Size hierarchy: H1, H2, H3, body, caption, footer
+- Size hierarchy and recommended px values:
+
+| Role | Size (px) | Line-height | Weight |
+|------|-----------|-------------|--------|
+| H1 (page title) | 28–32 | 1.3 | bold |
+| H2 (section heading) | 22–26 | 1.3 | bold |
+| H3 (card/block heading) | 18–20 | 1.35 | semibold |
+| Body | 16–18 | 1.5–1.6 | regular |
+| Caption / source | 12–14 | 1.4 | regular |
+| Footer | 11–12 | 1.3 | regular |
+
+- The executor must use these ranges when placing text. Never use body text smaller than 14px on a 1280×720 canvas.
 
 ### V. Layout Principles
-- Grid system, spacing rules, alignment guidelines
-- Consistency plan: specify which layout families may be reused across content pages and how cover/chapter/ending pages relate visually to those families. Do not leave page-level style choices implicit.
-- Space utilization plan: for each content layout family, define how the content area should be meaningfully occupied. Whitespace is allowed for hierarchy, but avoid large unused regions caused by under-planned content.
-- Region planning: define reusable content-area regions before visual styling. For 16:9 slides, assume the default content area is x=40, y=100, w=1200, h=520 unless the template says otherwise. Give each content layout family concrete region proportions and gutters, not vague phrases.
-- Balanced occupancy: content slides should normally use 65-85% of the content area with aligned visual/text regions. Avoid an empty quadrant, a floating short bullet list, or a bottom callout that is visually detached from the main grid.
-- CJK wrapping: plan line breaks dynamically from each text region's actual width, font size, and visual share. Avoid premature short lines, but allow light raggedness and semantic breaks when they improve composition.
-- Text capacity: every planned text/card/table region must be feasible before styling. Reserve heading height, body line count × line-height, caption/source, and padding. Do not plan a short bottom card for more text than its height can hold, or a narrow right-edge paragraph whose estimated width crosses the canvas.
-- Table capacity: allocate the method/label column from its longest cell first, then numeric columns and gutters. The Region Plan must prevent label/value collisions.
+- Grid system, spacing rules, alignment guidelines. For 16:9 slides, default content area is x=40, y=100, w=1200, h=520 unless the template says otherwise.
+- Consistency plan: specify which layout families may be reused across content pages and how cover/chapter/ending pages relate visually to those families.
+- Region planning: define reusable content-area regions with concrete proportions and gutters before visual styling. Content slides should use 65-85% of the content area; avoid empty quadrants or detached floating elements.
+- CJK wrapping: plan line breaks from each region's actual width and font size. Allow light raggedness and semantic breaks.
+- Text capacity: every text/card/table region must be feasible before styling. Reserve heading height, body line-count × line-height, caption, and padding. Do not plan a short card for more text than it can hold.
+- Table capacity: allocate the label column from its longest cell first, then numeric columns and gutters.
+- Image-first planning: when a page uses paper figures, choose the visible image rectangles from their actual aspect ratios before allocating text. The visible image should fill most of its frame; if fitting the ratio would leave more than one-third of the frame empty, redesign the regions.
+- Multiple figures: calculate each visible image size from its aspect ratio before stacking. If figures and captions do not fit at useful size, select the most important figure or use a different composition.
 
-### VI. Icon Usage (Optional)
-- Icons are optional. Most slides need 0 icons.
-- Only add when it has a clear semantic role: section header, process step, or KPI highlight.
-- Never use as bullet prefixes or generic decoration. Empty space is better than forced icons.
+### VI. Icon Usage
+- Provider icon decoration is disabled.
+- Do not assign icon assets, icon placeholders, emoji, dingbats, Unicode symbols, or single-character glyph badges.
+- Use native SVG shapes, lines, labels, and paper figures instead.
 
 ### VII. Visualization Reference List
 - Recommended chart types for data in the manuscript
@@ -52,10 +63,11 @@ Follow this structure exactly:
 - For sparse manuscript pages, plan richer information design instead of leaving blank space: turn bullets into labeled callouts, mini process blocks, comparison chips, formula annotations, or figure-anchored explanations when the paper supports them.
 - For image + text pages, explicitly plan how the non-image column uses the full vertical rhythm: headline insight, 2-4 grouped callouts, optional formula/key number strip, and caption/source placement. Do not leave the text column as a short list floating in empty space.
 - For every content page, include a `Region Plan:` line with concrete boxes such as `image region x=60 y=130 w=520 h=360; text region x=680 y=130 w=500 h=330; callout x=680 y=515 w=500 h=85`. Region boxes must align to a shared grid and fit inside the content area.
+- Do not place planned content boxes in the footer band. If a callout does not fit, change the content-area composition instead.
 - After each Region Plan, include a short `Text Strategy:` line describing a practical font-size range, line-height range, wrapping behavior, and table column allocation when relevant. Do not use fixed character-capacity numbers.
-- Region Plan coordinates are final layout boxes, not suggestions. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`. If a figure must preserve aspect ratio, define a frame box and say `fit inside frame preserving aspect ratio`, while keeping the frame dimensions final.
+- Region Plan coordinates are final layout boxes, not suggestions. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`. For each paper figure, state both the reserved frame and the final visible image rectangle calculated from its actual ratio. Do not approve a plan where a wide frame contains a much smaller centered image merely because the ratio is technically preserved.
 - Use one of these layout families unless the manuscript clearly requires another: `figure-left-text-right`, `text-left-figure-right`, `two-column-evidence`, `three-card-grid`, `process-flow-with-evidence`, `comparison-table-callout`, `full-width-chart-with-notes`.
-- If a paper figure is used, reserve a sufficiently large figure region first, then use the remaining column height deliberately. Captions should sit under or beside the figure, not create a large dead zone.
+- If a paper figure is used, reserve and calculate its final visible rectangle first, then use the remaining space deliberately for text. Captions should sit under or beside the figure, not create a large dead zone.
 - Do not plan visual designs that require invented chart axes, arbitrary ticks, or decorative mini charts when the source only supports qualitative explanation.
 
 ### X. Speaker Notes Requirements
@@ -74,6 +86,7 @@ Follow this structure exactly:
 - Decide content density during this strategy phase. The SVG executor should not need to invent extra content just to fill space; the design_spec should already describe meaningful use of the content area.
 - Treat the manuscript page inventory as fixed. Structural pages are counted pages, not optional styling.
 - Keep structural pages and content pages visually distinct: cover pages are lightweight title/meta slides, chapter pages are dividers, ending pages are closing slides; content pages carry figures, charts, evidence, and detailed bullets.
+- TOC pages are title plus the full ordered chapter/list items only; do not plan side summaries, stats, charts, or process blocks.
 - Do not assign paper figures, dense article-content blocks, or multi-column evidence layouts to cover/chapter/ending pages.
 - For cover pages, preserve useful title metadata and a modest subtitle/context treatment; do not plan extracted paper figures or detailed evidence/result sections.
 - For chapter/ending pages, compress any extra manuscript body text into at most one subtitle/key phrase. Do not plan cards, KPI strips, question lists, `核心问题` / `本章看点` blocks, or mini-agendas on those pages.

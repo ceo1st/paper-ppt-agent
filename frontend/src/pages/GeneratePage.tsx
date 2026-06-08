@@ -114,8 +114,6 @@ interface PresentationSettingsDraft {
   cjkBodyFont?: string;
   enableDeepResearch?: boolean;
   enableVisualCritic?: boolean;
-  enableIcon?: boolean;
-  enableIconRag?: boolean;
   researchConfig?: ResearchConfig;
   templateId?: string;
 }
@@ -188,6 +186,7 @@ export function GeneratePage() {
     clearUploadSession,
     startGeneration,
     cancelCurrentRun,
+    interruptCurrentAgent,
     sendAgentFeedback,
     connect,
     resumeCurrentRun,
@@ -238,12 +237,9 @@ export function GeneratePage() {
   const [maxCriticAttempts, setMaxCriticAttempts] = useState(initialSettings.maxCriticAttempts ?? "0");
   const [visualQaMaxAttempts, setVisualQaMaxAttempts] = useState(initialSettings.visualQaMaxAttempts ?? "1");
   const [instruction, setInstruction] = useState(initialSettings.instruction ?? "");
-  const GEMINI_KEY_STORAGE = "paper-ppt-agent-gemini-api-key";
   const RESEARCH_KEYS_STORAGE = "paper-ppt-agent-research-keys";
   const [enableDeepResearch, setEnableDeepResearch] = useState(initialSettings.enableDeepResearch ?? false);
   const [enableVisualCritic, setEnableVisualCritic] = useState(initialSettings.enableVisualCritic ?? false);
-  const [enableIcon, setEnableIcon] = useState(initialSettings.enableIcon ?? false);
-  const [enableIconRag, setEnableIconRag] = useState(initialSettings.enableIconRag ?? false);
   const [researchConfig, setResearchConfig] = useState<ResearchConfig>(() => {
     const base = initialSettings.researchConfig ?? {};
     try {
@@ -260,9 +256,6 @@ export function GeneratePage() {
       }
     } catch { /* noop */ }
     return base;
-  });
-  const [geminiApiKey, setGeminiApiKey] = useState(() => {
-    try { return window.localStorage.getItem(GEMINI_KEY_STORAGE) ?? ""; } catch { return ""; }
   });
   const [templateId, setTemplateId] = useState(initialSettings.templateId ?? "");
   const [templates, setTemplates] = useState<TemplateInfo[]>([]);
@@ -432,8 +425,6 @@ export function GeneratePage() {
     setEnableDeepResearch(Boolean(options.enable_deep_research));
     setEnableVisualCritic(Boolean(options.enable_visual_critic));
     setVisualQaMaxAttempts(String(options.visual_qa_max_attempts ?? 1));
-    setEnableIcon(options.enable_icon !== false);
-    setEnableIconRag(options.enable_icon_rag !== false);
     setResearchConfig((prev) => {
       const incoming = options.research_config ?? {};
       return {
@@ -444,17 +435,12 @@ export function GeneratePage() {
         serpapi_key: incoming.serpapi_key || prev.serpapi_key,
       };
     });
-    setGeminiApiKey(options.gemini_api_key ?? "");
     setTemplateId(options.template_id ?? "");
   }, [selectedRunConfig, targetJobId]);
 
   useEffect(() => {
     setLanguageMode((current) => (current === "custom" ? current : locale === "zh" ? "zh" : "en"));
   }, [locale]);
-
-  useEffect(() => {
-    try { window.localStorage.setItem(GEMINI_KEY_STORAGE, geminiApiKey); } catch { /* noop */ }
-  }, [geminiApiKey]);
 
   useEffect(() => {
     try {
@@ -498,8 +484,6 @@ export function GeneratePage() {
         cjkBodyFont,
         enableDeepResearch,
         enableVisualCritic,
-        enableIcon,
-        enableIconRag,
         researchConfig,
         templateId,
       });
@@ -517,8 +501,6 @@ export function GeneratePage() {
     generationBackend,
     agentRuntime,
     enableDeepResearch,
-    enableIcon,
-    enableIconRag,
     enableVisualCritic,
     maxCriticAttempts,
     visualQaMaxAttempts,
@@ -618,9 +600,6 @@ export function GeneratePage() {
         enable_visual_critic: enableVisualCritic,
         visual_qa_max_attempts: parseBoundedInt(visualQaMaxAttempts, 1, 0, 10),
         enable_deep_research: enableDeepResearch,
-        enable_icon: enableIcon,
-        enable_icon_rag: enableIconRag,
-        gemini_api_key: geminiApiKey || undefined,
         template_id: templateId || undefined,
         research_config: (researchConfig.arxiv_search_enabled || researchConfig.semantic_scholar_enabled || researchConfig.web_search_enabled)
           ? researchConfig
@@ -719,7 +698,7 @@ export function GeneratePage() {
             onStop={async () => {
               setCancelLoading(true);
               try {
-                await cancelCurrentRun();
+                await interruptCurrentAgent();
               } finally {
                 setCancelLoading(false);
               }
@@ -810,9 +789,6 @@ export function GeneratePage() {
                 instruction={instruction}
                 enableDeepResearch={enableDeepResearch}
                 enableVisualCritic={enableVisualCritic}
-                enableIcon={enableIcon}
-                enableIconRag={enableIconRag}
-                geminiApiKey={geminiApiKey}
                 templateId={templateId}
                 templates={templates}
                 onCanvasFormatChange={setCanvasFormat}
@@ -828,9 +804,6 @@ export function GeneratePage() {
                 onInstructionChange={setInstruction}
                 onEnableDeepResearchChange={setEnableDeepResearch}
                 onEnableVisualCriticChange={setEnableVisualCritic}
-                onEnableIconChange={setEnableIcon}
-                onEnableIconRagChange={setEnableIconRag}
-                onGeminiApiKeyChange={setGeminiApiKey}
                 onTemplateChange={setTemplateId}
                 density={density}
                 customFont={customFont}
@@ -1089,10 +1062,14 @@ export function GenerationAgentConsole({
     () => activityItems.some((item) => item.kind === "group" && item.state === "active"),
     [activityItems],
   );
-  const isPausing = job?.status === "pausing";
-  const stopLabel = isPausing
-    ? t("generation.agent.canceling")
-    : t("generation.agent.cancel");
+  const stopLabel =
+    job?.status === "pausing"
+      ? t("generation.agent.pausing")
+      : job?.status === "cancelling"
+        ? t("generation.agent.canceling")
+        : job?.status === "paused"
+          ? t("generation.agent.cancel")
+          : t("generation.agent.pause");
   const showThinking = Boolean(
     job &&
     !terminal &&

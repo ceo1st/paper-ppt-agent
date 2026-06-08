@@ -253,9 +253,8 @@ async def _run_lightweight_paper_brief(
         "allocating slides.\n\n"
         "Numeric fidelity is strict: preserve decimal points, units, denominators, populations, "
         "and comparison baselines. Do not round or aggregate unless marked DERIVED with the "
-        "calculation. Do not compress exact counts into Chinese shorthand units unless the "
-        "source uses the same shorthand; keep `12,282,034` rather than `1228万`, `12.28万`, "
-        "or `超过1200万`. Prefer exact source metrics and absolute percentage-point "
+        "calculation. Do not compress exact counts into shorthand units unless the source "
+        "uses the same shorthand. Prefer exact source metrics and absolute percentage-point "
         "differences over newly derived relative percentages. If a detail is absent or "
         "damaged, write [not reliably extracted].\n"
         "Avoid generic phrases such as 'the paper proposes a new method' unless you name the "
@@ -840,8 +839,8 @@ async def analyze_paper(
     pass3_user_parts.append(
         "\n\nGenerate the complete slide manuscript now. Use `---` to separate slides. "
         "Follow the narrative arc plan and the information aesthetics principles. "
-        "Before writing, internally verify that the chapter plan comes from the paper's "
-        "real content logic, not a fixed template. Slide 2 must be the table of contents "
+        "Make the chapter plan come from the paper's real content logic, not a fixed "
+        "template. Slide 2 must be the table of contents "
         "and must use the same final chapter titles. Keep chapter slides concise; detailed "
         "evidence belongs on content slides."
     )

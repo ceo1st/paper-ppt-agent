@@ -553,8 +553,8 @@ def _rank_cards(
         token_terms = set(tokens)
         score = bm25_score
 
-        # Keep the original extraction score as a weak prior: good evidence remains
-        # available as fallback, but lexical relevance drives the ordering.
+        # Keep the original extraction score as a weak prior while BM25 and
+        # lexical relevance drive the ordering.
         score += min(card.score, 10.0) * 0.08
 
         section_terms = set(_tokens(card.section))

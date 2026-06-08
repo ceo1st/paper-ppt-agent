@@ -157,6 +157,7 @@ const loadDeck = async () => {
     try {
       await importSourcePptx(sourceUrl)
       if (slides.value.length) {
+        applyInvalidSlidePlaceholders(payload.width || 1280, payload.height || 720)
         await initSnapshots()
         await maybeAutoSaveInitialDeck(payload)
         setStatus('')
@@ -183,7 +184,7 @@ const importSourcePptx = async (sourceUrl: string) => {
   const file = new File([blob], 'source.pptx', {
     type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   })
-  importPPTXFile([file], { cover: true, fixedViewport: false })
+  importPPTXFile([file], { cover: true, fixedViewport: false, notifyOnError: false })
   await waitForImport()
 }
 
@@ -215,7 +216,8 @@ const slidesFromFallback = (items: Array<Record<string, unknown>>, width: number
   slidesStore.setViewportSize(width || viewportSize.value)
   slidesStore.setViewportRatio(ratio || 0.5625)
 
-  return items.map(item => {
+  return items.map((item, itemIndex) => {
+    if (item.svg_valid === false) return invalidSvgSlide(item, itemIndex + 1, width || 1280, height || 720)
     const svg = typeof item.content === 'string' ? item.content : ''
     const src = svg ? svgToDataUrl(svg) : String(item.render_url || item.preview_image_url || item.preview_svg_url || '')
     const background: SlideBackground | undefined = src
@@ -236,6 +238,77 @@ const slidesFromFallback = (items: Array<Record<string, unknown>>, width: number
     }
   })
 }
+
+const applyInvalidSlidePlaceholders = (width: number, height: number) => {
+  const invalidSlides = loadedFallbackSlides.value.filter(item => item.svg_valid === false)
+  if (!invalidSlides.length) return
+
+  const nextSlides = [...slides.value]
+  for (const item of invalidSlides) {
+    const index = fallbackSlideIndex(item, nextSlides.length + 1)
+    while (nextSlides.length < index) nextSlides.push(blankSlide())
+    nextSlides[index - 1] = invalidSvgSlide(item, index, width || 1280, height || 720)
+  }
+  slidesStore.setSlides(nextSlides)
+}
+
+const fallbackSlideIndex = (item: Record<string, unknown>, fallback: number) => {
+  const raw = Number(item.index)
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : fallback
+}
+
+const invalidSvgSlide = (item: Record<string, unknown>, index: number, width: number, height: number): Slide => {
+  const name = typeof item.name === 'string' ? item.name : `slide_${String(index).padStart(2, '0')}`
+  const error = typeof item.svg_error === 'string' && item.svg_error.trim()
+    ? item.svg_error.trim()
+    : 'Invalid SVG document.'
+  return {
+    id: nanoid(10),
+    elements: [],
+    background: {
+      type: 'image',
+      image: {
+        src: svgToDataUrl(invalidSvgPlaceholderSvg(index, name, error, width, height)),
+        size: 'contain',
+      },
+    },
+    remark: typeof item.notes === 'string' ? item.notes : '',
+  }
+}
+
+const invalidSvgPlaceholderSvg = (index: number, name: string, error: string, width: number, height: number) => {
+  const viewWidth = width || 1280
+  const viewHeight = height || 720
+  const lines = wrapErrorText(error, 86).slice(0, 7)
+  const detailLines = lines.map((line, lineIndex) => (
+    `<tspan x="96" dy="${lineIndex === 0 ? 0 : 28}">${escapeSvgText(line)}</tspan>`
+  )).join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${viewWidth} ${viewHeight}">
+  <rect width="${viewWidth}" height="${viewHeight}" fill="#FFF7F7"/>
+  <rect x="54" y="54" width="${viewWidth - 108}" height="${viewHeight - 108}" rx="16" fill="#FFFFFF" stroke="#F0B8B8" stroke-width="2"/>
+  <text x="96" y="130" fill="#9F2A2A" font-family="Microsoft YaHei, Arial, sans-serif" font-size="30" font-weight="700">SVG 解析失败</text>
+  <text x="96" y="178" fill="#5F2931" font-family="Microsoft YaHei, Arial, sans-serif" font-size="18">第 ${index} 页：${escapeSvgText(name)}</text>
+  <text x="96" y="242" fill="#2F3A4A" font-family="Consolas, Microsoft YaHei, monospace" font-size="17">${detailLines}</text>
+  <text x="96" y="${viewHeight - 94}" fill="#9A6370" font-family="Microsoft YaHei, Arial, sans-serif" font-size="15">请打开对应 SVG 文件查看原始 XML 错误，或重新生成该页。</text>
+</svg>`
+}
+
+const wrapErrorText = (text: string, size: number) => {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) return ['Invalid SVG document.']
+  const chunks: string[] = []
+  for (let index = 0; index < normalized.length; index += size) {
+    chunks.push(normalized.slice(index, index + size))
+  }
+  return chunks
+}
+
+const escapeSvgText = (text: string) => text
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&apos;')
 
 const svgToDataUrl = (svg: string) => {
   const encoded = window.btoa(unescape(encodeURIComponent(svg)))
