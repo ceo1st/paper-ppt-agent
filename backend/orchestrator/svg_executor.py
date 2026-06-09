@@ -537,20 +537,41 @@ def _figures_from_design_spec_for_page(
     section = section_match.group(0)
 
     # Build a set of filenames assigned to this page from the table rows.
-    # Table format: | filename | dims | ratio | purpose | type | status | page | ... |
+    # Two known formats:
+    #   Format A: | filename | ... | page_num | ... |          (numeric Page column)
+    #   Format B: | filename | ... | Slide N: description |    (Placement Notes column)
     assigned_stems: set[str] = set()
-    for row_match in re.finditer(r"(?m)^\s*\|\s*(\S+)\s*\|.*?\|.*?\|.*?\|.*?\|.*?\|\s*([^|]+)\s*\|", section):
+    for row_match in re.finditer(r"(?m)^\s*\|\s*(\S+)\s*\|(.+)$", section):
         stem = row_match.group(1).strip()
-        page_cell = row_match.group(2).strip()
-        # The Page column may contain a single number, a comma-separated list,
-        # or a range like "13, 20" or "13|20".
-        page_tokens = re.split(r"[,，\s|]+", page_cell)
-        try:
-            page_nums = {int(t) for t in page_tokens if t.strip().isdigit()}
-        except ValueError:
-            continue
-        if page_num in page_nums:
-            assigned_stems.add(stem)
+        row_text = row_match.group(2)
+        # Try Format A: look for a standalone page number in the last column(s)
+        cells = [c.strip() for c in row_text.split("|")]
+        found = False
+        for cell in cells:
+            # Check for "Slide N" or "page N" patterns (Format B)
+            slide_refs = re.findall(r"[Ss]lide\s+(\d+)", cell)
+            if slide_refs:
+                if page_num in (int(s) for s in slide_refs):
+                    assigned_stems.add(stem)
+                    found = True
+                    break
+            # Check for bare page number (Format A)
+            if re.fullmatch(r"\d+", cell):
+                if int(cell) == page_num:
+                    assigned_stems.add(stem)
+                    found = True
+                    break
+            # Check for comma/space separated page numbers
+            tokens = re.split(r"[,，\s]+", cell)
+            nums = set()
+            for t in tokens:
+                t = t.strip()
+                if t.isdigit():
+                    nums.add(int(t))
+            if page_num in nums:
+                assigned_stems.add(stem)
+                found = True
+                break
 
     if not assigned_stems:
         return []
