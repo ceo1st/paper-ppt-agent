@@ -31,9 +31,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from backend.runtime.offload import aoffload
+
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = sys.platform.startswith("win")
+_threaded_fallback_logged = False
 
 
 class SubprocessError(RuntimeError):
@@ -155,11 +158,19 @@ async def arun(
             **creation_kwargs,
         )
     except NotImplementedError:
-        logger.warning(
-            "asyncio subprocess transport is unavailable; using threaded fallback for %s",
-            argv_list[0],
-        )
-        return await asyncio.to_thread(
+        global _threaded_fallback_logged
+        if not _threaded_fallback_logged:
+            logger.info(
+                "asyncio subprocess transport is unavailable; using bounded threaded "
+                "subprocess fallback"
+            )
+            _threaded_fallback_logged = True
+        else:
+            logger.debug(
+                "asyncio subprocess transport is unavailable; using threaded fallback for %s",
+                argv_list[0],
+            )
+        return await aoffload(
             _run_subprocess_threaded,
             argv_list,
             timeout,

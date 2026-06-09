@@ -90,8 +90,8 @@ class Settings(BaseSettings):
     codex_bin: Path | None = None
 
     # Limits
-    # Historical compatibility knob. Job scheduling is now immediate and
-    # per-job; this no longer caps generate/refine submissions.
+    # Historical compatibility knob. The bounded runtime scheduler below is
+    # the active concurrency control for generate/refine submissions.
     max_concurrent_jobs: int = 1
     max_upload_bytes: int = 64 * 1024 * 1024  # 64 MB per uploaded paper
 
@@ -123,10 +123,11 @@ class Settings(BaseSettings):
     svg_generation_max_tokens_ceiling: int = 32768
     svg_repair_max_tokens: int = 8192
     # ── Job scheduling ───────────────────────────────────────────────────
-    # Backlog cap for queued jobs; a 16th queued job returns 429.
+    # Backlog cap for queued jobs; submissions beyond this return 429.
     job_queue_capacity: int = 16
-    # Number of concurrent provider-backed generation jobs. Keep the default
-    # independent of local CPU and memory so deployments behave consistently.
+    # Number of generation/refine/agent jobs that may run at once. Provider
+    # jobs still run in isolated child processes; this is the API-side
+    # admission limit before those children are launched.
     generation_worker_concurrency: int = 4
 
     # ── External tool timeouts (seconds) ─────────────────────────────────

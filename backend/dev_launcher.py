@@ -153,11 +153,6 @@ def main() -> int:
             ROOT,
         ),
         (
-            "worker",
-            [sys.executable, "-m", "backend.workers.consumer"],
-            ROOT,
-        ),
-        (
             "frontend",
             [
                 _npm_cmd(),
@@ -204,7 +199,7 @@ def main() -> int:
         print("Paper PPT Agent is starting:", flush=True)
         print(f"  Backend:  {backend_base_url}", flush=True)
         print("  Frontend: http://127.0.0.1:5173", flush=True)
-        print("  Worker:   SQLiteHuey local queue (dynamic concurrency)", flush=True)
+        print("  Jobs:     bounded API scheduler with isolated provider subprocesses", flush=True)
         print("Press Ctrl+C to stop all processes.", flush=True)
 
         while not stop:
