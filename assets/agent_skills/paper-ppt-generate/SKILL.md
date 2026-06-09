@@ -31,7 +31,8 @@ validates SVGs, finalizes them, and exports PPTX.
    protected. Use the Python interpreter from `agent_task.json.paths.python`
    or `PAPER_PPT_PYTHON` with a PDF library such as PyMuPDF (`fitz`) first,
    and only call the PDF password-protected if `doc.needs_pass` is true.
-   Before drafting content, read `source_assets/paper.md` and
+   Before drafting content, read `source_assets/paper.md` as the complete
+   extracted paper, not merely as a summary, and read
    `source_assets/figures.md`/`figures.json` if present. If they are missing,
    stale, or `source_assets/extraction_error.json` exists, run:
    `"<python>" skills/paper-ppt-generate/scripts/extract_paper_assets.py --task agent_task.json --out source_assets`

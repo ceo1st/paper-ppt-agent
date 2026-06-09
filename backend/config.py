@@ -122,7 +122,6 @@ class Settings(BaseSettings):
     svg_generation_max_tokens: int = 16384
     svg_generation_max_tokens_ceiling: int = 32768
     svg_repair_max_tokens: int = 8192
-
     # ── Job scheduling ───────────────────────────────────────────────────
     # Backlog cap for queued jobs; a 16th queued job returns 429.
     job_queue_capacity: int = 16
