@@ -1,9 +1,10 @@
 """Provider-mode working memory for paper-to-deck generation.
 
 The provider pipeline is intentionally stateless at the API boundary, but the
-deck generation task is not. This module builds a small, file-backed working
-memory from the parsed paper so later LLM calls can use scoped evidence instead
-of repeatedly carrying the full paper text.
+deck generation task is not. This module preserves the parsed paper, builds a
+local full-text chunk index, and prepares scoped evidence so later per-slide
+LLM calls can retrieve the relevant source passages instead of relying on a
+lossy summary.
 """
 
 from __future__ import annotations
@@ -23,38 +24,39 @@ from backend.parser.paper_model import ParsedPaper, PaperFigure, PaperSection
 MAX_COMPACT_PAPER_CHARS = 36000
 MAX_SECTION_BRIEF_CHARS = 1400
 MAX_CARD_TEXT_CHARS = 520
+MAX_PAPER_CHUNK_CHARS = 1400
 MAX_EVIDENCE_CARDS = 180
 SLIDE_CONTEXT_CARD_COUNT = 5
 SLIDE_CONTEXT_BUDGETS = {
     "normal": {
+        "chunks": 3,
         "cards": 3,
         "sections": 1,
-        "briefs": 1,
+        "chunk_chars": 780,
         "card_chars": 420,
         "section_chars": 420,
-        "brief_chars": 420,
     },
     "high": {
+        "chunks": 4,
         "cards": 4,
         "sections": 2,
-        "briefs": 1,
+        "chunk_chars": 980,
         "card_chars": 480,
         "section_chars": 520,
-        "brief_chars": 480,
     },
     "very_high": {
+        "chunks": 5,
         "cards": 5,
         "sections": 2,
-        "briefs": 2,
+        "chunk_chars": 1180,
         "card_chars": 520,
         "section_chars": 620,
-        "brief_chars": 620,
     },
 }
 BM25_K1 = 1.5
 BM25_B = 0.75
 
-_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]*|[\u4e00-\u9fff]+")
+_TOKEN_RE = re.compile(r"\d+(?:[.,]\d+)?%?|[A-Za-z][A-Za-z0-9_\-]*|[\u4e00-\u9fff]+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？.!?])\s+|\n{2,}")
 _EVIDENCE_RE = re.compile(
     r"(?i)(\d|%|table|figure|fig\.?|equation|formula|experiment|benchmark|"
@@ -248,6 +250,16 @@ class FigureMemory:
 
 
 @dataclass(frozen=True)
+class PaperChunk:
+    id: str
+    section: str
+    kind: str
+    text: str
+    page_number: int | None = None
+    figure_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class SectionMemory:
     title: str
     level: int
@@ -260,8 +272,10 @@ class ProviderMemory:
     title: str
     authors: tuple[str, ...]
     abstract: str
+    full_markdown: str
     compact_markdown: str
     sections: tuple[SectionMemory, ...]
+    paper_chunks: tuple[PaperChunk, ...]
     evidence_cards: tuple[EvidenceCard, ...]
     figures: tuple[FigureMemory, ...]
 
@@ -299,6 +313,8 @@ def build_provider_memory(paper: ParsedPaper) -> ProviderMemory:
     ]
 
     figures = tuple(_figure_memory(fig) for fig in paper.all_figures() if paper._should_include_figure(fig))
+    paper_chunks = tuple(_paper_chunks(paper))
+    full_markdown = paper.to_markdown()
     compact_markdown = _build_compact_markdown(
         paper,
         section_memories,
@@ -309,8 +325,10 @@ def build_provider_memory(paper: ParsedPaper) -> ProviderMemory:
         title=paper.title,
         authors=tuple(paper.authors),
         abstract=_trim(paper.abstract, 2200),
+        full_markdown=full_markdown,
         compact_markdown=compact_markdown,
         sections=tuple(section_memories),
+        paper_chunks=paper_chunks,
         evidence_cards=tuple(cards),
         figures=figures,
     )
@@ -319,7 +337,16 @@ def build_provider_memory(paper: ParsedPaper) -> ProviderMemory:
 def save_provider_memory(memory: ProviderMemory, target_dir: Path) -> None:
     """Persist provider working memory for inspection and later reuse."""
     target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "full_paper.md").write_text(memory.full_markdown, encoding="utf-8")
     (target_dir / "compact_paper.md").write_text(memory.compact_markdown, encoding="utf-8")
+    (target_dir / "paper_chunks.jsonl").write_text(
+        "\n".join(
+            json.dumps(asdict(chunk), ensure_ascii=False)
+            for chunk in memory.paper_chunks
+        )
+        + ("\n" if memory.paper_chunks else ""),
+        encoding="utf-8",
+    )
     (target_dir / "evidence_cards.json").write_text(
         json.dumps([asdict(card) for card in memory.evidence_cards], ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -335,7 +362,6 @@ def build_slide_contexts(
     manuscript: str,
     memory: ProviderMemory | None,
     deck_plan: DeckPlan | None = None,
-    deck_brief: str = "",
     detail_level: str = "normal",
 ) -> dict[int, str]:
     """Return compact evidence context for each manuscript page."""
@@ -362,6 +388,15 @@ def build_slide_contexts(
         )
         page_type = extract_page_type(page)
         is_structural = page_type in {"cover", "chapter", "toc", "ending"}
+        chunks = (
+            []
+            if is_structural
+            else retrieve_paper_chunks(
+                query,
+                memory,
+                limit=budget["chunks"],
+            )
+        )
         cards = (
             []
             if is_structural
@@ -381,38 +416,32 @@ def build_slide_contexts(
                 limit=budget["sections"],
             )
         )
-        brief_passages = (
-            []
-            if is_structural
-            else _relevant_brief_passages(
-                query,
-                deck_brief,
-                limit=budget["briefs"],
-            )
-        )
         figure_lines = [] if is_structural else _slide_figure_hints(page, memory)
         lines = [
             "## Provider Slide Working Memory",
             "",
-            "This is private grounding, not slide copy. Synthesize the manuscript; do not print card IDs, section labels, or this memory verbatim.",
+            "This is private grounding, not slide copy. Use the retrieved source passages and evidence anchors to preserve exact facts; do not print chunk IDs, card IDs, section labels, or this memory verbatim.",
             f"- Slide title: {page_title(page)}",
             f"- Page type: {page_type}",
             f"- Paper title: {memory.title}",
         ]
         if memory.authors:
             lines.append(f"- Authors: {', '.join(memory.authors)}")
+        if chunks:
+            lines.extend(["", "### Retrieved Source Passages"])
+            for chunk in chunks:
+                page_note = f", p{chunk.page_number}" if chunk.page_number is not None else ""
+                figure_note = f", figures={', '.join(chunk.figure_ids)}" if chunk.figure_ids else ""
+                lines.append(
+                    f"- `{chunk.id}` [{chunk.kind}{page_note}{figure_note}] {chunk.section}: "
+                    f"{_trim(chunk.text, budget['chunk_chars'])}"
+                )
         if relevant_sections:
-            lines.extend(["", "### Relevant Source Sections"])
+            lines.extend(["", "### Relevant Section Summaries"])
             for section in relevant_sections:
                 lines.append(
                     f"- {section.title}: {_trim(section.brief, budget['section_chars'])}"
                 )
-        if brief_passages:
-            lines.extend(["", "### Brief Claim Boundaries"])
-            lines.extend(
-                f"- {_trim(passage, budget['brief_chars'])}"
-                for passage in brief_passages
-            )
         if cards:
             lines.append("")
             lines.append("### Evidence Anchors")
@@ -441,6 +470,43 @@ def retrieve_evidence_cards(
         return list(memory.evidence_cards[:limit])
     ranked = _rank_cards(query, query_tokens, memory.evidence_cards)
     return _select_diverse_cards(ranked, limit)
+
+
+def retrieve_paper_chunks(
+    query: str,
+    memory: ProviderMemory,
+    *,
+    limit: int,
+) -> list[PaperChunk]:
+    query_tokens = _tokens(query)
+    if not query_tokens:
+        return list(memory.paper_chunks[:limit])
+    ranked = _rank_chunks(query, query_tokens, memory.paper_chunks)
+    selected: list[PaperChunk] = []
+    seen_sections: dict[str, int] = {}
+    seen_kinds: dict[str, int] = {}
+    for score, chunk in ranked:
+        if score <= 0:
+            continue
+        if seen_sections.get(chunk.section, 0) >= 3:
+            continue
+        if chunk.kind == "table" and seen_kinds.get("table", 0) >= 2:
+            continue
+        selected.append(chunk)
+        seen_sections[chunk.section] = seen_sections.get(chunk.section, 0) + 1
+        seen_kinds[chunk.kind] = seen_kinds.get(chunk.kind, 0) + 1
+        if len(selected) >= limit:
+            break
+    if len(selected) < limit:
+        selected_ids = {chunk.id for chunk in selected}
+        for score, chunk in ranked:
+            if score <= 0 or chunk.id in selected_ids:
+                continue
+            selected.append(chunk)
+            selected_ids.add(chunk.id)
+            if len(selected) >= limit:
+                break
+    return selected
 
 
 def _select_diverse_cards(
@@ -508,32 +574,6 @@ def _relevant_section_memories(
     return selected
 
 
-def _relevant_brief_passages(
-    query: str,
-    brief: str,
-    *,
-    limit: int,
-) -> list[str]:
-    if not brief.strip():
-        return []
-    passages = [
-        re.sub(r"\s+", " ", passage).strip(" -*")
-        for passage in re.split(r"\n{2,}|^#{1,6}\s+", brief, flags=re.MULTILINE)
-    ]
-    passages = [passage for passage in passages if len(passage) >= 30]
-    if not passages:
-        return []
-    query_tokens = _tokens(query)
-    scores = _bm25_scores(query_tokens, [_tokens(passage) for passage in passages])
-    ranked = sorted(
-        zip(scores, passages, strict=True),
-        key=lambda item: item[0],
-        reverse=True,
-    )
-    selected = [passage for score, passage in ranked if score > 0][:limit]
-    return selected or passages[:1]
-
-
 def _rank_cards(
     query: str,
     query_tokens: list[str],
@@ -551,7 +591,7 @@ def _rank_cards(
     ranked: list[tuple[float, EvidenceCard]] = []
     for card, tokens, bm25_score in zip(card_list, doc_tokens, bm25_scores, strict=True):
         token_terms = set(tokens)
-        score = bm25_score
+        score = max(0.0, bm25_score)
 
         # Keep the original extraction score as a weak prior while BM25 and
         # lexical relevance drive the ordering.
@@ -582,6 +622,53 @@ def _rank_cards(
     return ranked
 
 
+def _rank_chunks(
+    query: str,
+    query_tokens: list[str],
+    chunks: Iterable[PaperChunk],
+) -> list[tuple[float, PaperChunk]]:
+    chunk_list = list(chunks)
+    doc_tokens = [_tokens(_chunk_search_text(chunk)) for chunk in chunk_list]
+    bm25_scores = _bm25_scores(query_tokens, doc_tokens)
+
+    query_terms = set(query_tokens)
+    query_intents = _query_intents(query)
+    query_concepts = _concept_matches(query_terms)
+    query_phrases = _token_phrases(query_tokens)
+
+    ranked: list[tuple[float, PaperChunk]] = []
+    for chunk, tokens, bm25_score in zip(chunk_list, doc_tokens, bm25_scores, strict=True):
+        token_terms = set(tokens)
+        score = max(0.0, bm25_score)
+
+        section_terms = set(_tokens(chunk.section))
+        score += min(len(query_terms.intersection(section_terms)), 4) * 0.7
+
+        phrase_hits = sum(1 for phrase in query_phrases if phrase in _normalized_text(chunk.text))
+        score += min(phrase_hits, 4) * 0.85
+
+        if chunk.kind in query_intents:
+            score += 1.1
+        elif "result" in query_intents and chunk.kind in {"table", "figure", "paragraph"}:
+            score += 0.6
+        elif "method" in query_intents and chunk.kind in {"equation", "paragraph"}:
+            score += 0.5
+
+        shared_concepts = sum(1 for concept in query_concepts if token_terms.intersection(concept))
+        score += min(shared_concepts, 3) * 0.65
+
+        if token_terms.intersection(query_terms):
+            score += min(len(token_terms.intersection(query_terms)), 6) * 0.16
+
+        if chunk.figure_ids and any(fig_id.lower() in query.lower() for fig_id in chunk.figure_ids):
+            score += 2.0
+
+        ranked.append((score, chunk))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked
+
+
 def _bm25_scores(query_tokens: list[str], docs: list[list[str]]) -> list[float]:
     if not docs:
         return []
@@ -593,6 +680,11 @@ def _bm25_scores(query_tokens: list[str], docs: list[list[str]]) -> list[float]:
 
 def _card_search_text(card: EvidenceCard) -> str:
     return f"{card.section} {card.section} {card.kind} {card.text}"
+
+
+def _chunk_search_text(chunk: PaperChunk) -> str:
+    figures = " ".join(chunk.figure_ids)
+    return f"{chunk.section} {chunk.section} {chunk.kind} {figures} {chunk.text}"
 
 
 def _cards_for_section(section: PaperSection, section_index: int) -> list[EvidenceCard]:
@@ -616,16 +708,23 @@ def _cards_for_section(section: PaperSection, section_index: int) -> list[Eviden
     for table_index, table in enumerate(section.tables, start=1):
         text = " ".join(part for part in (table.caption, table.markdown) if part).strip()
         if text:
-            candidates.append(
-                EvidenceCard(
-                    id=f"s{section_index:02d}t{table_index:02d}",
-                    section=section.title,
-                    kind="table",
-                    text=_trim(text, MAX_CARD_TEXT_CHARS),
-                    score=9.0,
-                    figure_ids=(),
+            table_parts = _split_table_card_text(text)
+            for part_index, part in enumerate(table_parts[:8], start=1):
+                card_id = (
+                    f"s{section_index:02d}t{table_index:02d}"
+                    if len(table_parts) == 1
+                    else f"s{section_index:02d}t{table_index:02d}p{part_index:02d}"
                 )
-            )
+                candidates.append(
+                    EvidenceCard(
+                        id=card_id,
+                        section=section.title,
+                        kind="table",
+                        text=_trim(part, MAX_CARD_TEXT_CHARS),
+                        score=9.0,
+                        figure_ids=(),
+                    )
+                )
     for eq_index, equation in enumerate(section.equations, start=1):
         if equation.strip():
             candidates.append(
@@ -679,11 +778,165 @@ def _sentence_kind(sentence: str) -> str:
     return "context"
 
 
+def _split_table_card_text(text: str) -> list[str]:
+    if len(text) <= MAX_CARD_TEXT_CHARS:
+        return [text]
+    overlap = min(260, MAX_CARD_TEXT_CHARS // 2)
+    step = max(1, MAX_CARD_TEXT_CHARS - overlap)
+    parts: list[str] = []
+    for start in range(0, len(text), step):
+        part = text[start : start + MAX_CARD_TEXT_CHARS].strip()
+        if part:
+            parts.append(part)
+        if start + MAX_CARD_TEXT_CHARS >= len(text):
+            break
+    return parts
+
+
 def _section_brief(section: PaperSection, cards: Iterable[EvidenceCard]) -> str:
     card_texts = [card.text for card in cards][:4]
     if card_texts:
         return _trim(" ".join(card_texts), MAX_SECTION_BRIEF_CHARS)
     return _trim(section.content or "", MAX_SECTION_BRIEF_CHARS)
+
+
+def _paper_chunks(paper: ParsedPaper) -> list[PaperChunk]:
+    chunks: list[PaperChunk] = []
+    if paper.abstract.strip():
+        chunks.extend(
+            _split_chunk_text(
+                "abs",
+                "Abstract",
+                "abstract",
+                paper.abstract,
+                page_number=None,
+                figure_ids=(),
+            )
+        )
+
+    for section_index, section in enumerate(paper.sections, start=1):
+        if _REFERENCE_SECTION_RE.match(section.title):
+            continue
+        prefix = f"s{section_index:02d}"
+        chunks.extend(
+            _split_chunk_text(
+                f"{prefix}p",
+                section.title,
+                "paragraph",
+                section.content,
+                page_number=None,
+                figure_ids=tuple(fig.fig_id for fig in section.figures if fig.available)[:4],
+            )
+        )
+        for fig_index, fig in enumerate(section.figures, start=1):
+            if not paper._should_include_figure(fig):
+                continue
+            caption = (fig.caption or "").replace("\n", " ").strip()
+            text = f"Figure token [[FIG:{fig.fig_id}]]. {caption}".strip()
+            if text:
+                chunks.extend(
+                    _split_chunk_text(
+                        f"{prefix}f{fig_index:02d}",
+                        section.title,
+                        "figure",
+                        text,
+                        page_number=fig.page_number,
+                        figure_ids=(fig.fig_id,),
+                    )
+                )
+        for table_index, table in enumerate(section.tables, start=1):
+            text = "\n".join(part for part in (table.caption, table.markdown) if part).strip()
+            if text:
+                chunks.extend(
+                    _split_chunk_text(
+                        f"{prefix}t{table_index:02d}",
+                        section.title,
+                        "table",
+                        text,
+                        page_number=None,
+                        figure_ids=(),
+                    )
+                )
+        for eq_index, equation in enumerate(section.equations, start=1):
+            if equation.strip():
+                chunks.extend(
+                    _split_chunk_text(
+                        f"{prefix}e{eq_index:02d}",
+                        section.title,
+                        "equation",
+                        equation.strip(),
+                        page_number=None,
+                        figure_ids=(),
+                    )
+                )
+    return chunks
+
+
+def _split_chunk_text(
+    id_prefix: str,
+    section: str,
+    kind: str,
+    text: str,
+    *,
+    page_number: int | None,
+    figure_ids: tuple[str, ...],
+) -> list[PaperChunk]:
+    normalized = re.sub(r"[ \t]+", " ", text or "").strip()
+    if not normalized:
+        return []
+
+    parts: list[str] = []
+    for paragraph in re.split(r"\n{2,}", normalized):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        if len(paragraph) <= MAX_PAPER_CHUNK_CHARS:
+            parts.append(paragraph)
+            continue
+        parts.extend(_split_long_chunk(paragraph, MAX_PAPER_CHUNK_CHARS))
+
+    chunks: list[PaperChunk] = []
+    for idx, part in enumerate(parts, start=1):
+        if len(part) < 20:
+            continue
+        chunks.append(
+            PaperChunk(
+                id=f"{id_prefix}{idx:03d}",
+                section=section,
+                kind=kind,
+                text=part,
+                page_number=page_number,
+                figure_ids=figure_ids,
+            )
+        )
+    return chunks
+
+
+def _split_long_chunk(text: str, limit: int) -> list[str]:
+    sentences = [part.strip() for part in _SENTENCE_SPLIT_RE.split(text) if part.strip()]
+    if len(sentences) <= 1:
+        return [text[i : i + limit].strip() for i in range(0, len(text), limit)]
+
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if not current:
+            current = sentence
+            continue
+        if len(current) + 1 + len(sentence) <= limit:
+            current = f"{current} {sentence}"
+        else:
+            chunks.append(current)
+            current = sentence
+    if current:
+        chunks.append(current)
+    split_chunks: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= limit:
+            split_chunks.append(chunk)
+        else:
+            split_chunks.extend(chunk[i : i + limit].strip() for i in range(0, len(chunk), limit))
+    return split_chunks
 
 
 def _figure_memory(fig: PaperFigure) -> FigureMemory:
@@ -741,10 +994,13 @@ def _working_state(memory: ProviderMemory) -> str:
         "# Provider Working State\n\n"
         f"- Paper: {memory.title}\n"
         f"- Sections indexed: {len(memory.sections)}\n"
+        f"- Full-text chunks: {len(memory.paper_chunks)}\n"
         f"- Evidence cards: {len(memory.evidence_cards)}\n"
         f"- Figures indexed: {len(memory.figures)}\n\n"
-        "Use `compact_paper.md` for manuscript planning and `evidence_cards.json` "
-        "for slide-scoped retrieval."
+        "`full_paper.md` is the preserved source text. `paper_chunks.jsonl`, "
+        "`evidence_cards.json`, and `figures.json` provide slide-scoped "
+        "retrieval grounding. `compact_paper.md` is retained only as a "
+        "fallback/debug summary."
     )
 
 

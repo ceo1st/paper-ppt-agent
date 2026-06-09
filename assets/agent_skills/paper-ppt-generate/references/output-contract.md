@@ -63,7 +63,7 @@ Conditionally required before authoring any deck output:
     "mode": "direct_per_slide",
     "multi_slide_generator_used": false,
     "direct_files": ["slide_001.svg", "slide_002.svg"],
-    "notes": "Each slide was authored from its own claim, evidence, and Region Plan."
+    "notes": "Each slide was authored from its own claim, evidence, and layout."
   },
   "visual_qa": "passed|skipped|failed",
   "notes": ["short summary"]
@@ -80,7 +80,7 @@ SVG requirements:
 - Use inline SVG styling only. Do not include `<style>` blocks or `class=` attributes.
 - Paper figure references must use exact `href` values from `source_assets/figures.json` or `source_assets/figures.md`.
 - Keep all visible content inside the canvas.
-- Content slides should follow the concrete Region Plan in `design_spec.md`; major elements should align to planned boxes instead of being freely scattered.
+- Content slides should have a well-designed layout with major elements aligned to a consistent grid instead of being freely scattered.
 - For Chinese text, avoid repeated short orphan lines and excessive blank space caused by overly narrow text boxes.
 - Every slide SVG must be directly authored as its own file. Multi-slide generator programs, loops, shared renderers, slide registries, and template expansion are forbidden.
 - Preserve source number precision and units; do not introduce K/M/B shorthand or rounded metrics unless the source uses them.

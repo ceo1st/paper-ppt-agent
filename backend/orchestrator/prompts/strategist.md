@@ -14,7 +14,16 @@ Follow this structure exactly:
 
 ### III. Visual Theme
 - Style, theme (light/dark), color scheme (11 roles: background, secondary bg, primary, accent, secondary accent, body text, secondary text, tertiary text, border, success, warning)
-- Deck-level visual system: define the reusable visual vocabulary for the whole deck, including page chrome, background treatment, accent motif, card/panel style, chart style, figure frame style, and structural-page family. This is the source of truth for parallel SVG generation.
+- **60-30-10 rule**: primary color ~60% (backgrounds), secondary ~30% (panels/cards), accent ~10% (highlights/buttons). Maximum 4 colors per page.
+- Deck-level visual system: define the reusable visual vocabulary for the whole deck. Be **concrete and actionable** — describe specific SVG techniques the executor should use:
+  - **Page chrome**: header/footer style (gradient bar? colored strip? subtle line?)
+  - **Background treatment**: flat color? subtle radial gradient? geometric pattern?
+  - **Card/panel style**: rounded corners radius, shadow type (soft filter shadow recommended), accent top-bar or left-border, inner padding
+  - **Chart style**: monochromatic opacity gradient or 2-3 color palette, direct data labels preferred over legends
+  - **Figure frame style**: rounded rect with shadow? bordered? clip-path shaped?
+  - **Decorative motifs**: corner accents (rotated small shapes), gradient dividers, subtle geometric patterns, brand-color orbs/circles
+  - **Structural-page family**: cover style (full-bleed image + gradient overlay? centered title + accent shapes?), chapter divider style, ending style
+- This is the source of truth for parallel SVG generation. The executor will use these descriptions to produce visually rich pages, not flat text layouts.
 
 ### IV. Typography System
 - Font plan: heading font, body font, code font
@@ -34,12 +43,9 @@ Follow this structure exactly:
 ### V. Layout Principles
 - Grid system, spacing rules, alignment guidelines. For 16:9 slides, default content area is x=40, y=100, w=1200, h=520 unless the template says otherwise.
 - Consistency plan: specify which layout families may be reused across content pages and how cover/chapter/ending pages relate visually to those families.
-- Region planning: define reusable content-area regions with concrete proportions and gutters before visual styling. Content slides should use 65-85% of the content area; avoid empty quadrants or detached floating elements.
-- CJK wrapping: plan line breaks from each region's actual width and font size. Allow light raggedness and semantic breaks.
-- Text capacity: every text/card/table region must be feasible before styling. Reserve heading height, body line-count × line-height, caption, and padding. Do not plan a short card for more text than it can hold.
-- Table capacity: allocate the label column from its longest cell first, then numeric columns and gutters.
-- Image-first planning: when a page uses paper figures, choose the visible image rectangles from their actual aspect ratios before allocating text. The visible image should fill most of its frame; if fitting the ratio would leave more than one-third of the frame empty, redesign the regions.
-- Multiple figures: calculate each visible image size from its aspect ratio before stacking. If figures and captions do not fit at useful size, select the most important figure or use a different composition.
+- Content slides should use 65-85% of the content area; avoid empty quadrants or detached floating elements.
+- CJK wrapping: allow light raggedness and semantic breaks.
+- Image-first planning: when a page uses paper figures, the executor will reserve the figure region first from the actual aspect ratio. Report the actual dimensions in Section VIII so the executor can calculate correctly.
 
 ### VI. Icon Usage
 - Provider icon decoration is disabled.
@@ -60,14 +66,14 @@ Follow this structure exactly:
 - Use one shared `Style Family` for all chapter pages, such as `structural.chapter-divider`, and do not create per-chapter variants. Content pages may use several layout families, but each family must be named consistently where reused.
 - Separate `Footer Page Number` from `Chapter Index`: footer pagination uses the slide number; chapter/section labels use the planned chapter index (01, 02, 03...) and must never be inferred from slide number.
 - For each page, refer back to the deck-level visual system rather than inventing a local style. Vary composition only where the content needs it; keep palette, typography hierarchy, chrome, radius/stroke/shadow language, and spacing rhythm planned as deck-level decisions.
-- For sparse manuscript pages, plan richer information design instead of leaving blank space: turn bullets into labeled callouts, mini process blocks, comparison chips, formula annotations, or figure-anchored explanations when the paper supports them.
-- For image + text pages, explicitly plan how the non-image column uses the full vertical rhythm: headline insight, 2-4 grouped callouts, optional formula/key number strip, and caption/source placement. Do not leave the text column as a short list floating in empty space.
-- For every content page, include a `Region Plan:` line with concrete boxes such as `image region x=60 y=130 w=520 h=360; text region x=680 y=130 w=500 h=330; callout x=680 y=515 w=500 h=85`. Region boxes must align to a shared grid and fit inside the content area.
-- Do not place planned content boxes in the footer band. If a callout does not fit, change the content-area composition instead.
-- After each Region Plan, include a short `Text Strategy:` line describing a practical font-size range, line-height range, wrapping behavior, and table column allocation when relevant. Do not use fixed character-capacity numbers.
-- Region Plan coordinates are final layout boxes, not suggestions. Do not write contradictory notes such as `w=520 h=380 (ratio -> h≈188, adjust)`. For each paper figure, state both the reserved frame and the final visible image rectangle calculated from its actual ratio. Do not approve a plan where a wide frame contains a much smaller centered image merely because the ratio is technically preserved.
-- Use one of these layout families unless the manuscript clearly requires another: `figure-left-text-right`, `text-left-figure-right`, `two-column-evidence`, `three-card-grid`, `process-flow-with-evidence`, `comparison-table-callout`, `full-width-chart-with-notes`.
-- If a paper figure is used, reserve and calculate its final visible rectangle first, then use the remaining space deliberately for text. Captions should sit under or beside the figure, not create a large dead zone.
+- For sparse manuscript pages, note that the executor should plan richer information design instead of leaving blank space: turn bullets into labeled callouts, mini process blocks, comparison chips, formula annotations, or figure-anchored explanations when the paper supports it.
+- For image + text pages, note that the executor should plan how the non-image column uses the full vertical rhythm. Do not leave the text column as a short list floating in empty space.
+- Use one of these layout families unless the manuscript clearly requires another:
+  - **Image layouts**: `figure-left-text-right`, `text-left-figure-right`, `full-bleed-image-overlay`
+  - **Data layouts**: `kpi-dashboard` (4 cards with large numbers + trend arrows), `full-width-chart-with-notes`, `comparison-table-callout`
+  - **Structure layouts**: `two-column-evidence`, `three-card-grid`, `four-quadrant-matrix`, `process-flow-with-evidence`
+  - **Narrative layouts**: `hero-title-plus-callouts` (large title + 2-3 accent callout boxes), `timeline-horizontal`, `numbered-steps`
+  - Vary layout families across content pages — do not use the same family for more than 2 consecutive pages unless the content structure demands it.
 - Do not plan visual designs that require invented chart axes, arbitrary ticks, or decorative mini charts when the source only supports qualitative explanation.
 
 ### X. Speaker Notes Requirements

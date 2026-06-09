@@ -116,6 +116,12 @@ def payloads_from_progress_event(job_id: str, job: Job, event: Any) -> list[tupl
     elif event.stage == "error" or event.status == "error":
         updates["status"] = "error"
         updates["error"] = message
+    elif job.status in {"pausing", "paused"}:
+        # After a pause request the Agent/preview scanner can still emit
+        # ordinary progress frames while the SDK drains the interrupted turn.
+        # Those frames should not make the lifecycle jump back to generation.
+        updates["status"] = job.status
+        updates["error"] = None
     else:
         updates["status"] = event.stage
 

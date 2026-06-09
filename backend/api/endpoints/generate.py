@@ -176,6 +176,59 @@ async def _run_agent_feedback_job(
             _cleanup_partial_workspace(job_id)
 
 
+async def _run_provider_subprocess_job(
+    job_id: str,
+    request_file: str,
+    timeout: float | None,
+) -> None:
+    """Run provider generation in an isolated child under scheduler control."""
+    from backend.orchestrator.pipeline import ProgressEvent
+    from backend.runtime import aoffload
+    from backend.runtime.job_event_monitor import monitor_job_events, sync_job_events_once
+    from backend.workers.subprocess_runner import run_generation_subprocess
+
+    monitor_task = asyncio.create_task(
+        monitor_job_events(job_id),
+        name=f"job-{job_id}-event-monitor",
+    )
+    session_manager.register_task(job_id, monitor_task)
+    try:
+        returncode = await aoffload(
+            run_generation_subprocess,
+            job_id,
+            request_file,
+            timeout,
+        )
+        await sync_job_events_once(job_id)
+        job = session_manager.get_job(job_id)
+        if job is None or job.status in {"complete", "error", "cancelled"}:
+            return
+        if returncode == 0:
+            message = "Generation worker exited before reporting completion."
+        else:
+            message = f"Generation worker exited with code {returncode}."
+        error_event = ProgressEvent("error", "error", message, job.progress)
+        for payload, updates in payloads_from_progress_event(job_id, job, error_event):
+            session_manager.record_event(job_id, payload, **updates)
+    except asyncio.CancelledError:
+        session_manager.mark_job_cancelled(job_id)
+        raise
+    finally:
+        try:
+            await sync_job_events_once(job_id)
+        except Exception:
+            pass
+        if not monitor_task.done():
+            try:
+                await asyncio.wait_for(monitor_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                monitor_task.cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+
 def _agent_runtime_from_job(job: Any) -> str:
     provider = str(getattr(job, "provider", "") or "")
     if provider.startswith("agent:"):
@@ -248,7 +301,7 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
         language=request.options.language,
         detail_level=request.options.detail_level,
         instruction=request.instruction,
-        worker_backend="huey-sqlite" if generation_backend == "provider" else None,
+        worker_backend="scheduler-subprocess" if generation_backend == "provider" else None,
     )
 
     pipeline_request = GenerationRequest(
@@ -307,24 +360,47 @@ async def generate_presentation(request: GenerateRequest) -> GenerateResponse:
     )
 
     if generation_backend == "provider":
-        from backend.queue.tasks import run_generation_job
-        from backend.runtime.job_event_monitor import monitor_job_events, write_generation_request
+        from backend.runtime.job_event_monitor import write_generation_request
 
         request_file = await write_generation_request(job.id, pipeline_request)
+        scheduler = get_scheduler()
+
+        async def _runner() -> None:
+            await _run_provider_subprocess_job(
+                job.id,
+                str(request_file),
+                pipeline_request.timeout_seconds,
+            )
+
         try:
-            run_generation_job(job.id, str(request_file), pipeline_request.timeout_seconds)
-        except Exception as exc:
-            msg = describe_exception(exc, "Failed to enqueue generation job")
-            session_manager.update_job(job.id, status="error", error=msg, message=msg)
+            position = await scheduler.submit(job.id, _runner)
+            if position > 0:
+                session_manager.update_job(
+                    job.id,
+                    message=f"Queued for generation (position {position + 1})",
+                )
+        except QueueFull as exc:
+            session_manager.update_job(
+                job.id,
+                status="error",
+                error="Server is busy: too many jobs queued.",
+                message="Server is busy: too many jobs queued.",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=str(exc),
+            ) from exc
+        except SchedulerDraining as exc:
+            session_manager.update_job(
+                job.id,
+                status="error",
+                error="Server is shutting down.",
+                message="Server is shutting down.",
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=msg,
+                detail=str(exc),
             ) from exc
-        monitor_task = asyncio.create_task(
-            monitor_job_events(job.id),
-            name=f"job-{job.id}-event-monitor",
-        )
-        session_manager.register_task(job.id, monitor_task)
     else:
         scheduler = get_scheduler()
 
@@ -554,7 +630,7 @@ async def interrupt_agent_generation(job_id: str) -> AgentFeedbackResponse:
         )
         return AgentFeedbackResponse(job_id=job_id, status="cancelled")
 
-    if job.status == "paused":
+    if job.status in {"paused", "pausing"}:
         cancelled = session_manager.cancel_job(job_id)
         if not cancelled:
             await live_session.close()

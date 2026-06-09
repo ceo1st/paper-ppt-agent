@@ -695,7 +695,7 @@ export function GeneratePage() {
             runtime={selectedRunConfig?.provider?.replace(/^agent:/, "") || agentRuntime}
             messages={agentMessages}
             canStop={canCancelCurrentRun}
-            stopPending={cancelLoading || job?.status === "cancelling" || job?.status === "pausing"}
+            stopPending={cancelLoading || job?.status === "cancelling"}
             onStop={async () => {
               setCancelLoading(true);
               try {
@@ -1064,11 +1064,9 @@ export function GenerationAgentConsole({
     [activityItems],
   );
   const stopLabel =
-    job?.status === "pausing"
-      ? t("generation.agent.pausing")
-      : job?.status === "cancelling"
+    job?.status === "cancelling"
         ? t("generation.agent.canceling")
-        : job?.status === "paused"
+        : job?.status === "paused" || job?.status === "pausing"
           ? t("generation.agent.cancel")
           : t("generation.agent.pause");
   const showThinking = Boolean(

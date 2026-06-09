@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import logging
+import signal
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -18,6 +21,58 @@ from backend.runtime.offload import init_offload, shutdown_offload
 logger = logging.getLogger(__name__)
 
 
+def _cleanup_all_job_processes() -> None:
+    """Kill all tracked generation worker processes on API exit.
+
+    Registered as an atexit handler so child processes are cleaned up
+    whether the API exits normally, via Ctrl+C, or when the terminal
+    window is closed on Windows.
+    """
+    from backend.runtime.worker_process_registry import (
+        terminate_job_process_tree,
+        _registry_dir,
+    )
+    import json
+
+    registry = _registry_dir()
+    if not registry.exists():
+        return
+    killed = 0
+    for proc_file in registry.glob("*.json"):
+        try:
+            payload = json.loads(proc_file.read_text(encoding="utf-8"))
+            job_id = str(payload.get("job_id", ""))
+            if job_id:
+                terminate_job_process_tree(job_id)
+                killed += 1
+        except Exception:
+            pass
+    if killed:
+        logger.info("atexit: cleaned up %d job process(es)", killed)
+
+
+atexit.register(_cleanup_all_job_processes)
+
+
+def _install_signal_handlers() -> None:
+    """Install signal handlers that trigger process cleanup before exit.
+
+    On Windows, SIGINT (Ctrl+C) and SIGTERM are handled. Closing the
+    terminal window sends CTRL_CLOSE_EVENT which Python translates to
+    a KeyboardInterrupt or SystemExit — atexit still fires in those cases.
+    """
+    def _handler(signum: int, frame: object) -> None:
+        logger.info("signal %d received, cleaning up job processes", signum)
+        _cleanup_all_job_processes()
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handler)
+        except (OSError, ValueError, AttributeError):
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan: bring up the runtime pool, scheduler, event bus.
@@ -30,6 +85,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
          to flush their final ``error: cancelled`` event before sockets close,
          then tear down the pool last.
     """
+    _install_signal_handlers()
     init_offload(settings.io_pool_workers)
     try:
         # Scheduler / EventBus are wired in here once their modules land
@@ -48,6 +104,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
+            _cleanup_all_job_processes()
             if scheduler is not None:
                 await scheduler.shutdown(timeout=30.0)
     finally:
