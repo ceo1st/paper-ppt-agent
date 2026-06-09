@@ -13,11 +13,11 @@ Layout:
 - Keep margins stable across the deck.
 - Avoid tiny text. Prefer fewer, clearer points.
 - Use template assets in `templates/` when available.
-- Author one explicitly named slide SVG at a time. Do not build a deck generator, loop over slide definitions, or emit pages through shared renderer functions. Each page's Region Plan and final SVG markup must be written for that page.
+- Author one explicitly named slide SVG at a time. Do not build a deck generator, loop over slide definitions, or emit pages through shared renderer functions. Each page's layout and final SVG markup must be written for that page.
 - Shared colors, typography, margins, and recurring chrome may be repeated directly. They are not permission to reuse a universal page skeleton or card grid for unrelated content.
 - Put styling directly on SVG elements. Do not use `<style>` blocks or `class=` attributes in final slide SVGs; inline `fill`, `stroke`, `font-family`, `font-size`, opacity, and line attributes instead.
 - Use local icons from the configured icons path; verify files exist before referencing them.
-- Treat the per-slide Region Plan in `design_spec.md` as the layout contract. Instantiate the planned x/y/w/h boxes first, then place figures, text, cards, charts, and callouts inside those boxes.
+- Design each slide's spatial layout before drawing. Choose a layout family from the Slide Plan, then place figures, text, cards, charts, and callouts in aligned rectangular regions with 24-40px gutters.
 - For ordinary content slides, aim for 65-85% meaningful occupancy of the content area. Whitespace is useful for hierarchy, but do not leave an empty quadrant, a short bullet list floating in a large blank field, or a bottom callout visually detached from the main grid.
 - Use 24-40px gutters between major regions and align edges across repeated layout families.
 - For figure slides, reserve the figure frame first and fit the image inside that frame preserving aspect ratio. Do not stretch the paper figure to fill a convenient box.

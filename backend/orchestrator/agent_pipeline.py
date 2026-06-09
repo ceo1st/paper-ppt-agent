@@ -1068,12 +1068,12 @@ Repair the existing workspace without changing the requested narrative or slide 
 - Rewrite every affected `svg_output/slide_###.svg` directly, one explicitly named file at a time.
 - Do not use a loop, slide list/registry, shared renderer, template expansion, or a program that emits multiple SVGs.
 - Keep only deck-level visual tokens shared: palette, typography, margins, and recurring chrome.
-- Re-evaluate each slide's claim, evidence, paper figure, Region Plan, whitespace, and Chinese wrapping independently.
-- Fix every listed out-of-bounds, card overflow, line collision, or text-capacity violation by changing the Region Plan, container size, line breaks, table columns, or wording. Do not merely shrink all text.
+- Re-evaluate each slide's claim, evidence, paper figure, layout, whitespace, and Chinese wrapping independently.
+- Fix every listed out-of-bounds, card overflow, line collision, or text-capacity violation by changing the layout, container size, line breaks, table columns, or wording. Do not merely shrink all text.
 - Remove disallowed SVG constructs such as `<style>`, `class=`, `mask`, `filter`, `clipPath`, `foreignObject`, scripts, event handlers, or remote URLs. Put fill/stroke/font attributes directly on each SVG element instead of using CSS classes.
 - Before finishing each slide, verify `text_right <= region_right`, `last_baseline + font_size*0.25 <= region_bottom`, and every table column has enough width for its longest visible cell.
 - Preserve exact source numbers and units; remove K/M/B shorthand unless it appears verbatim in the paper.
-- Update `design_spec.md` so every content slide has its own concrete Region Plan.
+- Ensure every content slide has a well-designed layout.
 - Update `agent_report.json.slide_authoring` to:
   - `mode`: `direct_per_slide`
   - `multi_slide_generator_used`: false
@@ -2085,7 +2085,7 @@ def _codex_developer_instructions(project_dir: Path) -> str:
         "Author every slide SVG directly as its own file. Never create or run a Python, "
         "JavaScript, shell, PowerShell, or other general-purpose program that generates "
         "multiple slide SVGs, and never use a loop or shared renderer to emit the deck. "
-        "Shared colors and typography may be documented, but each slide's Region Plan "
+        "Shared colors and typography may be documented, but each slide's layout "
         "and SVG markup must be explicitly authored for that slide."
     )
 
@@ -3101,7 +3101,7 @@ def _agent_batch_authoring_block_reason(
             return (
                 "Do not create a program that generates multiple slide SVGs. "
                 "Write each svg_output/slide_###.svg directly and independently, "
-                "using that slide's own Region Plan."
+                "designing that slide's layout based on its content."
             )
 
     if tool_name != "Bash":
@@ -3479,9 +3479,9 @@ Workspace contract:
 - Deck budget contract: {detail_profile["slide_count_guidance"]} The detail selector affects only slide count and source/summary retrieval budgets. It does not set per-slide density, bullet count, evidence count, typography, or layout.
 - Structural contract: slide 1 is the cover and slide 2 is a mandatory table of contents whose chapter titles match the final chapter plan. Count structural pages separately and use the remaining content-slide budget to choose chapter boundaries.
 - Chapter contract: use at most {detail_profile["page_type_budget"]["chapter"]} chapter dividers. Chapters are presentation-level sections, not paper subsection headings; local method parts, result groups, and discussion points belong on content slides.
-- Per-slide authoring contract: author every `svg_output/slide_###.svg` directly as a separate file. Do not create or run a Python/JavaScript/TypeScript/shell/PowerShell/batch/Ruby program that generates multiple slides. Do not use loops, a `SLIDES`/maker registry, shared `base_svg`/`title`/card rendering functions, or template expansion to emit the deck. Shared palette, typography, margins, and recurring chrome may be documented, but each slide must have an explicit slide-specific Region Plan and explicit SVG markup chosen from that slide's claim and evidence. Read-only validation/render/export scripts remain allowed.
-- Layout contract: put concrete Region Plans in `design_spec.md` for every content slide. Build from aligned rectangular regions first; content slides should normally occupy 65-85% of the content area and avoid empty quadrants or detached bottom callouts. Wrap dynamically from each region's actual width, font size, visual share, and content density. Keep line edges, baselines, captions, and padding inside the final boxes. Size table columns from their longest visible cells.
-- Continuity contract: before writing a chapter slide, read at most the two most recent earlier chapter-slide SVGs. Before writing a content slide, read at most the two most recent earlier content-slide SVGs, skipping cover, TOC, chapter, and ending slides. Use them for style continuity only; the current manuscript and Region Plan remain authoritative.
+- Per-slide authoring contract: author every `svg_output/slide_###.svg` directly as a separate file. Do not create or run a Python/JavaScript/TypeScript/shell/PowerShell/batch/Ruby program that generates multiple slides. Do not use loops, a `SLIDES`/maker registry, shared `base_svg`/`title`/card rendering functions, or template expansion to emit the deck. Shared palette, typography, margins, and recurring chrome may be documented, but each slide must have an explicit layout and SVG markup chosen from that slide's claim and evidence. Read-only validation/render/export scripts remain allowed.
+- Layout contract: design each slide's spatial layout when generating that slide. Build from aligned rectangular regions first; content slides should normally occupy 65-85% of the content area and avoid empty quadrants or detached bottom callouts. Wrap dynamically from each region's actual width, font size, visual share, and content density. Keep line edges, baselines, captions, and padding inside the final boxes. Size table columns from their longest visible cells.
+- Continuity contract: before writing a chapter slide, read at most the two most recent earlier chapter-slide SVGs. Before writing a content slide, read at most the two most recent earlier content-slide SVGs, skipping cover, TOC, chapter, and ending slides. Use them for style continuity only; the current manuscript remains authoritative.
 - Factual rendering contract: preserve exact source numbers, notation, precision, and units. Do not abbreviate, invent, or round metrics, chart axes, ticks, dates, sample sizes, or settings. Mark derived values explicitly and show their source inputs/calculation nearby. Evidence-card ids and retrieval snippets are private grounding, not visible slide copy.
 - Icon contract: icons are optional decorative/semantic visual aids. Add them only when they make the slide clearer or more polished, such as repeated semantic labels, process steps, comparison dimensions, legends, or diagram nodes. Before using icons, define a small vocabulary in `design_spec.md` (concept -> existing local SVG file -> size/style/color). Use filesystem commands against `agent_task.json.paths.icons` to list and match available `.svg` files directly; do not use icon search scripts, icon metadata files, `index_meta.json`, or vector indexes. Reuse the same icon for the same concept, keep to one icon family/style, and color icons with the template/deck palette. Avoid scattering one-off icons or multi-color icon accents across unrelated slides. Never use letters, initials, ASCII/Unicode symbols, emoji, dingbats, or decorative characters as icon substitutes; omit the icon or use a non-icon shape if no matching asset exists.
 - SubAgent contract: do not split work just to satisfy ordinary slide count or budget selection. When deep research is enabled, launch focused research SubAgents if the Task tool is available; use separate readers for background/related work, method, experiments, and critique when the paper is complex. When Agent review is enabled, run one focused review SubAgent after the first full deck is drafted; it should review the whole deck for layout overflow, missing assets, icon-policy violations, and narrative gaps instead of checking pages one by one. If you skip a required deep-research or review SubAgent, write a concrete reason in `agent_report.json.subagents`; the main Agent must merge results and keep final narrative/design consistency.
@@ -3521,7 +3521,7 @@ Workspace contract:
 - When a slide SVG is revised, write it immediately to `svg_output/` so the app can preview it live.
 - Keep following `agent_task.json.presentation.detail_profile`, `agent_task.json.agent_policy.icon_policy`, and `agent_task.json.agent_policy.subagent_policy`.
 - Keep following `agent_task.json.agent_policy.slide_authoring_policy`: revise each affected SVG directly. Do not introduce a generator script, loop, shared renderer, or template expander even when many slides need the same change.
-- Keep following `agent_task.json.agent_policy.layout_policy`: revise layout by changing the Region Plan and SVG placement math, not by only adding a post-hoc QA note.
+- Keep following `agent_task.json.agent_policy.layout_policy`: revise layout by changing the SVG placement math, not by only adding a post-hoc QA note.
 - Keep following `agent_task.json.agent_policy.factual_rendering_policy`: preserve exact source numbers/units, avoid K/M/B shorthand unless source-authored, and label transparent derivations.
 - Keep following `agent_task.json.agent_policy.source_asset_policy`: when adding/replacing paper figures, use the exact `href` from `source_assets/figures.json` and preserve the figure's aspect ratio.
 - Continue to follow the icon vocabulary in `design_spec.md`: use icons only where they clarify structure or repeated concepts, reuse the same local icon/style/color for the same concept, and omit icons that would be one-off decoration. Never use letters, symbols, emoji, or decorative glyphs as icon substitutes.
@@ -3657,12 +3657,13 @@ def _agent_icon_policy() -> dict[str, Any]:
 
 def _agent_layout_policy() -> dict[str, Any]:
     return {
-        "generation_phase": "plan_before_svg",
-        "region_plan_required": True,
-        "region_plan_contract": (
-            "Every content slide in design_spec.md must include concrete final "
-            "boxes such as x/y/w/h for figure, text, card, chart, and callout "
-            "regions. Coordinates are layout commitments, not suggestions."
+        "generation_phase": "design_per_slide",
+        "region_plan_required": False,
+        "layout_designer": "executor_per_slide",
+        "layout_design_note": (
+            "The executor designs each slide's spatial layout when generating that slide, "
+            "not upfront in design_spec.md. The strategist only provides global design system, "
+            "layout families, style families, and density targets."
         ),
         "content_area_default": {
             "ppt169": {"x": 40, "y": 100, "w": 1200, "h": 520},
@@ -3719,7 +3720,6 @@ def _agent_layout_policy() -> dict[str, Any]:
             ),
         },
         "forbidden": [
-            "contradictory Region Plan notes such as final w/h followed by ratio adjustment math",
             "invented chart axes or ticks used only to fill empty space",
             "paper figure stretching instead of fit-inside-frame aspect preservation",
             "paragraph text placed in a narrow right-edge region without a width budget",
@@ -3727,9 +3727,8 @@ def _agent_layout_policy() -> dict[str, Any]:
             "table columns positioned without measuring the longest label/cell",
         ],
         "qa_reporting": (
-            "agent_report.json should include layout_qa with whether Region Plans "
-            "were followed, any slides repaired for occupancy/wrapping, and any "
-            "remaining limitation."
+            "agent_report.json should include layout_qa with any slides "
+            "repaired for occupancy/wrapping and any remaining limitation."
         ),
     }
 
@@ -3739,8 +3738,8 @@ def _agent_slide_authoring_policy() -> dict[str, Any]:
         "mode": "direct_per_slide_authoring",
         "required": [
             "Author each svg_output/slide_###.svg as a separate direct file write or edit.",
-            "Create a concrete, slide-specific Region Plan before authoring that slide.",
-            "Choose the composition from that slide's claim, evidence, and paper figure rather than instantiating a deck-wide page template.",
+            "Design each slide's spatial layout when authoring that slide, based on its claim, evidence, and paper figure.",
+            "Choose the composition from that slide's content rather than instantiating a deck-wide page template.",
             "Keep shared deck tokens limited to documented colors, typography, margins, and recurring chrome.",
             "Write SVG with direct inline attributes; do not rely on CSS classes or a `<style>` block.",
         ],
