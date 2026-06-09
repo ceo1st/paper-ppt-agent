@@ -427,24 +427,11 @@ async def run_pipeline(
             design_spec,
             detail_level=request.detail_level,
         )
-        deck_brief = ""
-        for brief_path in (
-            project_dir / "debug" / "paper_brief.md",
-            project_dir / "debug" / "research_pass1_response.md",
-        ):
-            if brief_path.exists():
-                try:
-                    deck_brief = await aread_text(brief_path, encoding="utf-8")
-                except OSError:
-                    deck_brief = ""
-                if deck_brief:
-                    break
         slide_contexts = build_slide_contexts(
             manuscript,
             provider_memory,
             generation_deck_plan,
-            deck_brief,
-            request.detail_level,
+            detail_level=request.detail_level,
         )
         if slide_contexts:
             try:

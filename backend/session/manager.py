@@ -4,9 +4,13 @@ Persistence strategy:
 
     The in-memory dict is the source of truth. ``session_state.json`` is
     just a snapshot used to recover Job/Session metadata across server
-    restarts. Writing the full snapshot on every event update is wasteful
-    (an active job emits hundreds of progress events; each one used to
-    rewrite a multi-MB JSON), so the snapshot is *debounced*:
+    restarts. It intentionally does not persist the per-job event ring:
+    live WebSocket reconnects use the in-memory ring, while provider-backed
+    jobs rebuild events from their durable ``job_events/*.jsonl`` worker log
+    after API restart. Keeping replay events out of the global snapshot avoids
+    rewriting multi-MB JSON for every progress frame.
+
+    Writing the snapshot is *debounced*:
 
       * ``record_event`` / ``update_job`` / ``create_*`` mark the state
         dirty in-memory, then schedule a flush via ``_request_flush``;
@@ -16,9 +20,9 @@ Persistence strategy:
         back to an immediate synchronous write so behaviour stays correct.
 
     Worst case on a hard crash we lose the last 200ms of *metadata*
-    snapshots. Events themselves are still in memory; they would also be
-    lost on a crash, which is acceptable: a fresh-restarted server marks
-    in-flight jobs as errored anyway via ``_mark_orphaned_running_jobs``.
+    snapshots. API-local replay events are also lost, which is acceptable:
+    completed decks hydrate from preview files, and provider jobs can replay
+    the worker log if their supervisor is still recoverable.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ from backend.config import settings
 logger = logging.getLogger(__name__)
 
 
-# Maximum number of recent events kept on disk per job, used for replay
+# Maximum number of recent events kept in memory per job, used for replay
 # when a websocket reconnects after a transient drop.
 EVENT_RING_SIZE = 1000
 
@@ -445,9 +449,10 @@ class SessionManager:
         for job in self._jobs.values():
             if job.status in terminal:
                 continue
-            # Provider jobs are now backed by the local SQLiteHuey queue and
-            # durable event logs, so an API reload can resume monitoring them.
-            # Agent jobs keep live SDK sessions in-process and cannot recover.
+            # Legacy provider jobs backed by the local SQLiteHuey queue can be
+            # recovered from durable worker logs. Scheduler-managed subprocess
+            # jobs and Agent jobs keep their supervisor in the API process, so
+            # a restart loses their live runner.
             if job.worker_backend == "huey-sqlite":
                 continue
             if job.status in running_states or job.status not in terminal:
@@ -578,11 +583,12 @@ class SessionManager:
 
         for raw_job in payload.get("jobs", []):
             try:
-                events_raw = raw_job.get("events") or []
-                events: list[dict] = [ev for ev in events_raw if isinstance(ev, dict)]
+                # Older snapshots persisted replay events. They are no longer
+                # loaded into the metadata state; provider jobs can rebuild
+                # replay from durable worker logs, and completed jobs hydrate
+                # previews from disk.
+                events: list[dict] = []
                 last_seq = int(raw_job.get("last_seq", 0) or 0)
-                if not last_seq and events:
-                    last_seq = max(int(ev.get("seq", 0) or 0) for ev in events)
                 job = Job(
                     id=str(raw_job["id"]),
                     session_id=str(raw_job["session_id"]),
@@ -626,9 +632,10 @@ class SessionManager:
     @staticmethod
     def _serialize_job(job: Job) -> dict[str, Any]:
         payload = asdict(job)
-        # Persist a bounded slice of recent events so reconnecting clients
-        # can replay any frames they missed during the disconnect.
-        payload["events"] = list(job.events[-EVENT_RING_SIZE:])
+        # Event replay is process-local and provider worker logs are already
+        # durable per job. Persisting the ring here made every progress update
+        # rewrite a large global JSON snapshot.
+        payload["events"] = []
         payload["last_seq"] = job.last_seq
         return payload
 

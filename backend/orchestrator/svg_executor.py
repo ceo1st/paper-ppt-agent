@@ -307,18 +307,34 @@ def _layout_generation_guardrails(page_type: str, has_paper_figure: bool) -> str
     )
     return (
         "\n## Layout Generation Guardrails\n"
-        "- Build the page from explicit rectangular regions before drawing details. "
-        "If the Page Design Contract includes `Region Plan`, follow those x/y/w/h boxes. "
-        "If it does not, choose one stable family: figure-left-text-right, "
-        "text-left-figure-right, two-column-evidence, three-card-grid, "
-        "process-flow-with-evidence, comparison-table-callout, or "
-        "full-width-chart-with-notes.\n"
+        "- Design the page layout from explicit rectangular regions before drawing details. "
+        "Choose one stable family from the Slide Plan's layout family, or pick the most "
+        "suitable: figure-left-text-right, text-left-figure-right, two-column-evidence, "
+        "three-card-grid, kpi-dashboard, process-flow-with-evidence, "
+        "comparison-table-callout, full-width-chart-with-notes, hero-title-plus-callouts, "
+        "four-quadrant-matrix, timeline-horizontal, or full-bleed-image-overlay.\n"
         "- Use shared gutters of 24-40px and align region edges. Content slides should "
         "meaningfully occupy about 65-85% of the content area without edge crowding.\n"
         "- Keep content boxes inside the content area; the footer band is not layout space.\n"
         "- Avoid free-floating bullets, detached bottom callouts, and large blank bands. "
         "A callout should align with the same column or span a clear full-width grid row.\n"
         f"{figure_note}"
+        "- **Visual depth is required**: flat pages without elevation look unfinished. "
+        "Use filter shadows on cards/panels (`<filter>` with `feGaussianBlur` + `feOffset`, "
+        "`flood-opacity` 0.12-0.20). Use gradients for backgrounds, header bars, and overlays "
+        "(`linearGradient` / `radialGradient`). Use accent top-bars or left-borders on cards "
+        "(4px colored rect). Use subtle decorative elements: rotated small shapes as corner "
+        "accents, gradient divider lines, brand-color orbs/circles.\n"
+        "- **Card design**: every card/panel should have a shadow, an accent element "
+        "(top-bar or left-border), and proper inner padding. Do not use plain flat rectangles "
+        "with just a stroke border.\n"
+        "- **Visual hierarchy**: use large bold numbers (36-48px) with small gray labels for "
+        "KPI/metrics. Use color-coded status (green=positive, red=negative, yellow=warning). "
+        "Use accent callout boxes with light tinted backgrounds (`fill-opacity=\"0.08\"`) and "
+        "colored left borders for key takeaways.\n"
+        "- **Color rules**: 60-30-10 rule (primary 60%, secondary 30%, accent 10%). "
+        "Maximum 4 colors per page. Use monochromatic opacity variations for chart series, "
+        "not rainbow colors.\n"
         "- Wrap text dynamically from each actual region width, font size, and visual "
         "share. Let ordinary non-final lines use most of their box width; avoid "
         "conservative early breaks. Use semantic breaks and allow light raggedness.\n"
@@ -332,7 +348,7 @@ def _layout_generation_guardrails(page_type: str, has_paper_figure: bool) -> str
         "a paragraph. Do not split an emphasized keyword into an isolated floating "
         "line unless the phrase genuinely wraps there.\n"
         "- While drawing text, keep baselines, descenders, padding, and right edges "
-        "inside the final Region Plan boxes.\n"
+        "inside the final region boxes.\n"
         "- For tables, determine column widths from the longest visible label/cell first, "
         "then place rows. Keep method names separate from numeric columns and right-align "
         "numbers; never rely on guessed x positions that can overlap.\n"
@@ -495,6 +511,85 @@ def _figures_from_page_references(
             continue
         seen.add(stem)
         figures.append(fig)
+    return figures
+
+
+def _figures_from_design_spec_for_page(
+    design_spec: str,
+    page_num: int,
+    figure_inventory: list[dict] | None,
+) -> list[dict]:
+    """Extract figure assignments from design_spec Section VIII for a given page.
+
+    Parses the Image Resource List table and matches the Page column against
+    page_num.  Returns matching entries from figure_inventory.
+    """
+    if not figure_inventory or not design_spec:
+        return []
+
+    # Extract Section VIII content
+    section_match = re.search(
+        r"(?is)#+\s*VIII\b.*?(?=^#+\s*[IVXLCDM]+\.|\Z)",
+        design_spec,
+    )
+    if not section_match:
+        return []
+    section = section_match.group(0)
+
+    # Build a set of filenames assigned to this page from the table rows.
+    # Two known formats:
+    #   Format A: | filename | ... | page_num | ... |          (numeric Page column)
+    #   Format B: | filename | ... | Slide N: description |    (Placement Notes column)
+    assigned_stems: set[str] = set()
+    for row_match in re.finditer(r"(?m)^\s*\|\s*(\S+)\s*\|(.+)$", section):
+        stem = row_match.group(1).strip()
+        row_text = row_match.group(2)
+        # Try Format A: look for a standalone page number in the last column(s)
+        cells = [c.strip() for c in row_text.split("|")]
+        found = False
+        for cell in cells:
+            # Check for "Slide N" or "page N" patterns (Format B)
+            slide_refs = re.findall(r"[Ss]lide\s+(\d+)", cell)
+            if slide_refs:
+                if page_num in (int(s) for s in slide_refs):
+                    assigned_stems.add(stem)
+                    found = True
+                    break
+            # Check for bare page number (Format A)
+            if re.fullmatch(r"\d+", cell):
+                if int(cell) == page_num:
+                    assigned_stems.add(stem)
+                    found = True
+                    break
+            # Check for comma/space separated page numbers
+            tokens = re.split(r"[,，\s]+", cell)
+            nums = set()
+            for t in tokens:
+                t = t.strip()
+                if t.isdigit():
+                    nums.add(int(t))
+            if page_num in nums:
+                assigned_stems.add(stem)
+                found = True
+                break
+
+    if not assigned_stems:
+        return []
+
+    # Match stems against figure_inventory
+    inventory_by_stem: dict[str, dict] = {}
+    for fig in figure_inventory:
+        fig_stem = Path(str(fig.get("path") or "")).stem
+        if fig_stem:
+            inventory_by_stem[fig_stem] = fig
+
+    figures: list[dict] = []
+    seen: set[str] = set()
+    for stem in assigned_stems:
+        fig = inventory_by_stem.get(stem)
+        if fig and stem not in seen:
+            seen.add(stem)
+            figures.append(fig)
     return figures
 
 
@@ -2657,6 +2752,23 @@ async def generate_svg_pages(
                     "Paper figure references resolved from this slide manuscript:\n"
                     f"{reference_lines}"
                 )
+        # Fallback: if manuscript has no figure tokens or text references,
+        # check design_spec Section VIII for explicit page assignments.
+        if not used_figures and not is_structural_page and design_spec:
+            spec_figures = _figures_from_design_spec_for_page(
+                design_spec, page_num, figure_inventory,
+            )
+            if spec_figures:
+                figure_source = "design_spec"
+                used_figures = spec_figures
+                reference_lines = "\n".join(
+                    _paper_figure_reference_line(fig) for fig in spec_figures
+                )
+                rewritten_content = (
+                    f"{rewritten_content}\n\n"
+                    "Paper figure assignment from design_spec Image Resource List:\n"
+                    f"{reference_lines}"
+                )
         used_figures, optimized_figure_notes = _optimize_figure_choices(
             used_figures,
             figure_inventory,
@@ -3969,6 +4081,23 @@ def _prepare_parallel_page_inputs(
             rewritten_content = (
                 f"{rewritten_content}\n\n"
                 "Paper figure references resolved from this slide manuscript:\n"
+                f"{reference_lines}"
+            )
+    # Fallback: if manuscript has no figure tokens or text references,
+    # check design_spec Section VIII for explicit page assignments.
+    if not used_figures and not is_structural_page and design_spec:
+        spec_figures = _figures_from_design_spec_for_page(
+            design_spec, page_num, figure_inventory,
+        )
+        if spec_figures:
+            figure_source = "design_spec"
+            used_figures = spec_figures
+            reference_lines = "\n".join(
+                _paper_figure_reference_line(fig) for fig in spec_figures
+            )
+            rewritten_content = (
+                f"{rewritten_content}\n\n"
+                "Paper figure assignment from design_spec Image Resource List:\n"
                 f"{reference_lines}"
             )
 

@@ -9,13 +9,15 @@ Architecture:
     Pass 3 — Manuscript: generate the actual slide manuscript.
     Pass 4 — Self-Review: evaluate quality and revise if needed.
 
-Deep research is opt-in. Without it, the agent first writes a lightweight
-paper brief and then writes the manuscript from that brief; external
-enrichment can still be injected as context.
+Deep research is opt-in. Without it, the agent writes the manuscript directly
+from the full parsed paper; external enrichment can still be injected as
+context. Compact paper memory is retained only as a fallback/debug source when
+a provider rejects the full context.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -31,6 +33,7 @@ from backend.orchestrator.manuscript import (
     page_type_budget,
     page_type_budget_guidance,
     split_manuscript_pages,
+    strip_page_type_metadata,
 )
 from backend.orchestrator.provider_memory import ProviderMemory
 from backend.parser.paper_model import ParsedPaper
@@ -52,25 +55,12 @@ PASS4_PROMPT = PROMPTS_DIR / "research_pass4_review.md"
 LEGACY_PROMPT = PROMPTS_DIR / "research.md"
 
 DEEPSEEK_MAX_TOKENS = 24576
-DEEPSEEK_RESEARCH_MAX_TOKENS = DEEPSEEK_MAX_TOKENS
-BRIEF_MAX_TOKENS = {
-    "normal": 8192,
-    "high": 12288,
-    "very_high": 16384,
-}
 MAX_MANUSCRIPT_ATTEMPTS = 3
 SINGLE_PASS_SYSTEM_PROMPT = (
     "You write slide-structured manuscripts from academic papers. "
     "Extract the paper's problem, method, evidence, and takeaway; turn them into "
     "a clear slide sequence. Output only the manuscript, separated by standalone "
     "`---` lines."
-)
-LIGHTWEIGHT_BRIEF_SYSTEM_PROMPT = (
-    "You are building a source-grounded evidence brief for a slide writer. The paper "
-    "may come from any academic discipline. Preserve bibliographic identity, claims, "
-    "methods or argument structure, evidence, exact values, uncertainty, and limits. "
-    "Separate what the source explicitly states from arithmetic derivations and your "
-    "interpretation. Do not write slides yet."
 )
 
 _SLIDE_HEADING_RE = re.compile(
@@ -127,6 +117,25 @@ def _sanitize_internal_evidence_markers(manuscript: str) -> str:
         cleaned,
     )
     return cleaned
+
+
+def _is_context_window_error(exc: BaseException) -> bool:
+    text = f"{exc.__class__.__name__}: {exc}".lower()
+    context_terms = (
+        "context_length",
+        "context length",
+        "context window",
+        "maximum context",
+        "max context",
+        "too many tokens",
+        "tokens exceed",
+        "input tokens",
+        "prompt tokens",
+        "request too large",
+        "payload too large",
+        "string too long",
+    )
+    return any(term in text for term in context_terms)
 
 
 async def _repair_manuscript_structure_if_needed(
@@ -199,85 +208,83 @@ async def _repair_manuscript_structure_if_needed(
 
         _debug_write_text(debug_dir, f"{attempt_prefix}_rejected.txt", current_error)
 
+    deterministic = _coerce_extra_slides_if_safe(
+        current,
+        paper,
+        num_pages,
+        detail_level,
+    )
+    if deterministic is not None:
+        _debug_write_text(debug_dir, f"{debug_prefix}_deterministic_response.md", deterministic)
+        return deterministic
+
     raise ValueError(
         "Slide manuscript structure repair failed: "
         f"initial error: {initial_error}; repair error: {current_error}"
     )
 
 
-async def _run_lightweight_paper_brief(
+def _coerce_extra_slides_if_safe(
+    manuscript: str,
     paper: ParsedPaper,
-    llm: LLMProvider,
-    model: str,
-    *,
-    instruction: str = "",
-    language: str = "en",
-    detail_level: str = "normal",
-    enrichment_block: str = "",
-    is_deepseek: bool = False,
-    paper_markdown: str | None = None,
-    debug_dir: Path | None = None,
-) -> str:
-    """Extract a compact, evidence-first brief for the non-deep manuscript path."""
-    paper_context = paper_markdown or paper.to_markdown()
-    user_parts = [
-        f"## Paper Working Memory\n\n{paper_context}",
-        f"\n## Target Language\n\n{language}\n\n{_language_guidance(language)}",
-    ]
-    figure_inventory = _figure_token_inventory_block(paper)
-    if figure_inventory:
-        user_parts.append(f"\n{figure_inventory}")
-    if enrichment_block:
-        user_parts.append(f"\n{enrichment_block}")
-    if instruction:
-        user_parts.append(f"\n## User Instruction\n\n{instruction}")
-    user_parts.append(
-        "\n\n## Brief Requirements\n\n"
-        "Output Markdown only. Be concise where possible, but do not omit a major claim, "
-        "evidence stream, counterpoint, or boundary merely to keep the brief short. "
-        "Do not write the slide manuscript yet.\n"
-        "Include these sections:\n"
-        "1. Bibliographic identity: reproduce the source title and authors exactly as supplied; "
-        "do not invent a venue, subtitle, or alternate title.\n"
-        "2. Research purpose, question, thesis, or problem and why it matters in this discipline.\n"
-        "3. Approach or argument map: methods, materials, theory, reasoning steps, or mechanism, "
-        "using the structure appropriate to this paper rather than assuming a computing paper.\n"
-        "4. Evidence ledger as a Markdown table with columns: ID, claim, status "
-        "(SOURCE / DERIVED / INTERPRETATION), source anchor, exact evidence, boundary. "
-        "SOURCE means explicitly stated. DERIVED must show the input values and formula. "
-        "INTERPRETATION must be worded as an interpretation, never as the authors' claim.\n"
-        "5. Important figures, tables, formulas, quotations, cases, or textual passages and what "
-        "each can legitimately support.\n"
-        "6. Limitations, assumptions, counterevidence, uncertainty, and unresolved questions.\n"
-        "7. Coverage inventory for the deck: major content units that should not be lost when "
-        "allocating slides.\n\n"
-        "Numeric fidelity is strict: preserve decimal points, units, denominators, populations, "
-        "and comparison baselines. Do not round or aggregate unless marked DERIVED with the "
-        "calculation. Do not compress exact counts into shorthand units unless the source "
-        "uses the same shorthand. Prefer exact source metrics and absolute percentage-point "
-        "differences over newly derived relative percentages. If a detail is absent or "
-        "damaged, write [not reliably extracted].\n"
-        "Avoid generic phrases such as 'the paper proposes a new method' unless you name the "
-        "actual contribution and the evidence supporting it."
-    )
+    num_pages: int | None,
+    detail_level: str,
+) -> str | None:
+    if not num_pages:
+        return None
+    expected_count = _expected_slide_count(num_pages, detail_level)
+    pages = split_manuscript_pages(manuscript)
+    if len(pages) <= expected_count:
+        return None
 
-    messages = [
-        LLMMessage.system(LIGHTWEIGHT_BRIEF_SYSTEM_PROMPT),
-        LLMMessage.user("\n".join(user_parts)),
-    ]
-    _debug_write_messages(debug_dir, "paper_brief_prompt.md", messages)
-    response = await llm.chat(
-        messages,
-        model,
-        temperature=0.25,
-        max_tokens=min(
-            BRIEF_MAX_TOKENS.get(detail_level, BRIEF_MAX_TOKENS["normal"]),
-            DEEPSEEK_RESEARCH_MAX_TOKENS,
-        ),
-    )
-    brief = response.content.strip()
-    _debug_write_text(debug_dir, "paper_brief.md", brief)
-    return brief
+    while len(pages) > expected_count:
+        merge_pair = _extra_slide_merge_pair(pages)
+        if merge_pair is None:
+            return None
+        target_index, source_index = merge_pair
+        pages[target_index] = _merge_extra_slide(
+            pages[target_index],
+            pages[source_index],
+        )
+        del pages[source_index]
+
+    candidate = "\n\n---\n\n".join(page.strip() for page in pages if page.strip())
+    if _manuscript_validation_error(candidate, paper, num_pages, detail_level):
+        return None
+    return candidate
+
+
+def _extra_slide_merge_pair(pages: list[str]) -> tuple[int, int] | None:
+    if len(pages) <= 3:
+        return None
+    last_content = len(pages) - 1
+    if extract_page_type(pages[-1]) == "ending":
+        last_content -= 1
+    for idx in range(last_content, 1, -1):
+        if (
+            extract_page_type(pages[idx]) == "content"
+            and extract_page_type(pages[idx - 1]) == "content"
+        ):
+            return (idx - 1, idx)
+    for idx in range(2, max(last_content, 2)):
+        if (
+            extract_page_type(pages[idx]) == "content"
+            and extract_page_type(pages[idx + 1]) == "content"
+        ):
+            return (idx, idx + 1)
+    return None
+
+
+def _merge_extra_slide(target: str, source: str) -> str:
+    source_visible = strip_page_type_metadata(source).strip()
+    source_visible = re.sub(r"(?m)^#{1,3}\s+", "### ", source_visible)
+    if not source_visible:
+        return target
+    return (
+        target.rstrip()
+        + "\n\n### Additional Material From Merged Slide\n\n"
+        + source_visible
+    ).strip()
 
 
 async def _run_single_pass_analysis(
@@ -290,9 +297,9 @@ async def _run_single_pass_analysis(
     language: str = "en",
     detail_level: str = "normal",
     enrichment_block: str = "",
-    paper_brief: str = "",
     is_deepseek: bool = False,
     paper_markdown: str | None = None,
+    repair_source_markdown: str | None = None,
     debug_dir: Path | None = None,
 ) -> str:
     """Generate a slide manuscript for the non-deep mode."""
@@ -302,14 +309,6 @@ async def _run_single_pass_analysis(
         f"\n## Target Language\n\n{language}\n\n{_language_guidance(language)}",
         f"\n## Target Slides\n\n{_target_slides_guidance(num_pages, detail_level)}",
     ]
-    if paper_brief:
-        user_parts.append(
-            "\n## Source-Grounded Evidence Brief\n\n"
-            "Use this as a claim ledger, not as prose to copy. Preserve SOURCE / DERIVED / "
-            "INTERPRETATION boundaries. The supplied paper working memory remains the final "
-            "authority if there is any conflict.\n\n"
-            f"{paper_brief}"
-        )
     figure_inventory = _figure_token_inventory_block(paper)
     if figure_inventory:
         user_parts.append(f"\n{figure_inventory}")
@@ -336,6 +335,17 @@ async def _run_single_pass_analysis(
         "evidence matters. Choose the number of content blocks from the current page's argument "
         "and visual needs. Do not invent evidence and do not force numeric evidence "
         "onto qualitative, theoretical, historical, or interpretive work."
+    )
+    user_parts.append(
+        "\n\n## Exact Evidence Coverage Contract\n\n"
+        "When the paper provides concrete headline evidence, preserve representative exact "
+        "values in the manuscript instead of replacing them with generic phrases such as "
+        "'strong performance', 'competitive results', or 'significant improvement'. Cover "
+        "the main evidence streams that support the deck's story: problem-defining data "
+        "distributions, method/efficiency costs, benchmark headline numbers, ablation "
+        "deltas, and important limitations. For table-heavy papers, choose a compact set "
+        "of exact values across the major benchmark or experiment groups rather than "
+        "copying the whole table or omitting the numbers."
     )
     user_parts.append(
         "\n\n## Visible Source Anchor Contract\n\n"
@@ -397,7 +407,7 @@ async def _run_single_pass_analysis(
     logger.warning("Single-pass manuscript structure invalid after retry; repairing: %s", last_error)
     return await _repair_manuscript_structure_if_needed(
         response_content,
-        paper_context,
+        repair_source_markdown or paper_context,
         llm,
         model,
         language=language,
@@ -718,37 +728,87 @@ async def analyze_paper(
         logger.info("Research: Pass 1 enrichment block (%d chars)", len(enrichment_block))
 
     if not enable_deep_research:
-        logger.info("Research lightweight mode: paper brief...")
-        if on_progress:
-            on_progress("Preparing paper brief", 0.20)
-        paper_brief = await _run_lightweight_paper_brief(
-            paper,
-            llm,
-            model,
-            instruction=instruction,
-            language=language,
-            detail_level=detail_level,
-            enrichment_block=enrichment_block,
-            is_deepseek=is_deepseek,
-            paper_markdown=compact_paper_md,
-            debug_dir=debug_dir,
+        context_meta: dict[str, object] = {
+            "mode": "full_first",
+            "manuscript_selected": "full",
+            "manuscript_reason": "default_full_parsed_paper",
+            "full_chars": len(paper_md),
+            "compact_chars": len(compact_paper_md),
+            "compact_available": bool(compact_paper_md.strip()),
+            "compact_truncated": "[Compact paper memory truncated here.]" in compact_paper_md,
+        }
+        repair_source = _figure_token_inventory_block(paper)
+        logger.info(
+            "Research normal mode context: manuscript=full (full=%d chars, compact=%d chars)",
+            len(paper_md),
+            len(compact_paper_md),
         )
-        logger.info("Research lightweight brief complete (%d chars)", len(paper_brief))
+        _debug_write_text(
+            debug_dir,
+            "lightweight_context_selection.json",
+            json.dumps(context_meta, ensure_ascii=False, indent=2),
+        )
         if on_progress:
-            on_progress("Generating manuscript from brief", 0.24)
-        manuscript = await _run_single_pass_analysis(
-            paper,
-            llm,
-            model,
-            instruction=instruction,
-            num_pages=num_pages,
-            language=language,
-            detail_level=detail_level,
-            enrichment_block=enrichment_block,
-            paper_brief=paper_brief,
-            is_deepseek=is_deepseek,
-            paper_markdown=compact_paper_md,
-            debug_dir=debug_dir,
+            on_progress("Generating manuscript from full paper", 0.22)
+        try:
+            manuscript = await _run_single_pass_analysis(
+                paper,
+                llm,
+                model,
+                instruction=instruction,
+                num_pages=num_pages,
+                language=language,
+                detail_level=detail_level,
+                enrichment_block=enrichment_block,
+                is_deepseek=is_deepseek,
+                paper_markdown=paper_md,
+                repair_source_markdown=repair_source,
+                debug_dir=debug_dir,
+            )
+        except Exception as exc:
+            if (
+                not _is_context_window_error(exc)
+                or not compact_paper_md.strip()
+                or compact_paper_md == paper_md
+            ):
+                raise
+            logger.warning(
+                "Full-paper normal research context rejected; retrying with compact fallback: %s",
+                exc,
+            )
+            context_meta.update(
+                {
+                    "manuscript_selected": "compact",
+                    "manuscript_reason": "provider_rejected_full_context",
+                    "fallback_error": str(exc),
+                }
+            )
+            _debug_write_text(
+                debug_dir,
+                "lightweight_context_selection.json",
+                json.dumps(context_meta, ensure_ascii=False, indent=2),
+            )
+            if on_progress:
+                on_progress("Full paper exceeded provider context; retrying compact fallback", 0.22)
+            manuscript = await _run_single_pass_analysis(
+                paper,
+                llm,
+                model,
+                instruction=instruction,
+                num_pages=num_pages,
+                language=language,
+                detail_level=detail_level,
+                enrichment_block=enrichment_block,
+                is_deepseek=is_deepseek,
+                paper_markdown=compact_paper_md,
+                repair_source_markdown=repair_source,
+                debug_dir=debug_dir,
+            )
+        context_meta["manuscript_chars"] = len(paper_md if context_meta["manuscript_selected"] == "full" else compact_paper_md)
+        _debug_write_text(
+            debug_dir,
+            "lightweight_context_selection.json",
+            json.dumps(context_meta, ensure_ascii=False, indent=2),
         )
         manuscript = _sanitize_internal_evidence_markers(manuscript)
         _debug_write_text(debug_dir, "research_final_manuscript.md", manuscript)
@@ -776,12 +836,34 @@ async def analyze_paper(
         LLMMessage.user("\n".join(pass1_user_parts)),
     ]
     _debug_write_messages(debug_dir, "research_pass1_prompt.md", pass1_messages)
-    pass1_response = await llm.chat(
-        pass1_messages,
-        model,
-        temperature=0.4,
-        max_tokens=DEEPSEEK_MAX_TOKENS if is_deepseek else None,
-    )
+    try:
+        pass1_response = await llm.chat(
+            pass1_messages,
+            model,
+            temperature=0.4,
+            max_tokens=DEEPSEEK_MAX_TOKENS if is_deepseek else None,
+        )
+    except Exception as exc:
+        if (
+            not _is_context_window_error(exc)
+            or not compact_paper_md.strip()
+            or compact_paper_md == paper_md
+        ):
+            raise
+        logger.warning("Full-paper Pass 1 context rejected; retrying compact fallback: %s", exc)
+        fallback_parts = [part.replace(paper_md, compact_paper_md) for part in pass1_user_parts]
+        fallback_messages = [
+            LLMMessage.system(pass1_system),
+            LLMMessage.user("\n".join(fallback_parts)),
+        ]
+        _debug_write_messages(debug_dir, "research_pass1_prompt_compact_fallback.md", fallback_messages)
+        _debug_write_text(debug_dir, "research_pass1_context_fallback.txt", str(exc))
+        pass1_response = await llm.chat(
+            fallback_messages,
+            model,
+            temperature=0.4,
+            max_tokens=DEEPSEEK_MAX_TOKENS if is_deepseek else None,
+        )
     deep_analysis = pass1_response.content
     _debug_write_text(debug_dir, "research_pass1_response.md", deep_analysis)
     logger.info("Research Pass 1 complete (%d chars)", len(deep_analysis))
@@ -844,6 +926,12 @@ async def analyze_paper(
         "and must use the same final chapter titles. Keep chapter slides concise; detailed "
         "evidence belongs on content slides."
     )
+    pass3_user_parts.append(
+        "\n\nExact evidence coverage is mandatory: preserve representative source values "
+        "for the paper's main evidence streams, including problem-defining distributions, "
+        "method/efficiency costs, benchmark headline numbers, ablation deltas, and stated "
+        "limitations. Do not replace concrete table values with generic performance claims."
+    )
 
     pass3_base_messages = [
         LLMMessage.system(pass3_system),
@@ -894,7 +982,7 @@ async def analyze_paper(
         logger.warning("Pass 3 manuscript structure invalid after retry; repairing: %s", last_structure_error)
         manuscript = await _repair_manuscript_structure_if_needed(
             manuscript,
-            compact_paper_md,
+            figure_inventory,
             llm,
             model,
             language=language,
@@ -912,10 +1000,11 @@ async def analyze_paper(
     # ── Pass 4: Self-Evaluation & Revision ─────────────────────────────────
     logger.info("Research Pass 4: Self-evaluation...")
     pass4_system = PASS4_PROMPT.read_text(encoding="utf-8")
+    pass4_source_context = paper_md
 
     pass4_user_parts = [
         f"## Slide Manuscript to Evaluate\n\n{manuscript}",
-        f"\n## Source Working Memory (authoritative)\n\n{compact_paper_md}",
+        f"\n## Source Paper (authoritative)\n\n{pass4_source_context}",
         f"\n## Original Deep Analysis\n\n{deep_analysis[:5000]}",
         f"\n## Narrative Plan\n\n{narrative_plan[:2000]}",
         f"\n## Target Language\n\n{language}",
@@ -935,12 +1024,37 @@ async def analyze_paper(
         LLMMessage.user("\n".join(pass4_user_parts)),
     ]
     _debug_write_messages(debug_dir, "research_pass4_prompt.md", pass4_messages)
-    pass4_response = await llm.chat(
-        pass4_messages,
-        model,
-        temperature=0.3,
-        max_tokens=DEEPSEEK_MAX_TOKENS if is_deepseek else None,
-    )
+    try:
+        pass4_response = await llm.chat(
+            pass4_messages,
+            model,
+            temperature=0.3,
+            max_tokens=DEEPSEEK_MAX_TOKENS if is_deepseek else None,
+        )
+    except Exception as exc:
+        if (
+            not _is_context_window_error(exc)
+            or not compact_paper_md.strip()
+            or compact_paper_md == paper_md
+        ):
+            raise
+        logger.warning("Full-paper Pass 4 context rejected; retrying compact fallback: %s", exc)
+        fallback_parts = [
+            part.replace(pass4_source_context, compact_paper_md)
+            for part in pass4_user_parts
+        ]
+        pass4_messages = [
+            LLMMessage.system(pass4_system),
+            LLMMessage.user("\n".join(fallback_parts)),
+        ]
+        _debug_write_messages(debug_dir, "research_pass4_prompt_compact_fallback.md", pass4_messages)
+        _debug_write_text(debug_dir, "research_pass4_context_fallback.txt", str(exc))
+        pass4_response = await llm.chat(
+            pass4_messages,
+            model,
+            temperature=0.3,
+            max_tokens=DEEPSEEK_MAX_TOKENS if is_deepseek else None,
+        )
     _debug_write_text(debug_dir, "research_pass4_response.md", pass4_response.content)
     final_output = normalize_manuscript_slide_delimiters(
         _extract_manuscript_from_review(pass4_response.content, manuscript)
@@ -954,7 +1068,7 @@ async def analyze_paper(
         logger.warning("Final manuscript validation failed after retries; repairing: %s", final_error)
         final_output = await _repair_manuscript_structure_if_needed(
             final_output,
-            compact_paper_md,
+            figure_inventory,
             llm,
             model,
             language=language,

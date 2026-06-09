@@ -650,7 +650,7 @@ export function ResultPage() {
             runtime={agentRuntime}
             messages={agentMessages}
             canStop={canCancelDisplayedRun}
-            stopPending={cancelLoading || resultRunStatus === "cancelling" || resultRunStatus === "pausing"}
+            stopPending={cancelLoading || resultRunStatus === "cancelling"}
             allowSendWhenTerminal
             onStop={async () => {
               setCancelLoading(true);

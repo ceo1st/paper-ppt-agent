@@ -26,12 +26,15 @@ const HISTORY_STATUS_SYNC_LIMIT = 8;
 const LEGACY_GENERATION_STORAGE_KEY = "paper-ppt-agent-generation-v1";
 const GENERATION_STORAGE_KEY = "paper-ppt-agent-generation-v2";
 const PERSISTED_LOG_LIMIT = 500;
+const PERSISTED_RUN_LOG_LIMIT = 80;
 const LIVE_JOB_STORAGE_PREFIX = "paper-ppt-live-job:";
 const HISTORY_STATUS_SYNC_TIMEOUT_MS = 4000;
 const BACKEND_HEALTH_TIMEOUT_MS = 6000;
 const BACKEND_HEALTH_FAILURE_LIMIT = 2;
 const PREVIEW_REFRESH_DEBOUNCE_MS = 500;
+const HISTORY_SYNC_DEBOUNCE_MS = 750;
 const previewRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const historySyncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let backendHealthFailures = 0;
 
 /** Per-job seq deduper. Replays after reconnect can re-deliver events
@@ -65,6 +68,39 @@ function clearOrphanedLiveMarkers(activeJobIds: Set<string>) {
   } catch {
     // ignore storage errors (private mode, full quota, etc.)
   }
+}
+
+function clearHistorySyncTimer(jobId: string) {
+  const timer = historySyncTimers.get(jobId);
+  if (timer) {
+    clearTimeout(timer);
+    historySyncTimers.delete(jobId);
+  }
+}
+
+function scheduleHistorySync(jobId: string, sync: () => void, immediate = false) {
+  clearHistorySyncTimer(jobId);
+  if (immediate) {
+    sync();
+    return;
+  }
+  historySyncTimers.set(
+    jobId,
+    setTimeout(() => {
+      historySyncTimers.delete(jobId);
+      sync();
+    }, HISTORY_SYNC_DEBOUNCE_MS),
+  );
+}
+
+function isTerminalJobEvent(event: JobEvent): boolean {
+  return (
+    event.type === "complete" ||
+    event.type === "error" ||
+    event.status === "error" ||
+    (event.stage === "export" && event.status === "complete") ||
+    event.stage === "cancelled"
+  );
 }
 
 interface RunConfigSnapshot {
@@ -505,16 +541,24 @@ function clearLegacyGenerationStorage() {
   }
 }
 
-function serializeRunsForStorage(runs: Record<string, RunSnapshot>) {
+function serializeRunsForStorage(
+  runs: Record<string, RunSnapshot>,
+  history: GenerationHistoryItem[],
+  currentJobId?: string,
+  activeJobId?: string,
+) {
+  const keepIds = new Set(history.slice(0, HISTORY_STORAGE_LIMIT).map((entry) => entry.jobId));
+  if (currentJobId) keepIds.add(currentJobId);
+  if (activeJobId) keepIds.add(activeJobId);
   return Object.fromEntries(
-    Object.entries(runs).map(([jobId, run]) => [
+    Object.entries(runs).filter(([jobId]) => keepIds.has(jobId)).map(([jobId, run]) => [
       jobId,
       {
         jobId,
         uploadSession: run.uploadSession,
         job: run.job,
-        logs: run.logs.slice(-PERSISTED_LOG_LIMIT),
-        agentMessages: run.agentMessages.slice(-PERSISTED_LOG_LIMIT),
+        logs: run.logs.slice(-PERSISTED_RUN_LOG_LIMIT),
+        agentMessages: run.agentMessages.slice(-PERSISTED_RUN_LOG_LIMIT),
         // Critic details and SVG previews can be large. They are recoverable
         // from backend files/endpoints, so localStorage keeps only run metadata.
         criticEvents: [],
@@ -533,10 +577,10 @@ function normalizeStoredRun(jobId: string, run?: Partial<RunSnapshot>): RunSnaps
     job: run?.job,
     slides: [],
     logs: Array.isArray(run?.logs)
-      ? run.logs.filter((log): log is string => typeof log === "string").slice(-PERSISTED_LOG_LIMIT)
+      ? run.logs.filter((log): log is string => typeof log === "string").slice(-PERSISTED_RUN_LOG_LIMIT)
       : [],
     agentMessages: Array.isArray(run?.agentMessages)
-      ? run.agentMessages.filter(isGenerationAgentMessage).slice(-PERSISTED_LOG_LIMIT)
+      ? run.agentMessages.filter(isGenerationAgentMessage).slice(-PERSISTED_RUN_LOG_LIMIT)
       : [],
     criticEvents: [],
     selectedSlide: undefined,
@@ -839,12 +883,12 @@ export const useGeneration = create<GenerationState>()(
         if (status && FINAL_JOB_STATUSES.has(status)) {
           return;
         }
-        const isPaused = status === "paused";
+        const shouldCancelAgent = status === "paused" || status === "pausing";
 
         const nextJob: JobStatus = {
-          status: isPaused ? "cancelling" : "pausing",
+          status: shouldCancelAgent ? "cancelling" : "pausing",
           progress: currentRun.job?.progress ?? 0,
-          message: isPaused ? "Cancelling Agent..." : "Pausing Agent...",
+          message: shouldCancelAgent ? "Cancelling Agent..." : "Pausing Agent...",
           slides_completed: currentRun.job?.slides_completed ?? currentRun.slides.length,
           total_slides: currentRun.job?.total_slides ?? currentRun.slides.length,
           output_path: currentRun.job?.output_path,
@@ -874,7 +918,9 @@ export const useGeneration = create<GenerationState>()(
             const cancelledJob: JobStatus = {
               ...(latestRun.job ?? nextJob),
               status: "cancelled",
-              message: "Agent job stopped before a live session was available.",
+              message: shouldCancelAgent
+                ? "Agent task cancelled."
+                : "Agent job stopped before a live session was available.",
               error: undefined,
             };
             const cancelledRun: RunSnapshot = {
@@ -1079,11 +1125,11 @@ export const useGeneration = create<GenerationState>()(
                 event.stage === "agent" && currentRun.currentRunConfig?.provider?.startsWith("agent:");
               let logs =
                 !isSnapshot && !isAgentConsoleEvent && event.message && !currentRun.logs.includes(logLine)
-                  ? [...currentRun.logs, logLine]
+                  ? [...currentRun.logs, logLine].slice(-PERSISTED_LOG_LIMIT)
                   : currentRun.logs;
               for (const extra of isAgentConsoleEvent ? [] : buildExtraLogs(event)) {
                 if (!isSnapshot && !logs.includes(extra)) {
-                  logs = [...logs, extra];
+                  logs = [...logs, extra].slice(-PERSISTED_LOG_LIMIT);
                 }
               }
               let agentMessages = currentRun.agentMessages;
@@ -1119,9 +1165,15 @@ export const useGeneration = create<GenerationState>()(
                       ? "cancelled"
                       : "error"
                     : undefined;
+              const stickyLifecycleStatus =
+                currentRun.job?.status === "pausing" ||
+                currentRun.job?.status === "paused" ||
+                currentRun.job?.status === "cancelling"
+                  ? currentRun.job.status
+                  : undefined;
               const nextJob: JobStatus = {
                 status:
-                  terminalStatus ?? agentLifecycleStatus ?? displayStage,
+                  terminalStatus ?? agentLifecycleStatus ?? stickyLifecycleStatus ?? displayStage,
                 progress: event.progress,
                 message: event.message,
                 slides_completed: slidesCompleted,
@@ -1195,7 +1247,7 @@ export const useGeneration = create<GenerationState>()(
                 },
               };
             });
-            get().syncHistory(jobId);
+            scheduleHistorySync(jobId, () => get().syncHistory(jobId), isTerminalJobEvent(event));
 
             const hasInlineSlideSvg = event.type === "slide_ready" && typeof event.data.svg === "string";
             const shouldRefreshPreview =
@@ -1589,6 +1641,7 @@ export const useGeneration = create<GenerationState>()(
           clearTimeout(previewTimer);
           previewRefreshTimers.delete(jobId);
         }
+        clearHistorySyncTimer(jobId);
         set((state) => {
           const nextRuns = { ...state.runs };
           delete nextRuns[jobId];
@@ -1643,6 +1696,7 @@ export const useGeneration = create<GenerationState>()(
               clearTimeout(previewTimer);
               previewRefreshTimers.delete(jobId);
             }
+            clearHistorySyncTimer(jobId);
           }
           return {
             uploadSession: undefined,
@@ -1686,7 +1740,7 @@ export const useGeneration = create<GenerationState>()(
         backendStatus: "connecting",
         error: state.error,
         history: state.history,
-        runs: serializeRunsForStorage(state.runs),
+        runs: serializeRunsForStorage(state.runs, state.history, state.jobId, state.activeJobId),
         activeJobId: state.activeJobId,
         currentRunConfig: state.currentRunConfig,
       }),
