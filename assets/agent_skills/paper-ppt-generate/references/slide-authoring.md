@@ -20,6 +20,9 @@ Layout:
 - Design each slide's spatial layout before drawing. Choose a layout family from the Slide Plan, then place figures, text, cards, charts, and callouts in aligned rectangular regions with 24-40px gutters.
 - For ordinary content slides, aim for 65-85% meaningful occupancy of the content area. Whitespace is useful for hierarchy, but do not leave an empty quadrant, a short bullet list floating in a large blank field, or a bottom callout visually detached from the main grid.
 - Use 24-40px gutters between major regions and align edges across repeated layout families.
+- **Visual depth is required** — flat pages without elevation look unfinished. Use filter shadows on cards/panels, gradients for backgrounds/overlays, accent top-bars on cards, and subtle decorative elements. Every card should have a shadow, an accent element, and proper inner padding — not just a plain flat rect with a stroke border.
+- **Visual hierarchy**: use large bold numbers with small gray labels for KPI/metrics. Use color-coded status indicators. Use accent callout boxes with tinted backgrounds for key takeaways.
+- **Color rules**: 60-30-10 rule (primary 60%, secondary 30%, accent 10%). Maximum 4 colors per page. Use monochromatic opacity variations for chart series.
 - For figure slides, reserve the figure frame first and fit the image inside that frame preserving aspect ratio. Do not stretch the paper figure to fill a convenient box.
 - If content is sparse, fill space with a supported visual explanation: enlarge the paper figure, split bullets into labeled callouts, add a mechanism/process diagram grounded in the paper, or use a comparison strip. Do not invent data, axes, or decorative mini charts.
 - Before writing markup, check actual text geometry for each box. At minimum, require `text_right <= box_right - padding` and `last_baseline + font_size*0.25 <= box_bottom - padding`.

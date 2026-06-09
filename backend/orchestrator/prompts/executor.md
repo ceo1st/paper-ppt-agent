@@ -38,7 +38,7 @@ Every page MUST follow this three-region structure. Content area boundary is a *
 1. Generate pages **sequentially**, one at a time
 2. Follow the design_spec color scheme, typography, and layout exactly
 3. Use proper text sizing: titles large, body readable, captions small
-4. Include decorative elements sparingly (dividers, subtle backgrounds)
+4. **Visual depth is required** — flat pages without elevation or emphasis look unfinished. Use shadows, gradients, and layered elements to create depth. See `## Visual Design Techniques` below.
 5. Data visualizations: use SVG shapes directly (rect bars, circle pies, path lines)
 6. Images: reference with `<image href="path" x="" y="" width="" height=""/>`. The `href` MUST point to a real file path that exists (e.g. `../sources/images/fig_001_p1.png`). Do NOT invent filenames. If no real image is available, use native SVG shapes, charts, or diagrams instead. **When Paper Figure Guidance includes `actual dimensions: WxH (ratio R)`, calculate the final visible image rectangle from that ratio.** Do not center a small image inside a much larger empty frame — revise the image/text regions before drawing. Treat the assigned image box height as a hard cap that must include the visible image and any nearby caption.
 7. **Content area boundary**: All text and essential visual elements MUST remain within the content area (x=40, y=100, width=1200, height=520). Account for text width when positioning—longer text needs more left margin. When in doubt, leave breathing room rather than risk clipping.
@@ -75,6 +75,125 @@ Every page MUST follow this three-region structure. Content area boundary is a *
 
 Use these values as upper bounds. Shorter lines are acceptable when they keep text inside its local card or column.
 Do not over-wrap Chinese text by using a narrow box when horizontal room exists. If several consecutive lines are under half the local line capacity, reflow to a wider box or reduce unnecessary manual line breaks.
+
+## Visual Design Techniques
+
+**Flat pages without elevation or emphasis look unfinished.** Use these techniques to create visual depth and professional polish.
+
+### Shadows (for cards, panels, floating elements)
+
+Filter soft shadow — best for cards and elevated elements:
+```xml
+<defs>
+  <filter id="softShadow" x="-15%" y="-15%" width="140%" height="140%">
+    <feGaussianBlur in="SourceAlpha" stdDeviation="12"/>
+    <feOffset dx="0" dy="6" result="offsetBlur"/>
+    <feFlood flood-color="#000000" flood-opacity="0.15" result="shadowColor"/>
+    <feComposite in="shadowColor" in2="offsetBlur" operator="in" result="shadow"/>
+    <feMerge>
+      <feMergeNode in="shadow"/>
+      <feMergeNode in="SourceGraphic"/>
+    </feMerge>
+  </filter>
+</defs>
+<rect x="60" y="60" width="400" height="240" rx="12" fill="#FFFFFF" filter="url(#softShadow)"/>
+```
+Parameters: `stdDeviation: 10-16`, `flood-opacity: 0.12-0.20`, `dy: 4-8`, `dx: 0-2`.
+
+Colored shadow — for accent cards and brand-colored elements:
+```xml
+<filter id="colorShadow" x="-15%" y="-15%" width="140%" height="140%">
+  <feGaussianBlur in="SourceAlpha" stdDeviation="10"/>
+  <feOffset dx="0" dy="6" result="offsetBlur"/>
+  <feFlood flood-color="#1A73E8" flood-opacity="0.20" result="shadowColor"/>
+  <feComposite in="shadowColor" in2="offsetBlur" operator="in" result="shadow"/>
+  <feMerge>
+    <feMergeNode in="shadow"/>
+    <feMergeNode in="SourceGraphic"/>
+  </feMerge>
+</filter>
+```
+
+### Glow (for titles, key metrics, hero text)
+
+```xml
+<defs>
+  <filter id="titleGlow" x="-30%" y="-30%" width="160%" height="160%">
+    <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="blur"/>
+    <feFlood flood-color="#1A73E8" flood-opacity="0.45" result="glowColor"/>
+    <feComposite in="glowColor" in2="blur" operator="in" result="glow"/>
+    <feMerge>
+      <feMergeNode in="glow"/>
+      <feMergeNode in="SourceGraphic"/>
+    </feMerge>
+  </filter>
+</defs>
+```
+Parameters: `stdDeviation: 4-8`, `flood-opacity: 0.35-0.55`, use brand color (NOT black).
+
+### Gradients (for backgrounds, buttons, overlays)
+
+Linear gradient — for header bars, buttons, background panels:
+```xml
+<defs>
+  <linearGradient id="btnGrad" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%" stop-color="#1A73E8"/>
+    <stop offset="100%" stop-color="#0D47A1"/>
+  </linearGradient>
+</defs>
+```
+
+Bottom gradient bar — for cover slides and full-image pages:
+```xml
+<defs>
+  <linearGradient id="bottomBar" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#000000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000000" stop-opacity="0.72"/>
+  </linearGradient>
+</defs>
+```
+
+Radial gradient — for spotlight backgrounds, vignette effects:
+```xml
+<defs>
+  <radialGradient id="spotBg" cx="50%" cy="50%" r="70%">
+    <stop offset="0%" stop-color="#1A73E8" stop-opacity="0.15"/>
+    <stop offset="100%" stop-color="#1A73E8" stop-opacity="0"/>
+  </radialGradient>
+</defs>
+```
+
+### Card Design Pattern
+
+Every card/panel should follow this layered structure:
+```xml
+<!-- Shadow layer -->
+<rect x="60" y="120" width="380" height="200" rx="12" fill="#FFFFFF" filter="url(#softShadow)"/>
+<!-- Accent top bar -->
+<rect x="60" y="120" width="380" height="4" rx="2" fill="#1A73E8"/>
+<!-- Icon -->
+<circle cx="100" cy="165" r="18" fill="#1A73E8" fill-opacity="0.1"/>
+<!-- Title -->
+<text x="126" y="172" font-size="16" font-weight="bold" fill="#1D1D1F">Card Title</text>
+<!-- Body -->
+<text x="80" y="210" font-size="14" fill="#6E6E73">Description text...</text>
+```
+
+### Visual Hierarchy Techniques
+
+- **Large numbers + labels**: Use 36-48px bold numbers with 12-14px gray labels below for KPI/metrics
+- **Color-coded status**: Green (#2E7D32) for positive, Red (#C62828) for negative, Yellow (#F57C00) for warning
+- **Accent callout boxes**: Light tinted background (`fill-opacity="0.08"`) with a 4px colored left border
+- **Section dividers**: Use gradient lines or thin colored bars instead of plain `<line>`
+- **Background texture**: Subtle radial gradient or geometric pattern behind content area
+- **Rotated decorative elements**: Small colored rectangles rotated 45° as corner accents
+
+### Color Rules
+
+- **60-30-10 rule**: Primary color 60% (backgrounds), secondary 30% (panels/cards), accent 10% (highlights/buttons)
+- **Maximum 4 colors per page** (excluding black/white/gray)
+- **Text contrast**: Dark text on light backgrounds, light text on dark backgrounds. Minimum contrast ratio 4.5:1
+- **Monochromatic charts**: Use opacity variations of one color for chart series, not rainbow colors
 
 ## Image-Text Layout Formulas
 
