@@ -514,6 +514,64 @@ def _figures_from_page_references(
     return figures
 
 
+def _figures_from_design_spec_for_page(
+    design_spec: str,
+    page_num: int,
+    figure_inventory: list[dict] | None,
+) -> list[dict]:
+    """Extract figure assignments from design_spec Section VIII for a given page.
+
+    Parses the Image Resource List table and matches the Page column against
+    page_num.  Returns matching entries from figure_inventory.
+    """
+    if not figure_inventory or not design_spec:
+        return []
+
+    # Extract Section VIII content
+    section_match = re.search(
+        r"(?is)#+\s*VIII\b.*?(?=^#+\s*[IVXLCDM]+\.|\Z)",
+        design_spec,
+    )
+    if not section_match:
+        return []
+    section = section_match.group(0)
+
+    # Build a set of filenames assigned to this page from the table rows.
+    # Table format: | filename | dims | ratio | purpose | type | status | page | ... |
+    assigned_stems: set[str] = set()
+    for row_match in re.finditer(r"(?m)^\s*\|\s*(\S+)\s*\|.*?\|.*?\|.*?\|.*?\|.*?\|\s*([^|]+)\s*\|", section):
+        stem = row_match.group(1).strip()
+        page_cell = row_match.group(2).strip()
+        # The Page column may contain a single number, a comma-separated list,
+        # or a range like "13, 20" or "13|20".
+        page_tokens = re.split(r"[,，\s|]+", page_cell)
+        try:
+            page_nums = {int(t) for t in page_tokens if t.strip().isdigit()}
+        except ValueError:
+            continue
+        if page_num in page_nums:
+            assigned_stems.add(stem)
+
+    if not assigned_stems:
+        return []
+
+    # Match stems against figure_inventory
+    inventory_by_stem: dict[str, dict] = {}
+    for fig in figure_inventory:
+        fig_stem = Path(str(fig.get("path") or "")).stem
+        if fig_stem:
+            inventory_by_stem[fig_stem] = fig
+
+    figures: list[dict] = []
+    seen: set[str] = set()
+    for stem in assigned_stems:
+        fig = inventory_by_stem.get(stem)
+        if fig and stem not in seen:
+            seen.add(stem)
+            figures.append(fig)
+    return figures
+
+
 def _figure_label_inventory(
     figure_inventory: list[dict],
 ) -> dict[tuple[str, str], dict]:
@@ -2673,6 +2731,23 @@ async def generate_svg_pages(
                     "Paper figure references resolved from this slide manuscript:\n"
                     f"{reference_lines}"
                 )
+        # Fallback: if manuscript has no figure tokens or text references,
+        # check design_spec Section VIII for explicit page assignments.
+        if not used_figures and not is_structural_page and design_spec:
+            spec_figures = _figures_from_design_spec_for_page(
+                design_spec, page_num, figure_inventory,
+            )
+            if spec_figures:
+                figure_source = "design_spec"
+                used_figures = spec_figures
+                reference_lines = "\n".join(
+                    _paper_figure_reference_line(fig) for fig in spec_figures
+                )
+                rewritten_content = (
+                    f"{rewritten_content}\n\n"
+                    "Paper figure assignment from design_spec Image Resource List:\n"
+                    f"{reference_lines}"
+                )
         used_figures, optimized_figure_notes = _optimize_figure_choices(
             used_figures,
             figure_inventory,
@@ -3985,6 +4060,23 @@ def _prepare_parallel_page_inputs(
             rewritten_content = (
                 f"{rewritten_content}\n\n"
                 "Paper figure references resolved from this slide manuscript:\n"
+                f"{reference_lines}"
+            )
+    # Fallback: if manuscript has no figure tokens or text references,
+    # check design_spec Section VIII for explicit page assignments.
+    if not used_figures and not is_structural_page and design_spec:
+        spec_figures = _figures_from_design_spec_for_page(
+            design_spec, page_num, figure_inventory,
+        )
+        if spec_figures:
+            figure_source = "design_spec"
+            used_figures = spec_figures
+            reference_lines = "\n".join(
+                _paper_figure_reference_line(fig) for fig in spec_figures
+            )
+            rewritten_content = (
+                f"{rewritten_content}\n\n"
+                "Paper figure assignment from design_spec Image Resource List:\n"
                 f"{reference_lines}"
             )
 
