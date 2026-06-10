@@ -181,7 +181,23 @@ def _edited_pptist_deck(project_dir: Path | None) -> Path | None:
     if project_dir is None:
         return None
     deck = project_dir / "pptist" / "current.pptx"
-    return deck if deck.exists() else None
+    state_path = project_dir / "pptist" / "save_state.json"
+    if not deck.exists() or not state_path.exists():
+        return None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(state, dict) or state.get("download_ready") is not True:
+        return None
+    if state.get("current_pptx") != str(deck):
+        return None
+    try:
+        if state_path.stat().st_mtime_ns < deck.stat().st_mtime_ns:
+            return None
+    except OSError:
+        return None
+    return deck
 
 
 def _download_filename(project_dir: Path | None, path: Path) -> str:

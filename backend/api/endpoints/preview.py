@@ -17,7 +17,10 @@ from pydantic import BaseModel, Field
 
 from backend.api.schemas import PreviewResponse, PreviewSlide
 from backend.config import settings
-from backend.generator.project_manager import get_svg_files
+from backend.generator.project_manager import (
+    get_svg_files,
+    slide_index_from_svg_path as project_slide_index_from_svg_path,
+)
 from backend.generator.pptx_sanitize import sanitize_pptx_bytes, validate_pptx_xml
 from backend.generator.pptx_scene import (
     SceneError,
@@ -226,6 +229,7 @@ async def save_pptist_preview_deck(job_id: str, payload: PptistDeckSaveRequest) 
 async def export_pptist_preview_deck(job_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
     job = session_manager.get_job(job_id)
     project_dir = _preview_project_dir_for_id(job_id, job)
+    previous_output_path = job.output_path if job else None
     data = await file.read()
     if not data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Exported PPTX is empty.")
@@ -245,10 +249,32 @@ async def export_pptist_preview_deck(job_id: str, file: UploadFile = File(...)) 
     export_path = exports_dir / f"presentation_pptist_{timestamp}.pptx"
     await awrite_bytes(export_path, data)
     render_info = await _refresh_preview_svg_render(project_dir, current_pptx)
+    scene_cache_ready = True
     try:
         await aoffload(ensure_scene_cache, current_pptx, _project_scene_paths(project_dir), force=True, render=False)
     except Exception as exc:  # pragma: no cover - invalid uploads or parser gaps should not block saving.
+        scene_cache_ready = False
         render_info.setdefault("warnings", []).append(f"PPTist scene cache refresh skipped: {exc}")
+    download_ready = render_info.get("render_status") != "skipped" and scene_cache_ready
+    published_output_path = (
+        str(current_pptx)
+        if download_ready
+        else _stable_output_after_pptist_save(project_dir, previous_output_path, current_pptx)
+    )
+    await _write_pptist_save_state(
+        project_dir,
+        {
+            "version": 1,
+            "updated_at": _utc_now(),
+            "current_pptx": str(current_pptx),
+            "export_path": str(export_path),
+            "download_ready": download_ready,
+            "published_output_path": published_output_path,
+            "render_status": render_info.get("render_status") or "complete",
+            "scene_cache_ready": scene_cache_ready,
+            "warnings": render_info.get("warnings", []),
+        },
+    )
     deck = await _read_pptist_deck(project_dir)
     slide_count = len(deck.get("slides") or []) if deck else 0
     if job is not None:
@@ -256,16 +282,17 @@ async def export_pptist_preview_deck(job_id: str, file: UploadFile = File(...)) 
             job_id,
             status="complete",
             message="Presentation saved from PPTist",
-            output_path=str(current_pptx),
+            output_path=published_output_path,
             error=None,
         )
     return {
         "status": "complete",
-        "output_path": str(current_pptx),
+        "output_path": published_output_path,
         "export_path": str(export_path),
         "slide_count": render_info.get("slide_count") or slide_count,
         "updated_at": _utc_now(),
         "warnings": render_info.get("warnings", []),
+        "download_ready": download_ready,
     }
 
 
@@ -630,10 +657,13 @@ async def _build_preview_response_locked(
     if project_dir and project_dir.exists():
         final_files = get_svg_files(project_dir, "final")
         output_files = get_svg_files(project_dir, "output")
-        slide_files = final_files or output_files
+        use_output = bool(output_files) and (
+            not final_files or _latest_svg_mtime(output_files) > _latest_svg_mtime(final_files)
+        )
+        slide_files = output_files if use_output else final_files
         if last_slide_only and slide_files:
             slide_files = slide_files[-1:]
-        source = "final" if final_files else "output"
+        source = "output" if use_output else "final"
         scene_source = _scene_source_pptx(project_dir, output_path, _project_scene_paths(project_dir))
         scene_paths_for_project = _project_scene_paths(project_dir) if scene_source is not None else None
         scene_slide_indexes = await _available_scene_slide_indexes_async(scene_source, scene_paths_for_project) if scene_source is not None and scene_paths_for_project is not None else set()
@@ -741,6 +771,18 @@ async def _write_pptist_deck(project_dir: Path, deck: dict[str, Any]) -> None:
     )
 
 
+async def _write_pptist_save_state(project_dir: Path, state: dict[str, Any]) -> None:
+    await awrite_text(
+        _pptist_dir(project_dir) / "save_state.json",
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _latest_svg_mtime(svg_files: list[Path]) -> int:
+    return max((_safe_mtime_version(path) for path in svg_files), default=0)
+
+
 async def _refresh_preview_svg_render(project_dir: Path, pptx_path: Path) -> dict[str, Any]:
     warnings: list[str] = []
     tmp_dir = _pptist_dir(project_dir) / "render_svg_tmp"
@@ -817,13 +859,7 @@ def _model_dump(model: Any) -> dict[str, Any]:
 
 
 def _slide_index_from_svg_path(svg_path: Path, fallback_index: int) -> int:
-    match = re.match(r"^0*(\d+)(?:_|$)", svg_path.stem)
-    if not match:
-        return fallback_index
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return fallback_index
+    return project_slide_index_from_svg_path(svg_path, fallback_index) or fallback_index
 
 
 def _delete_svg_slide_assets(project_dir: Path, svg_path: Path) -> None:
@@ -946,6 +982,36 @@ def _find_latest_output(project_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _find_latest_stable_output(project_dir: Path) -> Path | None:
+    exports_dir = project_dir / "exports"
+    if not exports_dir.exists():
+        return None
+    candidates = sorted(
+        (
+            path for path in exports_dir.glob("*.pptx")
+            if not path.name.startswith("presentation_pptist_")
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _stable_output_after_pptist_save(
+    project_dir: Path,
+    previous_output_path: str | None,
+    current_pptx: Path,
+) -> str:
+    if previous_output_path:
+        previous = _resolve_workspace_file(previous_output_path)
+        if previous is not None and previous.exists() and previous != current_pptx:
+            return str(previous)
+    stable = _find_latest_stable_output(project_dir)
+    if stable is not None:
+        return str(stable)
+    return str(current_pptx)
+
+
 def _project_scene_paths(project_dir: Path):
     return scene_paths(project_dir / "pptx_scene")
 
@@ -1046,8 +1112,6 @@ def _viewable_project_dir_for_id(job_id: str, job) -> Path:
 def _viewable_project_dir(job) -> Path:
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
-    if job.status not in {"complete", "error", "cancelled"}:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Presentation preview is not ready yet.")
     if not job.project_dir:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job has no project workspace.")
     project_dir = _resolve_workspace_path(job.project_dir)
