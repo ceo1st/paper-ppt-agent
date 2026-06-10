@@ -178,7 +178,8 @@ watch(handleElementId, () => {
 
 const elementList = ref<PPTElement[]>([])
 const setLocalElementList = () => {
-  elementList.value = currentSlide.value ? JSON.parse(JSON.stringify(currentSlide.value.elements)) : []
+  const elements = currentSlide.value?.elements
+  elementList.value = Array.isArray(elements) ? JSON.parse(JSON.stringify(elements)) : []
 }
 watchEffect(setLocalElementList)
 

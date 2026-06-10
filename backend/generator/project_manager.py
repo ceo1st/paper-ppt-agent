@@ -6,6 +6,7 @@ SVG generation → post-processing → PPTX export pipeline.
 
 from __future__ import annotations
 
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -210,7 +211,7 @@ def prepare_for_finalize(project_dir: Path) -> None:
         shutil.rmtree(svg_final)
     svg_final.mkdir()
 
-    for svg_file in sorted(svg_output.glob("*.svg")):
+    for svg_file in get_svg_files(project_dir, "output"):
         shutil.copy2(svg_file, svg_final / svg_file.name)
 
     sync_svg_output_assets_to_final(project_dir)
@@ -257,11 +258,52 @@ def get_svg_files(project_dir: Path, source: str = "final") -> list[Path]:
     svg_dir = project_dir / f"svg_{source}"
     if not svg_dir.exists():
         return []
-    return sorted(
+    candidates = sorted(
         path
         for path in svg_dir.glob("*.svg")
         if not path.name.startswith(".__render_") and not path.name.startswith(".__preview_")
     )
+    indexed: dict[int, Path] = {}
+    unindexed: list[Path] = []
+    for path in candidates:
+        index = slide_index_from_svg_path(path)
+        if index is None or index < 1:
+            unindexed.append(path)
+            continue
+        current = indexed.get(index)
+        if current is None or _svg_candidate_rank(path) > _svg_candidate_rank(current):
+            indexed[index] = path
+    return [indexed[index] for index in sorted(indexed)] + unindexed
+
+
+def _svg_candidate_rank(path: Path) -> tuple[int, int, str]:
+    """Prefer the newest file when multiple names represent one slide."""
+    try:
+        modified = path.stat().st_mtime_ns
+    except OSError:
+        modified = 0
+    canonical = int(bool(re.fullmatch(r"slide[_-]\d+", path.stem, re.IGNORECASE)))
+    return modified, canonical, path.name
+
+
+_SLIDE_INDEX_PATTERNS = (
+    re.compile(r"^0*(\d+)(?:[_-]|$)", re.IGNORECASE),
+    re.compile(r"^slide[_-]0*(\d+)(?:[_-]|$)", re.IGNORECASE),
+)
+
+
+def slide_index_from_svg_path(svg_path: Path, fallback_index: int | None = None) -> int | None:
+    """Return the 1-based slide index encoded in common SVG filenames."""
+    stem = Path(svg_path).stem
+    for pattern in _SLIDE_INDEX_PATTERNS:
+        match = pattern.match(stem)
+        if not match:
+            continue
+        try:
+            return int(match.group(1))
+        except ValueError:
+            break
+    return fallback_index
 
 
 def get_notes(project_dir: Path, svg_files: list[Path]) -> dict[str, str]:

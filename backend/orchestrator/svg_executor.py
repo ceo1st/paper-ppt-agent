@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -21,6 +22,7 @@ from pathlib import Path
 from PIL import Image
 
 from backend.config import settings
+from backend.generator.project_manager import get_svg_files, slide_index_from_svg_path
 from backend.generator.svg_critic import CriticConfig, CriticReport, Violation, check_svg
 from backend.generator.visual_critic import VisualCriticConfig, visual_check
 from backend.llm import LLMMessage, LLMProvider, LLMResponse
@@ -2551,20 +2553,39 @@ def _load_existing_svg_history(
     pages: list[str],
 ) -> dict[int, tuple[str, str, str]]:
     history: dict[int, tuple[str, str, str]] = {}
-    for page_num, page in enumerate(pages, start=1):
-        matches = sorted(svg_output_dir.glob(f"{page_num:02d}_*.svg"))
-        if not matches:
+    project_dir = svg_output_dir.parent
+    for fallback_index, svg_path in enumerate(get_svg_files(project_dir, "output"), start=1):
+        page_num = slide_index_from_svg_path(svg_path, fallback_index)
+        if page_num is None or page_num < 1 or page_num > len(pages) or page_num in history:
             continue
         try:
-            svg_content = matches[0].read_text(encoding="utf-8")
+            svg_content = svg_path.read_text(encoding="utf-8")
         except OSError:
             continue
+        page = pages[page_num - 1]
         history[page_num] = (
             _classify_page_type(page),
             _make_page_name(page_num, page),
             svg_content,
         )
     return history
+
+
+def _write_generated_svg(svg_output_dir: Path, page_num: int, svg_content: str) -> Path:
+    """Atomically replace every filename variant representing one slide."""
+    target = svg_output_dir / f"slide_{page_num:03d}.svg"
+    temporary = svg_output_dir / f".__slide_{page_num:03d}_{uuid.uuid4().hex}.svg"
+    temporary.write_text(svg_content, encoding="utf-8")
+    try:
+        for existing in svg_output_dir.glob("*.svg"):
+            if existing == temporary:
+                continue
+            if slide_index_from_svg_path(existing) == page_num:
+                existing.unlink(missing_ok=True)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
 
 
 def _same_type_svg_history_message(
@@ -3154,8 +3175,7 @@ async def generate_svg_pages(
                     conversation.append(LLMMessage.assistant(response.content))
                     break
 
-            svg_path = svg_output_dir / f"{page_num:02d}_{page_name}.svg"
-            svg_path.write_text(best_svg, encoding="utf-8")
+            _write_generated_svg(svg_output_dir, page_num, best_svg)
             generated_history[page_num] = (
                 page_type,
                 page_name,
@@ -4580,8 +4600,7 @@ async def _generate_parallel_page(
             conversation.append(LLMMessage.assistant(response.content))
             break
 
-    svg_path = svg_output_dir / f"{page_num:02d}_{page_name}.svg"
-    svg_path.write_text(best_svg, encoding="utf-8")
+    _write_generated_svg(svg_output_dir, page_num, best_svg)
     return page_num, best_svg
 
 
