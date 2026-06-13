@@ -73,6 +73,26 @@ class _ClaudeResponseOutcome:
     interrupted: bool = False
 
 
+@dataclass(frozen=True)
+class _AgentExportGateConfig:
+    canvas_format: str
+    total_slides_hint: int
+    export_prefix: str
+    max_attempts: int
+
+
+@dataclass
+class _AgentExportGateResult:
+    ok: bool
+    stage: str
+    message: str
+    output_path: str | None = None
+    stats: dict[str, Any] | None = None
+    attempt: int = 0
+    max_attempts: int = 0
+    exhausted: bool = False
+
+
 _RUNTIME_DEFAULT = "claude_code"
 _AGENT_SKILL_NAME = "paper-ppt-generate"
 _RESEARCH_SKILL_NAME = "paper-ppt-research"
@@ -80,6 +100,8 @@ _DEEP_RESEARCH_SKILL_NAME = "paper-ppt-deep-research"
 _SVG_SCAN_SECONDS = 1.0
 _AGENT_IDLE_NOTICE_SECONDS = 60.0
 _AGENT_INTERRUPT_POLL_SECONDS = 0.1
+_AGENT_EXPORT_GATE_STATE = "agent_export_gate.json"
+_AGENT_EXPORT_GATE_MAX_ATTEMPTS = 3
 _AGENT_IDLE_MESSAGE = (
     "Agent has not produced new activity for a while. "
     "You can pause it or send guidance to continue."
@@ -222,12 +244,14 @@ class PersistentAgentSession:
         *,
         resume_session_id: str | None = None,
         job_id: str = "",
+        export_gate: _AgentExportGateConfig | None = None,
     ) -> None:
         self._project_dir = project_dir
         self._runtime = runtime
         self._agent_config = agent_config
         self._resume_session_id = resume_session_id
         self._job_id = job_id
+        self._export_gate = export_gate
 
         # Cross-thread prompt injection (main thread -> worker thread).
         self._prompt_queue: queue.Queue[str | None] = queue.Queue()
@@ -255,6 +279,8 @@ class PersistentAgentSession:
 
     async def start(self, initial_prompt: str) -> None:
         """Launch the worker thread and send the first prompt."""
+        if self._export_gate is not None:
+            await aoffload(_clear_agent_export_gate_state, self._project_dir)
         self._caller_loop = asyncio.get_running_loop()
         self._worker_thread = threading.Thread(
             target=self._worker,
@@ -301,6 +327,10 @@ class PersistentAgentSession:
     def can_accept_feedback(self) -> bool:
         thread_alive = self._worker_thread is None or self._worker_thread.is_alive()
         return self._active and self._accepting_feedback and thread_alive
+
+    @property
+    def export_gate_enabled(self) -> bool:
+        return self._export_gate is not None
 
     @session_id.setter
     def session_id(self, value: str | None) -> None:
@@ -777,15 +807,22 @@ class PersistentAgentSession:
                     )
                 )
                 first_turn = True
+                pending_gate_prompt: str | None = None
+                export_gate_attempts = 0
                 while self._active:
-                    try:
-                        prompt = self._prompt_queue.get(timeout=1.0)
-                    except queue.Empty:
-                        continue
-                    if prompt is None:
-                        break
-                    if self._cancel_event.is_set():
-                        break
+                    prompt_kind = "export_gate" if pending_gate_prompt is not None else "user"
+                    if pending_gate_prompt is not None:
+                        prompt = pending_gate_prompt
+                        pending_gate_prompt = None
+                    else:
+                        try:
+                            prompt = self._prompt_queue.get(timeout=1.0)
+                        except queue.Empty:
+                            continue
+                        if prompt is None:
+                            break
+                        if self._cancel_event.is_set():
+                            break
                     # Start a new turn.
                     self._emit(
                         AgentProgressEvent(
@@ -796,7 +833,10 @@ class PersistentAgentSession:
                             data={"runtime": "codex", "thread_id": thread.id},
                         )
                     )
-                    turn_prompt = prompt if first_turn else _live_feedback_prompt(prompt)
+                    if first_turn or prompt_kind == "export_gate":
+                        turn_prompt = prompt
+                    else:
+                        turn_prompt = _live_feedback_prompt(prompt)
                     first_turn = False
                     turn = await thread.turn(
                         [SkillInput(name=_AGENT_SKILL_NAME, path=skill_path), TextInput(turn_prompt)],
@@ -859,8 +899,60 @@ class PersistentAgentSession:
                     if turn_interrupted:
                         self._accepting_feedback = True
                         continue
-                    # A finished Codex turn completes generation. Feedback sent
-                    # after export resumes this saved thread in a new run.
+                    if self._export_gate is not None:
+                        export_gate_attempts += 1
+                        self._emit(
+                            AgentProgressEvent(
+                                "export",
+                                "started",
+                                "Checking Agent output by exporting PPTX...",
+                                0.90,
+                                data={"runtime": "codex", "thread_id": thread.id},
+                            )
+                        )
+                        result = await _run_agent_export_gate(
+                            self._project_dir,
+                            canvas_format=self._export_gate.canvas_format,
+                            total_slides_hint=self._export_gate.total_slides_hint,
+                            export_prefix=self._export_gate.export_prefix,
+                            attempt=export_gate_attempts,
+                            max_attempts=self._export_gate.max_attempts,
+                        )
+                        if result.ok:
+                            self._emit(
+                                AgentProgressEvent(
+                                    "export",
+                                    "progress",
+                                    _agent_export_gate_success_message(result),
+                                    0.96,
+                                    data={
+                                        "runtime": "codex",
+                                        "thread_id": thread.id,
+                                        "output_path": result.output_path,
+                                    },
+                                )
+                            )
+                            self._active = False
+                            break
+                        self._emit(
+                            AgentProgressEvent(
+                                "agent",
+                                "progress",
+                                result.message,
+                                0.72,
+                                data={
+                                    "runtime": "codex",
+                                    "thread_id": thread.id,
+                                    "export_gate": "failed",
+                                    "attempt": export_gate_attempts,
+                                },
+                            )
+                        )
+                        if export_gate_attempts >= self._export_gate.max_attempts:
+                            raise RuntimeError(_agent_export_gate_exhausted_message(result))
+                        pending_gate_prompt = _agent_export_gate_followup_instruction(result)
+                        continue
+                    # Without an export gate, a finished Codex turn completes generation.
                     self._active = False
                     break
         except BaseException as exc:
@@ -917,7 +1009,10 @@ class PersistentAgentSession:
                 agent_config.get("_research_env"),
                 agent_config,
             ),
-            hooks=_agent_research_gate_hooks(self._project_dir),
+            hooks=_agent_research_gate_hooks(
+                self._project_dir,
+                export_gate=self._export_gate,
+            ),
             **session_opts,
         )
 
@@ -1114,6 +1209,248 @@ def _write_agent_contract_warnings(project_dir: Path, violations: list[str]) -> 
         )
     except OSError:
         logger.warning("Failed to persist Agent contract warnings for %s", project_dir)
+
+
+def _agent_export_gate_config(
+    *,
+    canvas_format: str,
+    total_slides_hint: int,
+    export_prefix: str,
+    agent_config: dict[str, Any],
+) -> _AgentExportGateConfig:
+    try:
+        max_attempts = int(agent_config.get("export_gate_max_attempts") or _AGENT_EXPORT_GATE_MAX_ATTEMPTS)
+    except (TypeError, ValueError):
+        max_attempts = _AGENT_EXPORT_GATE_MAX_ATTEMPTS
+    return _AgentExportGateConfig(
+        canvas_format=canvas_format,
+        total_slides_hint=max(0, int(total_slides_hint or 0)),
+        export_prefix=export_prefix,
+        max_attempts=max(1, max_attempts),
+    )
+
+
+def _agent_export_gate_path(project_dir: Path) -> Path:
+    return project_dir / _AGENT_EXPORT_GATE_STATE
+
+
+def _clear_agent_export_gate_state(project_dir: Path) -> None:
+    try:
+        _agent_export_gate_path(project_dir).unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Failed to clear Agent export gate state for %s", project_dir)
+
+
+def _agent_export_gate_payload(result: _AgentExportGateResult) -> dict[str, Any]:
+    return {
+        "ok": result.ok,
+        "stage": result.stage,
+        "message": result.message,
+        "output_path": result.output_path,
+        "stats": result.stats or {},
+        "attempt": result.attempt,
+        "max_attempts": result.max_attempts,
+        "exhausted": result.exhausted,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+async def _write_agent_export_gate_state(
+    project_dir: Path,
+    result: _AgentExportGateResult,
+) -> None:
+    await awrite_text(
+        _agent_export_gate_path(project_dir),
+        json.dumps(_agent_export_gate_payload(result), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _read_agent_export_gate_state(project_dir: Path) -> dict[str, Any]:
+    path = _agent_export_gate_path(project_dir)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _agent_export_gate_failure_result(
+    *,
+    stage: str,
+    exc: Exception,
+    attempt: int,
+    max_attempts: int,
+) -> _AgentExportGateResult:
+    detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+    if not detail:
+        detail = str(exc) or exc.__class__.__name__
+    return _AgentExportGateResult(
+        ok=False,
+        stage=stage,
+        message=f"Agent export gate failed during {stage}: {detail}",
+        attempt=attempt,
+        max_attempts=max_attempts,
+        exhausted=attempt >= max_attempts,
+    )
+
+
+async def _run_agent_export_gate(
+    project_dir: Path,
+    *,
+    canvas_format: str,
+    total_slides_hint: int,
+    export_prefix: str,
+    attempt: int,
+    max_attempts: int,
+) -> _AgentExportGateResult:
+    try:
+        svg_files = await aoffload(lambda: get_svg_files(project_dir, source="output"))
+        await aoffload(_validate_agent_artifacts, project_dir, svg_files, total_slides_hint)
+    except Exception as exc:  # noqa: BLE001 - return deterministic failure to Agent
+        result = _agent_export_gate_failure_result(
+            stage="validation",
+            exc=exc,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+        await _write_agent_export_gate_state(project_dir, result)
+        return result
+
+    try:
+        async with heavy_stage_slot():
+            stats = await aoffload(finalize_project, project_dir)
+    except Exception as exc:  # noqa: BLE001 - return deterministic failure to Agent
+        result = _agent_export_gate_failure_result(
+            stage="finalize",
+            exc=exc,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+        await _write_agent_export_gate_state(project_dir, result)
+        return result
+
+    try:
+        final_svg_files = await aoffload(lambda: get_svg_files(project_dir, source="final"))
+        if not final_svg_files:
+            raise RuntimeError("No finalized SVG files were produced.")
+        notes = await aoffload(get_notes, project_dir, final_svg_files)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        pptx_path = project_dir / "exports" / f"{export_prefix}_{timestamp}.pptx"
+        await aoffload(pptx_path.parent.mkdir, parents=True, exist_ok=True)
+        async with heavy_stage_slot():
+            await aoffload(
+                create_pptx,
+                final_svg_files,
+                pptx_path,
+                canvas_format=canvas_format,
+                notes=notes,
+            )
+        if not pptx_path.exists() or pptx_path.stat().st_size <= 0:
+            raise RuntimeError(f"PPTX export did not create a non-empty file: {pptx_path}")
+    except Exception as exc:  # noqa: BLE001 - return deterministic failure to Agent
+        result = _agent_export_gate_failure_result(
+            stage="export",
+            exc=exc,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+        await _write_agent_export_gate_state(project_dir, result)
+        return result
+
+    result = _AgentExportGateResult(
+        ok=True,
+        stage="export",
+        message=f"Agent export gate passed: {pptx_path}",
+        output_path=str(pptx_path),
+        stats=stats if isinstance(stats, dict) else {},
+        attempt=attempt,
+        max_attempts=max_attempts,
+        exhausted=False,
+    )
+    await _write_agent_export_gate_state(project_dir, result)
+    return result
+
+
+def _agent_export_gate_success_message(result: _AgentExportGateResult) -> str:
+    return f"Agent export gate passed; PPTX exported successfully: {result.output_path}"
+
+
+def _agent_export_gate_exhausted_message(result: _AgentExportGateResult) -> str:
+    attempts = f"{result.attempt}/{result.max_attempts}" if result.max_attempts else str(result.attempt)
+    return f"Agent export gate failed after {attempts} attempt(s). {result.message}"
+
+
+def _agent_export_gate_followup_instruction(result: _AgentExportGateResult) -> str:
+    attempts = f"{result.attempt}/{result.max_attempts}" if result.max_attempts else str(result.attempt)
+    return f"""The backend ran the real PPTX export gate before allowing Agent mode to finish, and it failed.
+
+Attempt: {attempts}
+Stage: {result.stage}
+Failure:
+{result.message}
+
+Do not stop yet. Fix the source artifacts in this workspace, especially files under
+`svg_output/` and `agent_report.json` if needed. Validate raw SVG XML, not only
+browser preview. Then finish again so the export gate can re-run. Common XML text
+fixes include escaping literal `<` as `&lt;` and bare `&` as `&amp;`.
+"""
+
+
+def _agent_export_gate_completion_events(
+    project_dir: Path,
+    *,
+    total_slides_hint: int,
+    generation_message: str,
+    postprocess_message: str,
+    export_message: str,
+) -> list[AgentProgressEvent] | None:
+    state = _read_agent_export_gate_state(project_dir)
+    if not state.get("ok"):
+        return None
+    output_path = str(state.get("output_path") or "")
+    if not output_path or not Path(output_path).exists():
+        raise RuntimeError(
+            f"Agent export gate reported success, but PPTX is missing: {output_path or '<empty>'}"
+        )
+    svg_files = get_svg_files(project_dir, source="output")
+    count = len(svg_files)
+    if total_slides_hint and count < total_slides_hint:
+        raise RuntimeError(
+            f"Agent export gate reported success with {count} slides, expected at least {total_slides_hint}."
+        )
+    stats = state.get("stats") if isinstance(state.get("stats"), dict) else {}
+    processed = int(stats.get("total_files") or count)
+    return [
+        AgentProgressEvent(
+            "generation",
+            "complete",
+            generation_message.format(count=count),
+            0.75,
+            data={"total_slides": count, "generation_mode": "agent"},
+        ),
+        AgentProgressEvent(
+            "postprocess",
+            "complete",
+            postprocess_message.format(count=processed),
+            0.88,
+        ),
+        AgentProgressEvent(
+            "export",
+            "complete",
+            export_message,
+            1.0,
+            data={"output_path": output_path},
+        ),
+    ]
+
+
+def _agent_export_gate_missing_message(project_dir: Path) -> str:
+    state = _read_agent_export_gate_state(project_dir)
+    message = str(state.get("message") or "").strip()
+    if message:
+        return message
+    return "Agent export gate did not produce a successful PPTX export result."
 
 
 def _agent_generation_contract_violations(
@@ -1351,6 +1688,12 @@ async def run_agent_pipeline(request: Any):
         agent_config,
         resume_session_id=resume_session_id,
         job_id=job_id,
+        export_gate=_agent_export_gate_config(
+            canvas_format=str(request.canvas_format),
+            total_slides_hint=total_slides_hint,
+            export_prefix="presentation_agent",
+            agent_config=agent_config,
+        ),
     )
     if job_id:
         from backend.orchestrator.agent_session_registry import register as registry_register
@@ -1442,15 +1785,6 @@ async def run_agent_pipeline(request: Any):
     try:
         await drainer_task
 
-        # Session is now in direct mode — feedback turns broadcast via
-        # session_manager.record_event directly.  Proceed to finalization.
-        async for repair_event in _repair_agent_generation_contracts_if_needed(
-            project_dir,
-            runtime,
-            agent_config,
-        ):
-            yield repair_event
-
         await _scan_svg_updates(
             project_dir,
             queue,
@@ -1460,6 +1794,29 @@ async def run_agent_pipeline(request: Any):
         )
         while not queue.empty():
             yield queue.get_nowait()
+
+        if session.export_gate_enabled:
+            gate_events = _agent_export_gate_completion_events(
+                project_dir,
+                total_slides_hint=total_slides_hint,
+                generation_message="Agent generated {count} slides.",
+                postprocess_message="Processed {count} files",
+                export_message="PowerPoint generated!",
+            )
+            if gate_events is None:
+                raise RuntimeError(_agent_export_gate_missing_message(project_dir))
+            for event in gate_events:
+                yield event
+            return
+
+        # Session is now in direct mode — feedback turns broadcast via
+        # session_manager.record_event directly.  Proceed to finalization.
+        async for repair_event in _repair_agent_generation_contracts_if_needed(
+            project_dir,
+            runtime,
+            agent_config,
+        ):
+            yield repair_event
 
         svg_files = get_svg_files(project_dir, source="output")
         _validate_agent_artifacts(project_dir, svg_files, total_slides_hint)
@@ -1562,6 +1919,13 @@ async def run_agent_feedback_pipeline(
         runtime,
         agent_config,
         resume_session_id=effective_session_id,
+        job_id=job_id,
+        export_gate=_agent_export_gate_config(
+            canvas_format=_canvas_format_from_task(project_dir),
+            total_slides_hint=total_hint,
+            export_prefix="presentation_agent_feedback",
+            agent_config=agent_config,
+        ),
     )
     if job_id:
         from backend.orchestrator.agent_session_registry import register as registry_register
@@ -1650,6 +2014,20 @@ async def run_agent_feedback_pipeline(
     )
     while not queue.empty():
         yield queue.get_nowait()
+
+    if session.export_gate_enabled:
+        gate_events = _agent_export_gate_completion_events(
+            project_dir,
+            total_slides_hint=total_hint,
+            generation_message="Agent updated {count} slides.",
+            postprocess_message="Processed {count} files",
+            export_message="Updated PowerPoint generated!",
+        )
+        if gate_events is None:
+            raise RuntimeError(_agent_export_gate_missing_message(project_dir))
+        for event in gate_events:
+            yield event
+        return
 
     async for repair_event in _repair_agent_generation_contracts_if_needed(
         project_dir,
@@ -2699,7 +3077,10 @@ def _validate_agent_artifacts(project_dir: Path, svg_files: list[Path], total_sl
             f"Agent produced {len(svg_files)} slides, expected at least {total_slides_hint}."
         )
     for svg_path in svg_files:
-        _validate_single_svg(svg_path, svg_path.read_text(encoding="utf-8"))
+        try:
+            _validate_single_svg(svg_path, svg_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"{svg_path.name}: SVG validation failed: {exc}") from exc
     report_path = _require_agent_report(project_dir)
     authorship_violations = _agent_slide_authorship_violations(
         project_dir,
@@ -3155,8 +3536,14 @@ def _agent_batch_authoring_block_reason(
     return None
 
 
-def _agent_research_gate_hooks(project_dir: Path) -> dict[str, list[Any]]:
+def _agent_research_gate_hooks(
+    project_dir: Path,
+    *,
+    export_gate: _AgentExportGateConfig | None = None,
+) -> dict[str, list[Any]]:
     from claude_agent_sdk import HookMatcher
+
+    export_gate_attempts = 0
 
     async def _enforce_agent_authoring_contracts(
         input_data: dict[str, Any],
@@ -3181,7 +3568,7 @@ def _agent_research_gate_hooks(project_dir: Path) -> dict[str, list[Any]]:
             }
         }
 
-    return {
+    hooks: dict[str, list[Any]] = {
         "PreToolUse": [
             HookMatcher(
                 matcher="Write|Edit|MultiEdit|NotebookEdit|Bash",
@@ -3189,6 +3576,42 @@ def _agent_research_gate_hooks(project_dir: Path) -> dict[str, list[Any]]:
             )
         ]
     }
+
+    if export_gate is not None:
+
+        async def _enforce_agent_export_gate(
+            _input_data: dict[str, Any],
+            _tool_use_id: str | None,
+            _context: Any,
+        ) -> dict[str, Any]:
+            nonlocal export_gate_attempts
+            export_gate_attempts += 1
+            result = await _run_agent_export_gate(
+                project_dir,
+                canvas_format=export_gate.canvas_format,
+                total_slides_hint=export_gate.total_slides_hint,
+                export_prefix=export_gate.export_prefix,
+                attempt=export_gate_attempts,
+                max_attempts=export_gate.max_attempts,
+            )
+            if result.ok:
+                return {
+                    "systemMessage": _agent_export_gate_success_message(result),
+                }
+            if export_gate_attempts >= export_gate.max_attempts:
+                return {
+                    "continue": False,
+                    "stopReason": _agent_export_gate_exhausted_message(result),
+                    "systemMessage": _agent_export_gate_exhausted_message(result),
+                }
+            return {
+                "decision": "block",
+                "reason": _agent_export_gate_followup_instruction(result),
+            }
+
+        hooks["Stop"] = [HookMatcher(hooks=[_enforce_agent_export_gate])]
+
+    return hooks
 
 
 def _validate_agent_report(project_dir: Path, report_path: Path) -> None:

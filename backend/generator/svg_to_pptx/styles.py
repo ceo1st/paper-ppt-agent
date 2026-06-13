@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from .utils import (
+    ANGLE_UNIT,
     parse_hex_color,
     get_style_attr,
     parse_svg_length,
@@ -17,6 +18,10 @@ from .utils import (
     px_to_emu,
     resolve_url_id,
 )
+
+
+class SvgEffectRequiresRasterFallback(ValueError):
+    """Raised when an SVG effect should be preserved by raster fallback."""
 
 
 def build_fill_xml(elem: Any, ctx: Any, opacity: float = 1.0) -> str:
@@ -141,6 +146,49 @@ def build_stroke_xml(elem: Any, ctx: Any, opacity: float = 1.0) -> str:
     return f'<a:ln w="{width_emu}"{cap_attr}>{fill}{dash}{join_xml}</a:ln>'
 
 
+def build_effect_xml(elem: Any, ctx: Any) -> str:
+    """Build DrawingML effects from a supported SVG ``filter`` reference.
+
+    The native converter intentionally supports only the common presentation
+    shadow subset. More complex filter graphs should fall back to raster export
+    instead of silently dropping the visual effect.
+    """
+    filter_ref = ctx.get_attr(elem, "filter", "")
+    if not filter_ref or filter_ref == "none":
+        return ""
+
+    filter_id = resolve_url_id(filter_ref)
+    if not filter_id:
+        raise SvgEffectRequiresRasterFallback(f"SVG filter reference {filter_ref!r} requires raster fallback")
+
+    filter_elem = ctx.defs.get(filter_id)
+    if filter_elem is None:
+        raise SvgEffectRequiresRasterFallback(f"SVG filter #{filter_id} is not defined; raster fallback required")
+
+    shadow = _extract_shadow_filter(filter_elem)
+    if shadow is None:
+        raise SvgEffectRequiresRasterFallback(f"SVG filter #{filter_id} requires raster fallback")
+
+    dx = shadow["dx"] * _effect_scale_x(ctx)
+    dy = shadow["dy"] * _effect_scale_y(ctx)
+    std_dev = shadow["std_dev"] * _effect_scale_avg(ctx)
+    dist = px_to_emu(math.hypot(dx, dy))
+    blur = px_to_emu(std_dev * 2.0)
+    direction = round((math.degrees(math.atan2(dy, dx)) % 360.0) * ANGLE_UNIT) if dist else 0
+    alpha = round(shadow["opacity"] * 100000)
+
+    if dist <= 0 and blur <= 0:
+        return ""
+
+    return (
+        f'<a:effectLst>'
+        f'<a:outerShdw blurRad="{blur}" dist="{dist}" dir="{direction}" algn="tl" rotWithShape="0">'
+        f'<a:srgbClr val="{shadow["color"]}"><a:alpha val="{alpha}"/></a:srgbClr>'
+        f'</a:outerShdw>'
+        f'</a:effectLst>'
+    )
+
+
 def _build_dash_xml(dash_array: str) -> str:
     """Build dash pattern XML."""
     presets = {
@@ -167,3 +215,76 @@ def _build_dash_xml(dash_array: str) -> str:
 
 def _parse_opacity(val: str) -> float:
     return max(0.0, min(1.0, parse_svg_ratio(val, 1.0)))
+
+
+def _extract_shadow_filter(filter_elem: Any) -> dict[str, float | str] | None:
+    """Extract a simple drop-shadow-like SVG filter definition."""
+    dx = 0.0
+    dy = 0.0
+    std_dev = 0.0
+    color = "000000"
+    opacity = 1.0
+    saw_blur = False
+    saw_offset = False
+
+    for child in filter_elem:
+        tag = _local_name(child)
+        if tag == "feDropShadow":
+            std_dev = _parse_std_deviation(child.get("stdDeviation", "0"))
+            dx = parse_svg_length(child.get("dx", 0), 0.0)
+            dy = parse_svg_length(child.get("dy", 0), 0.0)
+            color = parse_hex_color(get_style_attr(child, "flood-color", "#000000")) or "000000"
+            opacity = _parse_opacity(get_style_attr(child, "flood-opacity", "1"))
+            return {
+                "dx": dx,
+                "dy": dy,
+                "std_dev": std_dev,
+                "color": color,
+                "opacity": opacity,
+            }
+        if tag == "feGaussianBlur":
+            std_dev = _parse_std_deviation(child.get("stdDeviation", "0"))
+            saw_blur = True
+        elif tag == "feOffset":
+            dx = parse_svg_length(child.get("dx", 0), 0.0)
+            dy = parse_svg_length(child.get("dy", 0), 0.0)
+            saw_offset = True
+        elif tag == "feFlood":
+            color = parse_hex_color(get_style_attr(child, "flood-color", "#000000")) or "000000"
+            opacity = _parse_opacity(get_style_attr(child, "flood-opacity", "1"))
+
+    if not saw_blur or not saw_offset:
+        return None
+
+    return {
+        "dx": dx,
+        "dy": dy,
+        "std_dev": std_dev,
+        "color": color,
+        "opacity": opacity,
+    }
+
+
+def _parse_std_deviation(value: object) -> float:
+    text = str(value or "0").replace(",", " ").strip()
+    parts = [parse_svg_length(part, 0.0) for part in text.split() if part.strip()]
+    if not parts:
+        return 0.0
+    return sum(parts[:2]) / min(len(parts), 2)
+
+
+def _local_name(elem: Any) -> str:
+    tag = getattr(elem, "tag", "")
+    return tag.split("}")[-1] if "}" in tag else tag
+
+
+def _effect_scale_x(ctx: Any) -> float:
+    return abs(getattr(ctx, "scale_x", 1.0)) or 1.0
+
+
+def _effect_scale_y(ctx: Any) -> float:
+    return abs(getattr(ctx, "scale_y", 1.0)) or 1.0
+
+
+def _effect_scale_avg(ctx: Any) -> float:
+    return (_effect_scale_x(ctx) + _effect_scale_y(ctx)) / 2.0

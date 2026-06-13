@@ -401,7 +401,7 @@ Best for: slides needing strong visual brand identity.
 | Text over image | Linear gradient overlay (direction matches text side) | Uniform flat opacity over whole image |
 | Cover / full-image slide | Bottom gradient bar + brand color | Solid black overlay |
 | Atmosphere / hero slide | Radial vignette | Unprocessed raw image |
-| Max PPT compatibility needed | Layered rect shadow | Filter-based shadow |
+| Max PPT compatibility needed | Filter shadow with native/fallback export verification | Unverified visual-only effects |
 
 ---
 

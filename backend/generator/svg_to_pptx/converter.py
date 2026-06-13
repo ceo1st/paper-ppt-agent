@@ -22,6 +22,7 @@ from .elements import (
     convert_rect,
     convert_text,
 )
+from .styles import SvgEffectRequiresRasterFallback
 from .utils import parse_style_attribute, parse_transform, parse_transform_matrix
 
 # SVG elements that should be skipped
@@ -116,9 +117,11 @@ def _convert_element(elem: Any, ctx: ConvertContext) -> str:
 def _convert_g(elem: Any, ctx: ConvertContext) -> str:
     """Convert <g> group element with transform propagation."""
     transform_str = elem.get("transform", "")
+    style_overrides = parse_style_attribute(elem.get("style"))
+    if elem.get("filter") or style_overrides.get("filter"):
+        raise SvgEffectRequiresRasterFallback("Group-level SVG filters require raster fallback")
 
     # Extract inheritable styles
-    style_overrides = parse_style_attribute(elem.get("style"))
     for attr in [
         "fill",
         "stroke",
