@@ -41,7 +41,7 @@ Text:
 
 - Use normal SVG `<text>` elements.
 - Avoid excessive nested `tspan` complexity.
-- Do not use `foreignObject`, `<style>`, CSS classes, masks, filters, clip paths, scripts, event handlers, or remote URLs.
+- Do not use `foreignObject`, `<style>`, CSS classes, masks, clip paths, scripts, event handlers, or remote URLs.
 - Wrap against each text box's actual width and font size.
 - For Chinese body copy, let ordinary non-final lines use most of the available width, break at semantic boundaries, and allow light raggedness. Do not force a fixed characters-per-line target.
 - If wrapping is clearly wasteful or clips, widen or reallocate the text region, tune gaps, or adjust typography. Do not create huge blank bands with unnecessarily narrow text boxes.

@@ -99,7 +99,7 @@ preview.
 ## Quality Bar
 
 - Every SVG must parse as XML and define a correct canvas `viewBox`.
-- Do not use `<style>`, `class=`, `mask`, `filter`, `clipPath`, `foreignObject`, scripts, event handlers, or remote URLs in final SVGs.
+- Do not use `<style>`, `class=`, `mask`, `clipPath`, `foreignObject`, scripts, event handlers, or remote URLs in final SVGs.
 - Keep all needed assets local or embedded by relative path.
 - Avoid external image URLs in final SVGs.
 - Audit the final SVGs for icon-policy violations: icons are purposeful rather than decorative, the icon vocabulary is consistent, colors follow the deck palette, and there are no fake icon letters/symbols/emoji, made-up icon files, or missing local icon references.

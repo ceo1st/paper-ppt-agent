@@ -29,7 +29,7 @@ _TEXT_CLOSE_RE = re.compile(r"</text\s*>", re.IGNORECASE)
 
 # Elements explicitly forbidden by executor.md — mirrored here so the
 # critic fails fast instead of relying on LLM self-discipline.
-_FORBIDDEN_TAGS = {"mask", "style", "clipPath", "filter", "foreignObject"}
+_FORBIDDEN_TAGS = {"mask", "style", "clipPath", "foreignObject"}
 # `use` is allowed for icon references; `image` allowed for raster.
 
 

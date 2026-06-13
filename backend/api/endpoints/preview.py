@@ -229,7 +229,6 @@ async def save_pptist_preview_deck(job_id: str, payload: PptistDeckSaveRequest) 
 async def export_pptist_preview_deck(job_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
     job = session_manager.get_job(job_id)
     project_dir = _preview_project_dir_for_id(job_id, job)
-    previous_output_path = job.output_path if job else None
     data = await file.read()
     if not data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Exported PPTX is empty.")
@@ -255,12 +254,11 @@ async def export_pptist_preview_deck(job_id: str, file: UploadFile = File(...)) 
     except Exception as exc:  # pragma: no cover - invalid uploads or parser gaps should not block saving.
         scene_cache_ready = False
         render_info.setdefault("warnings", []).append(f"PPTist scene cache refresh skipped: {exc}")
-    download_ready = render_info.get("render_status") != "skipped" and scene_cache_ready
-    published_output_path = (
-        str(current_pptx)
-        if download_ready
-        else _stable_output_after_pptist_save(project_dir, previous_output_path, current_pptx)
-    )
+    # Download readiness is based on the PPTX package validation above. SVG
+    # refresh / scene cache failures should affect preview fallbacks only, not
+    # whether the user's saved PPTist edits can be downloaded.
+    download_ready = True
+    published_output_path = str(current_pptx)
     await _write_pptist_save_state(
         project_dir,
         {
@@ -995,21 +993,6 @@ def _find_latest_stable_output(project_dir: Path) -> Path | None:
         reverse=True,
     )
     return candidates[0] if candidates else None
-
-
-def _stable_output_after_pptist_save(
-    project_dir: Path,
-    previous_output_path: str | None,
-    current_pptx: Path,
-) -> str:
-    if previous_output_path:
-        previous = _resolve_workspace_file(previous_output_path)
-        if previous is not None and previous.exists() and previous != current_pptx:
-            return str(previous)
-    stable = _find_latest_stable_output(project_dir)
-    if stable is not None:
-        return str(stable)
-    return str(current_pptx)
 
 
 def _project_scene_paths(project_dir: Path):

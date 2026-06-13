@@ -214,7 +214,7 @@ Apply glow filters to key text/elements:
 <text filter="url(#glowGreen)" fill="#39FF14">Glowing Text</text>
 ```
 
-> **Note**: `filter` effects are typically ignored in PPT, but render well in SVG-compatible viewers.
+> **Note**: `filter` effects should be verified in final PPT output; supported shadows can export natively, while complex glow effects may use raster fallback.
 
 ### Emoji Usage
 
@@ -250,7 +250,7 @@ Apply glow filters to key text/elements:
 - No `<g opacity="...">` (group opacity); set opacity on each child element individually
 - Use overlay layers instead of image opacity
 - Use inline styles only; external CSS and `@font-face` are prohibited
-- `filter` effects serve as enhancements (allowed) and do not affect baseline display
+- `filter` effects are allowed and should be verified in final PPT output
 
 ---
 
