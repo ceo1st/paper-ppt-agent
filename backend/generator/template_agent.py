@@ -1,9 +1,9 @@
-"""Claude Agent-backed collaborator for template import review drafts.
+"""Claude/Codex Agent-backed collaborator for template import review drafts.
 
 This module intentionally sits beside, not inside, the existing template
 import LLM review path. The classic ``/feedback`` flow remains a single LLM
 planner call; this runner is an optional long-running agent task that can read
-and edit the import workspace with Claude Code/Agent SDK semantics.
+and edit the import workspace with coding-agent SDK semantics.
 """
 
 from __future__ import annotations
@@ -29,13 +29,18 @@ from xml.etree import ElementTree as ET
 from backend.config import settings
 from backend.usage.tracker import usage_tracker
 
-AgentConfigMode = Literal["claude_code", "custom"]
+AgentConfigMode = Literal["claude_code", "custom", "codex"]
 AgentStatus = Literal["queued", "running", "complete", "error", "cancelled"]
 
 _EVENT_RING_SIZE = 512
 _TEXT_LIMIT = 2000
 _AGENT_MAX_BUFFER_SIZE = 16 * 1024 * 1024
-_AGENT_RECOVERY_ATTEMPTS = 2
+# Match the generation Agent's more tolerant reconnect posture: transient
+# SDK/CLI stream failures should get several resume attempts before the import
+# job is marked failed.
+_AGENT_RECOVERY_ATTEMPTS = 5
+_AGENT_RECOVERY_BASE_DELAY_SECONDS = 1.0
+_AGENT_RECOVERY_MAX_DELAY_SECONDS = 8.0
 _CLAUDE_ENV_KEYS = (
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -91,6 +96,23 @@ def claude_code_environment_status() -> dict[str, Any]:
         "sdk_error": sdk_error,
         "message": message,
         **runtime_config,
+    }
+
+
+async def template_agent_runtime_status(runtime: str) -> dict[str, Any]:
+    """Return whether the selected template Agent runtime is usable."""
+    runtime = (runtime or "claude_code").strip()
+    if runtime in {"claude_code", "custom"}:
+        return {"runtime": runtime, **claude_code_environment_status()}
+    if runtime == "codex":
+        from backend.orchestrator.agent_pipeline import agent_runtime_status
+
+        return await agent_runtime_status("codex")
+    return {
+        "runtime": runtime,
+        "available": False,
+        "sdk_available": False,
+        "message": f"Unsupported Agent runtime: {runtime}",
     }
 
 
@@ -224,6 +246,7 @@ class TemplateAgentConfig:
     auth_token: str | None = None
     base_url: str | None = None
     model: str | None = None
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
     custom_model_option: str | None = None
     load_project_settings: bool = True
     # ``None`` means no cap (recommended by Agent SDK overview docs); pass an
@@ -237,6 +260,7 @@ class TemplateAgentSessionState:
     """Persistent Agent SDK session metadata for one import."""
 
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    runtime: str = "claude_code"
     initialized: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
@@ -279,6 +303,7 @@ class TemplateAgentJob:
     # parallel tool calls (which share the same id) are counted once. See
     # https://code.claude.com/docs/zh-CN/agent-sdk/cost-tracking
     seen_message_ids: set[str] = field(default_factory=set)
+    seen_result_ids: set[str] = field(default_factory=set)
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -319,6 +344,9 @@ class TemplateAgentManager:
             silent=silent,
         )
         job.session_state = self._load_session_state(import_id)
+        runtime_key = _agent_runtime_key(config)
+        if job.session_state.runtime != runtime_key:
+            job.session_state = TemplateAgentSessionState(runtime=runtime_key)
         self._seed_job_from_session_state(job)
         job.planning = planning
         async with self._lock:
@@ -429,6 +457,9 @@ class TemplateAgentManager:
                 raw = None
             if isinstance(raw, dict):
                 state.session_id = str(raw.get("session_id") or state.session_id)
+                runtime = raw.get("runtime")
+                if runtime in {"claude_code", "codex"}:
+                    state.runtime = str(runtime)
                 state.initialized = bool(raw.get("initialized"))
                 state.input_tokens = int(raw.get("input_tokens") or 0)
                 state.output_tokens = int(raw.get("output_tokens") or 0)
@@ -453,6 +484,7 @@ class TemplateAgentManager:
             return
         state = job.session_state
         state.session_id = job.session_id or state.session_id
+        state.runtime = _agent_runtime_key(job.config)
         state.input_tokens = job.input_tokens
         state.output_tokens = job.output_tokens
         state.cache_read_tokens = job.cache_read_tokens
@@ -485,25 +517,19 @@ class TemplateAgentManager:
         job.status = "running"
         job.started_at = time.time()
         job.updated_at = job.started_at
+        runtime_key = _agent_runtime_key(job.config)
+        runtime_label = _agent_runtime_label(job.config)
         await self._publish(
             job,
             {
                 "type": "status",
                 "stage": "starting",
                 "status": "running",
-                "message": "Starting Claude Agent.",
+                "message": f"Starting {runtime_label} Agent.",
             },
         )
 
         try:
-            try:
-                from claude_agent_sdk import ClaudeAgentOptions
-            except Exception as exc:  # noqa: BLE001 - optional runtime dependency
-                raise RuntimeError(
-                    "Claude Agent SDK is not installed. Install `claude-agent-sdk` "
-                    "in the backend environment to use Agent collaboration mode."
-                ) from exc
-
             import_dir = _import_dir(job.import_id)
             review_path = import_dir / "review.json"
             if not review_path.exists():
@@ -536,6 +562,8 @@ class TemplateAgentManager:
             )
 
             def _options_for_attempt() -> Any:
+                from claude_agent_sdk import ClaudeAgentOptions
+
                 resume_session = (
                     job.session_state.session_id
                     if job.session_state is not None and job.session_state.initialized
@@ -594,10 +622,15 @@ class TemplateAgentManager:
                     )
                 )
                 try:
-                    async for message in _iter_client_in_worker_loop(
-                        attempt_prompt,
-                        _options_for_attempt(),
-                    ):
+                    if runtime_key == "codex":
+                        message_stream = self._iter_codex_client_events(job, import_dir, attempt_prompt)
+                    else:
+                        message_stream = _iter_client_in_worker_loop(
+                            attempt_prompt,
+                            _options_for_attempt(),
+                            continuation_prompt=_template_agent_continuation_prompt(job.planning),
+                        )
+                    async for message in message_stream:
                         # Update usage / cost counters before fanning out events so
                         # the UI sees them on the same tick as the originating frame.
                         self._update_usage(
@@ -605,7 +638,12 @@ class TemplateAgentManager:
                             message,
                             usage_snapshot=usage_snapshot,
                         )
-                        for event in _events_from_sdk_message(message):
+                        events = (
+                            _events_from_codex_message(message)
+                            if runtime_key == "codex"
+                            else _events_from_sdk_message(message)
+                        )
+                        for event in events:
                             if event.get("type") == "message":
                                 text = str(event.get("message") or "").strip()
                                 if text:
@@ -626,13 +664,23 @@ class TemplateAgentManager:
                                         },
                                     )
                             await self._publish(job, event)
-                        if message.__class__.__name__ == "ResultMessage":
+                        if _is_agent_result_message(job.config, message):
                             self._record_usage(job, usage_snapshot, attempt=attempt)
                             self._save_session_state(job)
+                            if runtime_key == "codex":
+                                turn_error = _codex_turn_error_message(message)
+                                if turn_error:
+                                    raise RuntimeError(turn_error)
+                            else:
+                                result_error = _claude_result_error_message(message)
+                                if result_error:
+                                    raise RuntimeError(result_error)
                     break
                 except Exception as exc:  # noqa: BLE001 - resume recoverable SDK stream breaks
                     if attempt > _AGENT_RECOVERY_ATTEMPTS or not _is_recoverable_agent_error(exc):
                         raise
+                    self._save_session_state(job)
+                    delay = _agent_recovery_delay(attempt)
                     job.message = "Agent stream interrupted; resuming the session."
                     job.updated_at = time.time()
                     await self._publish(
@@ -645,11 +693,18 @@ class TemplateAgentManager:
                             "data": {
                                 "recoverable": True,
                                 "attempt": attempt,
+                                "recovery_attempt": attempt,
+                                "max_recovery_attempts": _AGENT_RECOVERY_ATTEMPTS,
+                                "retry_delay_seconds": delay,
+                                "session_resumable": bool(
+                                    job.session_state is not None and job.session_state.initialized
+                                ),
                                 "session_id": job.session_id,
                                 "error": _format_agent_error(exc, [])[:500],
                             },
                         },
                     )
+                    await asyncio.sleep(delay)
 
             # Mark the import as if the LLM analysis ran only after a real
             # planning/editing run. The automatic Agent inspection is read-only
@@ -733,6 +788,115 @@ class TemplateAgentManager:
                 },
             )
 
+    async def _iter_codex_client_events(
+        self,
+        job: TemplateAgentJob,
+        import_dir: Path,
+        prompt: str,
+    ):
+        try:
+            from openai_codex import AppServerConfig, ApprovalMode, AsyncCodex, TextInput
+            from openai_codex.generated.v2_all import (
+                DangerFullAccessSandboxPolicy,
+                ReasoningEffort,
+                SandboxPolicy,
+            )
+            from openai_codex.types import SandboxMode
+        except ImportError as exc:
+            raise RuntimeError(
+                "Codex Agent runtime requires the `openai-codex` Python SDK. "
+                "Run `uv sync` after updating dependencies, then start the backend again."
+            ) from exc
+
+        from backend.orchestrator import agent_pipeline as agent_runtime
+
+        agent_runtime._install_codex_jsonrpc_noise_filter()
+        effort_value = str(
+            job.config.reasoning_effort
+            or agent_runtime._codex_default_reasoning_effort()
+            or "high"
+        )
+        try:
+            effort = ReasoningEffort(effort_value)
+        except ValueError:
+            effort = ReasoningEffort.high
+        model = job.config.model or agent_runtime._codex_default_model() or None
+        job.model_name = model or "codex-default"
+        _safe_create_task(self._publish(job, _usage_event(job)))
+
+        codex_config = AppServerConfig(
+            cwd=str(import_dir),
+            env={},
+            codex_bin=str(settings.codex_bin) if settings.codex_bin else None,
+        )
+        sandbox_policy = SandboxPolicy(
+            root=DangerFullAccessSandboxPolicy(type="dangerFullAccess")
+        )
+
+        await self._publish(
+            job,
+            {
+                "type": "status",
+                "stage": "agent",
+                "status": "running",
+                "message": "Codex app-server is ready; starting Agent thread.",
+                "data": {"runtime": "codex", "model": model, "reasoning_effort": effort.value},
+            },
+        )
+        async with AsyncCodex(config=codex_config) as codex:
+            thread_kwargs = {
+                "approval_mode": ApprovalMode.auto_review,
+                "cwd": str(import_dir),
+                "developer_instructions": _codex_developer_instructions(import_dir, job.planning),
+                "model": model,
+                "sandbox": SandboxMode.danger_full_access,
+                "config": {"model_reasoning_effort": effort.value},
+            }
+            resume_session = (
+                job.session_state.session_id
+                if job.session_state is not None
+                and job.session_state.initialized
+                and job.session_state.runtime == "codex"
+                else None
+            )
+            if resume_session:
+                thread = await codex.thread_resume(resume_session, **thread_kwargs)
+            else:
+                thread = await codex.thread_start(**thread_kwargs)
+            job.session_id = thread.id
+            if job.session_state is not None:
+                job.session_state.session_id = thread.id
+                job.session_state.runtime = "codex"
+                job.session_state.initialized = True
+                self._save_session_state(job)
+            await self._publish(
+                job,
+                {
+                    "type": "system",
+                    "stage": "system",
+                    "status": "running",
+                    "message": "Codex Agent thread started.",
+                    "data": {"runtime": "codex", "thread_id": thread.id},
+                },
+            )
+            turn = await thread.turn(
+                TextInput(prompt),
+                approval_mode=ApprovalMode.auto_review,
+                cwd=str(import_dir),
+                effort=effort,
+                model=model,
+                sandbox_policy=sandbox_policy,
+            )
+            try:
+                async for event in turn.stream():
+                    yield event
+            except asyncio.CancelledError:
+                try:
+                    await turn.interrupt()
+                except Exception:
+                    pass
+                raise
+
     def _update_usage(
         self,
         job: TemplateAgentJob,
@@ -750,6 +914,40 @@ class TemplateAgentManager:
         accumulate across query() calls in case multiple are run.
         """
         kind = message.__class__.__name__
+
+        if _agent_runtime_key(job.config) == "codex":
+            from backend.orchestrator import agent_pipeline as agent_runtime
+
+            token_values = agent_runtime._codex_token_usage_values(message)
+            if token_values is not None:
+                job.input_tokens = token_values["input_tokens"]
+                job.output_tokens = token_values["output_tokens"]
+                job.cache_read_tokens = token_values["cache_read_input_tokens"]
+                job.cache_creation_tokens = token_values["cache_creation_input_tokens"]
+                _safe_create_task(self._publish(job, _usage_event(job)))
+                return
+
+            if str(getattr(message, "method", "") or "") == "turn/completed":
+                result_id = str(
+                    agent_runtime._event_attr(message, ("payload", "turn", "id"))
+                    or agent_runtime._event_attr(message, ("payload", "turn_id"))
+                    or agent_runtime._event_attr(message, ("payload", "turn", "request_id"))
+                    or ""
+                )
+                if not result_id:
+                    result_id = str(getattr(message, "id", "") or f"turn:{time.time()}")
+                if result_id in job.seen_result_ids:
+                    return
+                job.seen_result_ids.add(result_id)
+                duration_ms = agent_runtime._safe_int(
+                    agent_runtime._event_attr(message, ("payload", "turn", "duration_ms"))
+                    or agent_runtime._event_attr(message, ("payload", "duration_ms"))
+                )
+                if duration_ms:
+                    job.duration_ms += duration_ms
+                job.num_turns += 1
+                _safe_create_task(self._publish(job, _usage_event(job)))
+                return
 
         if kind == "SystemMessage":
             subtype = getattr(message, "subtype", None)
@@ -847,7 +1045,11 @@ class TemplateAgentManager:
         if prompt_tokens <= 0 and completion_tokens <= 0:
             return
         usage_tracker.record(
-            provider="anthropic" if job.config.mode == "claude_code" else "custom",
+            provider=(
+                "openai-codex"
+                if job.config.mode == "codex"
+                else "anthropic" if job.config.mode == "claude_code" else "custom"
+            ),
             model=job.model_name or job.config.model or "unknown",
             prompt_tokens=max(0, prompt_tokens),
             completion_tokens=max(0, completion_tokens),
@@ -1018,7 +1220,12 @@ def _import_dir(import_id: str) -> Path:
 _WORKER_DONE = object()
 
 
-async def _iter_client_in_worker_loop(prompt: str, options: Any):
+async def _iter_client_in_worker_loop(
+    prompt: str,
+    options: Any,
+    *,
+    continuation_prompt: str,
+):
     """Run ``ClaudeSDKClient`` on a dedicated background event loop and
     yield messages back to the caller's loop.
 
@@ -1056,11 +1263,29 @@ async def _iter_client_in_worker_loop(prompt: str, options: Any):
             from claude_agent_sdk import ClaudeSDKClient
 
             async with ClaudeSDKClient(options=options) as client:
-                await client.query(prompt)
-                async for message in client.receive_response():
-                    if cancel_event.is_set():
+                next_prompt = prompt
+                while not cancel_event.is_set():
+                    await client.query(next_prompt)
+                    hit_turn_limit = False
+                    try:
+                        async for message in _iter_template_agent_stream_with_timeout(
+                            client.receive_response(),
+                            _template_agent_turn_idle_timeout(),
+                        ):
+                            if cancel_event.is_set():
+                                break
+                            _put_threadsafe(message)
+                            if _is_claude_turn_limit_result(message):
+                                hit_turn_limit = True
+                    except TimeoutError:
+                        try:
+                            await client.interrupt()
+                        except Exception:
+                            pass
+                        raise
+                    if cancel_event.is_set() or not hit_turn_limit:
                         break
-                    _put_threadsafe(message)
+                    next_prompt = continuation_prompt
         except BaseException as exc:  # noqa: BLE001 - propagate to caller loop
             if _is_false_success_error(exc):
                 return
@@ -1120,6 +1345,45 @@ async def _iter_client_in_worker_loop(prompt: str, options: Any):
         thread.join(timeout=10.0)
 
 
+def _template_agent_turn_idle_timeout() -> float | None:
+    timeout = float(getattr(settings, "agent_turn_idle_timeout", 300) or 0)
+    return timeout if timeout > 0 else None
+
+
+async def _next_template_agent_stream_item(iterator: Any, timeout: float | None) -> Any:
+    if timeout is None:
+        return await iterator.__anext__()
+    return await asyncio.wait_for(iterator.__anext__(), timeout)
+
+
+async def _iter_template_agent_stream_with_timeout(stream: Any, timeout: float | None):
+    iterator = stream.__aiter__()
+    while True:
+        try:
+            yield await _next_template_agent_stream_item(iterator, timeout)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Agent turn produced no activity for {timeout}s."
+            ) from None
+
+
+def _template_agent_continuation_prompt(planning: bool) -> str:
+    if not planning:
+        return (
+            "Continue the same read-only template inspection from where you left off. "
+            "Do not repeat completed observations, do not modify files, and finish "
+            "with concise guidance grounded in the current import workspace."
+        )
+    return (
+        "Continue the same template import task from where you left off. "
+        "Do not repeat completed steps. Read the current files on disk if needed, "
+        "finish any remaining review.json and agent_template updates, and briefly "
+        "note the concrete files or fields changed after each major milestone."
+    )
+
+
 def _setting_sources(config: TemplateAgentConfig) -> list[str] | None:
     if config.mode != "claude_code":
         return []
@@ -1144,6 +1408,129 @@ def _env_for_config(config: TemplateAgentConfig) -> dict[str, str]:
     if config.custom_model_option:
         env["ANTHROPIC_CUSTOM_MODEL_OPTION"] = config.custom_model_option
     return env
+
+
+def _agent_runtime_key(config: TemplateAgentConfig) -> str:
+    return "codex" if config.mode == "codex" else "claude_code"
+
+
+def _agent_runtime_label(config: TemplateAgentConfig) -> str:
+    if config.mode == "codex":
+        return "Codex"
+    if config.mode == "custom":
+        return "Claude-compatible"
+    return "Claude Code"
+
+
+def _codex_developer_instructions(import_dir: Path, planning: bool) -> str:
+    mode_contract = (
+        "You are in editing mode. You may modify files inside this import workspace, "
+        "especially review.json and files under agent_template/."
+        if planning
+        else "You are in read-only inspection mode. Do not create, edit, move, delete, "
+        "or overwrite any file, and do not run shell commands."
+    )
+    return (
+        "You are running inside Paper PPT Agent template-import Agent mode. "
+        f"The import workspace root is {import_dir}. Treat this directory as the only "
+        "workspace you may inspect or author. Read agent_context.json first, then "
+        "agent_task.json. Follow the prompt's read order, output language, and "
+        "templateization contract exactly. "
+        f"{mode_contract} "
+        "Do not confirm/register the template or edit global template directories. "
+        "When using shell commands on Windows, keep the working directory inside the "
+        "import workspace and avoid interactive commands. Keep chat output concise; "
+        "summarize large JSON, SVG, or command output instead of pasting it."
+    )
+
+
+def _events_from_codex_message(message: Any) -> list[dict[str, Any]]:
+    from backend.orchestrator import agent_pipeline as agent_runtime
+
+    method = str(getattr(message, "method", "") or "")
+    progress = agent_runtime._codex_item_progress_event(message, method)
+    if progress is None:
+        return []
+
+    data = dict(progress.data or {})
+    agent_event = data.pop("agent_event", {})
+    if not isinstance(agent_event, dict):
+        agent_event = {}
+    event_data = agent_event.get("data")
+    merged_data: dict[str, Any] = data
+    if isinstance(event_data, dict):
+        merged_data = {**data, **event_data}
+
+    event_type = str(agent_event.get("type") or "status")
+    status = str(agent_event.get("status") or progress.status)
+    if event_type == "error":
+        # Codex emits method="error" frames for retryable runtime/model
+        # interruptions. The generation pipeline wraps those as progress, not
+        # terminal job errors. Keep the original shape in data, but only the
+        # manager's final failure path may publish top-level type="error".
+        merged_data.setdefault("codex_agent_event_type", "error")
+        merged_data.setdefault("recoverable", status == "retrying" or bool(merged_data.get("will_retry")))
+        event_type = "status"
+    event: dict[str, Any] = {
+        "type": event_type,
+        "stage": progress.stage,
+        "status": status,
+        "message": progress.message[:_TEXT_LIMIT],
+        "data": merged_data,
+    }
+    if event_type == "error":
+        event["error"] = progress.message[:_TEXT_LIMIT]
+    return [event]
+
+
+def _is_agent_result_message(config: TemplateAgentConfig, message: Any) -> bool:
+    if _agent_runtime_key(config) == "codex":
+        return str(getattr(message, "method", "") or "") == "turn/completed"
+    return message.__class__.__name__ == "ResultMessage"
+
+
+def _is_claude_turn_limit_result(message: Any) -> bool:
+    if message.__class__.__name__ != "ResultMessage":
+        return False
+    if not bool(getattr(message, "is_error", False)):
+        return False
+    subtype = str(getattr(message, "subtype", "") or "").lower()
+    result = str(getattr(message, "result", "") or "").lower()
+    return subtype == "error_max_turns" or "maximum number of turns" in result
+
+
+def _claude_result_error_message(message: Any) -> str | None:
+    if message.__class__.__name__ != "ResultMessage":
+        return None
+    subtype = str(getattr(message, "subtype", "") or "").lower()
+    result = str(getattr(message, "result", "") or "").strip()
+    if subtype == "success" or result.lower() == "success":
+        return None
+    if not bool(getattr(message, "is_error", False)):
+        return None
+    if _is_claude_turn_limit_result(message):
+        return None
+    return result or subtype or "Agent failed."
+
+
+def _codex_turn_error_message(message: Any) -> str | None:
+    if str(getattr(message, "method", "") or "") != "turn/completed":
+        return None
+    from backend.orchestrator import agent_pipeline as agent_runtime
+
+    status = agent_runtime._enum_value(
+        agent_runtime._event_attr(message, ("payload", "turn", "status"))
+        or agent_runtime._event_attr(message, ("payload", "status"))
+    ).lower()
+    if status not in {"failed", "cancelled", "canceled"}:
+        return None
+    error = (
+        agent_runtime._event_attr(message, ("payload", "turn", "error", "message"))
+        or agent_runtime._event_attr(message, ("payload", "error", "message"))
+        or agent_runtime._event_attr(message, ("payload", "error"))
+        or status
+    )
+    return f"Codex Agent turn {status}: {str(error)[:1000]}"
 
 
 def _review_snapshot(import_dir: Path) -> str:
@@ -2579,8 +2966,9 @@ Output language:
 Before every visible assistant message, silently check that it follows the required language.
 
 Reason for this resume:
-The previous Agent SDK stream was interrupted by transport/output limits, not by a user
-cancellation. Continue from the existing session and the current files on disk.
+The previous Agent SDK stream was interrupted by transport/output/subprocess
+limits, not by a user cancellation. Continue from the existing session and the
+current files on disk.
 
 Original user feedback:
 {feedback}
@@ -2623,7 +3011,7 @@ def _format_agent_error(exc: BaseException, stderr_tail: list[str]) -> str:
 
     if stderr_tail:
         stderr = "\n".join(stderr_tail[-5:])
-        text = f"{text}\nClaude stderr:\n{stderr}"
+        text = f"{text}\nAgent stderr:\n{stderr}"
 
     return text[:_TEXT_LIMIT]
 
@@ -2713,20 +3101,30 @@ def _events_from_sdk_message(message: Any) -> list[dict[str, Any]]:
         is_false_success = (
             subtype == "success" or str(result or "").strip().lower() == "success"
         )
+        is_turn_limit = _is_claude_turn_limit_result(message)
         is_error = bool(getattr(message, "is_error", False)) and not is_false_success
+        status = "running" if is_turn_limit else ("error" if is_error else "complete")
+        display_message = (
+            "Agent reached the current turn limit; continuing..."
+            if is_turn_limit
+            else str(result or "Agent produced a result.")
+        )
+        data: dict[str, Any] = {
+            "is_error": is_error,
+            "subtype": subtype,
+            "duration_ms": getattr(message, "duration_ms", None),
+            "num_turns": getattr(message, "num_turns", None),
+            "total_cost_usd": getattr(message, "total_cost_usd", None),
+        }
+        if is_turn_limit:
+            data["recoverable"] = True
         events.append(
             {
                 "type": "result",
                 "stage": "result",
-                "status": "error" if is_error else "complete",
-                "message": (str(result or "Agent produced a result.")[:_TEXT_LIMIT]),
-                "data": {
-                    "is_error": is_error,
-                    "subtype": subtype,
-                    "duration_ms": getattr(message, "duration_ms", None),
-                    "num_turns": getattr(message, "num_turns", None),
-                    "total_cost_usd": getattr(message, "total_cost_usd", None),
-                },
+                "status": status,
+                "message": display_message[:_TEXT_LIMIT],
+                "data": data,
             }
         )
     elif kind == "SystemMessage":
@@ -2756,19 +3154,69 @@ def _events_from_sdk_message(message: Any) -> list[dict[str, Any]]:
 
 
 def _is_false_success_error(exc: BaseException) -> bool:
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 6:
+        return True
     text = str(exc).strip().lower()
     return text == "claude code returned an error result: success"
 
 
+def _agent_error_chain_text(exc: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(current.__class__.__name__)
+        message = str(current).strip()
+        if message:
+            parts.append(message)
+        nested = getattr(current, "exceptions", None)
+        if isinstance(nested, (list, tuple)):
+            for child in nested:
+                if isinstance(child, BaseException):
+                    parts.append(_agent_error_chain_text(child))
+        current = current.__cause__ or current.__context__
+    return "\n".join(parts).lower()
+
+
+def _agent_recovery_delay(attempt: int) -> float:
+    return min(
+        _AGENT_RECOVERY_MAX_DELAY_SECONDS,
+        _AGENT_RECOVERY_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1)),
+    )
+
+
 def _is_recoverable_agent_error(exc: BaseException) -> bool:
-    text = str(exc).strip().lower()
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    text = _agent_error_chain_text(exc)
     return any(
         marker in text
         for marker in (
+            "error_max_turns",
             "failed to decode json",
+            "failed to parse json",
+            "unexpected eof",
+            "eof while parsing",
             "json message exceeded maximum buffer size",
             "maximum buffer size",
+            "maximum number of turns",
             "reached maximum number of turns",
+            "timeout",
+            "timed out",
+            "socket connection was closed",
+            "connection was closed",
+            "connection closed",
+            "connection reset",
+            "connection aborted",
+            "connection terminated",
+            "server disconnected",
+            "transport closed",
+            "stream interrupted",
+            "stream closed",
+            "broken pipe",
+            "econnreset",
+            "remote protocol error",
         )
     )
 
@@ -2818,6 +3266,7 @@ def _usage_event(job: TemplateAgentJob) -> dict[str, Any]:
 def _session_state_payload(state: TemplateAgentSessionState) -> dict[str, Any]:
     return {
         "session_id": state.session_id,
+        "runtime": state.runtime,
         "initialized": state.initialized,
         "input_tokens": state.input_tokens,
         "output_tokens": state.output_tokens,

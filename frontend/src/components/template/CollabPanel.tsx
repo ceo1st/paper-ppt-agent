@@ -839,7 +839,8 @@ function CollabModeControls({
     onAgentConfigChange({ ...agentConfig, ...patch });
   };
   const agentModel = agentConfig.model ?? "";
-  const isCustomAgent = Boolean(agentConfig.base_url?.trim());
+  const isCodexAgent = agentConfig.mode === "codex";
+  const isCustomAgent = !isCodexAgent && Boolean(agentConfig.base_url?.trim());
   const agentCredential = agentConfig.api_key ?? agentConfig.auth_token ?? "";
   const setAgentCredential = (value: string) => {
     if (agentConfig.auth_token && !agentConfig.api_key) {
@@ -884,7 +885,7 @@ function CollabModeControls({
           );
         })}
       </div>
-      {mode === "agent" ? (
+      {mode === "agent" && !isCodexAgent ? (
         <div className="ti-agent-runtime-fields">
           {isCustomAgent ? (
             <label className="ti-agent-model-field">

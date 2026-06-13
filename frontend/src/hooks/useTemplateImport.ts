@@ -692,6 +692,18 @@ export function useTemplateImport(
               previewRefreshInFlight = false;
             });
           };
+          const isObjectData = (value: unknown): value is Record<string, unknown> =>
+            Boolean(value && typeof value === "object" && !Array.isArray(value));
+          const isRecoveringAgentEvent = (event: TemplateAgentEvent) => {
+            const data = isObjectData(event.data) ? event.data : {};
+            return (
+              event.status === "retrying" ||
+              data.recoverable === true ||
+              data.will_retry === true
+            );
+          };
+          const isTerminalAgentError = (event: TemplateAgentEvent) =>
+            event.type === "error" && !isRecoveringAgentEvent(event);
           socket = openTemplateAgentSocket(
             id,
             start.agent_job_id,
@@ -709,7 +721,7 @@ export function useTemplateImport(
                   updated_at: event.ts ?? prev?.updated_at,
                 }));
               }
-              if (event.type === "complete" || event.type === "error" || event.type === "cancelled") {
+              if (event.type === "complete" || isTerminalAgentError(event) || event.type === "cancelled") {
                 setAgentCancelPending(false);
               }
               if (event.type === "artifact_updated") {
@@ -722,7 +734,7 @@ export function useTemplateImport(
                 socket?.close();
                 resolve();
               }
-              if (event.type === "error") {
+              if (isTerminalAgentError(event)) {
                 socket?.close();
                 reject(new Error(event.message || event.error || msg("template.error.agentTaskFailed", "Agent task failed.")));
               }

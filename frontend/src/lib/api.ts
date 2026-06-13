@@ -30,6 +30,7 @@ import type {
   TemplateReviewDraft,
   TemplateInfo,
   TemplateAgentConfig,
+  TemplateAgentConfigMode,
   TemplateAgentClaudeCodeStatus,
   TemplateAgentStartResponse,
   TemplateAgentStatus,
@@ -194,6 +195,14 @@ export async function uploadTemplatePptx(
 
 export async function fetchTemplateAgentClaudeCodeStatus(): Promise<TemplateAgentClaudeCodeStatus> {
   return request<TemplateAgentClaudeCodeStatus>("/api/templates/agent/claude-code/status");
+}
+
+export async function fetchTemplateAgentRuntimeStatus(
+  runtime: TemplateAgentConfigMode,
+): Promise<TemplateAgentClaudeCodeStatus> {
+  return request<TemplateAgentClaudeCodeStatus>(
+    `/api/templates/agent/runtime/${encodeURIComponent(runtime)}/status`,
+  );
 }
 
 export async function fetchImportStatus(importId: string): Promise<ImportStatus> {

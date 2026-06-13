@@ -263,7 +263,7 @@ export interface TemplateImportAsset {
 export interface TemplateReviewDraft {
   label?: string;
   page_selections?: Partial<Record<TemplatePageType, number | null>>;
-  assets?: Record<string, { role?: TemplateAssetRole; name?: string | null }>;
+  assets?: Record<string, { role?: TemplateAssetRole; name?: string | null; [key: string]: unknown }>;
   preserve_texts?: string[];
   placeholder_hints?: Partial<Record<TemplatePageType, Record<string, string>>>;
   element_actions?: Array<{
@@ -292,7 +292,7 @@ export interface TemplateReview {
   draft: {
     label?: string;
     page_selections?: Partial<Record<TemplatePageType, number | null>>;
-    assets?: Record<string, { role: TemplateAssetRole; name: string }>;
+    assets?: Record<string, { role?: TemplateAssetRole; name?: string | null; [key: string]: unknown }>;
     preserve_texts?: string[];
     placeholder_hints?: Partial<Record<TemplatePageType, Record<string, string>>>;
     element_actions?: TemplateReviewDraft["element_actions"];
@@ -381,7 +381,7 @@ export interface GenerationAgentMessage {
 
 export type TemplateImportModelConfig = GenerateRequestPayload["model_config"];
 
-export type TemplateAgentConfigMode = "claude_code" | "custom";
+export type TemplateAgentConfigMode = "claude_code" | "custom" | "codex";
 
 export interface TemplateAgentConfig {
   mode: TemplateAgentConfigMode;
@@ -389,6 +389,7 @@ export interface TemplateAgentConfig {
   auth_token?: string;
   base_url?: string;
   model?: string;
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh";
   custom_model_option?: string;
   load_project_settings?: boolean;
   max_turns?: number;
@@ -442,12 +443,18 @@ export interface TemplateAgentEvent {
 }
 
 export interface TemplateAgentClaudeCodeStatus {
+  runtime?: TemplateAgentConfigMode | string;
   available: boolean;
   cli_path?: string | null;
   sdk_available: boolean;
   sdk_error?: string | null;
+  authenticated?: boolean | null;
+  requires_openai_auth?: boolean | null;
+  supports_chatgpt_oauth?: boolean | null;
+  error?: string | null;
   message: string;
   default_model?: string | null;
+  reasoning_effort?: string | null;
   available_models?: string[];
   configured_models?: Record<string, string>;
   provider_config?: {
