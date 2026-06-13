@@ -84,5 +84,5 @@ SVG requirements:
 - For Chinese text, avoid repeated short orphan lines and excessive blank space caused by overly narrow text boxes.
 - Every slide SVG must be directly authored as its own file. Multi-slide generator programs, loops, shared renderers, slide registries, and template expansion are forbidden.
 - Preserve source number precision and units; do not introduce K/M/B shorthand or rounded metrics unless the source uses them.
-- Do not include `<style>`, `class=`, masks, filters, clip paths, script tags, event handlers, remote network URLs, or `foreignObject`.
+- Do not include `<style>`, `class=`, masks, clip paths, script tags, event handlers, remote network URLs, or `foreignObject`.
 - Do not use text glyphs (letters, emoji, Unicode symbols, arrows, stars) as fake icons. Use existing local icon assets or omit the icon.

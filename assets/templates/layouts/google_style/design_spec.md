@@ -242,9 +242,7 @@ The following SVG features are prohibited (not PPT-compatible):
 
 ### Shadow Implementation
 
-Since `filter` may affect PPT compatibility:
-- Use subtle border color variations to simulate shadows
-- Or accept that `filter` may be ignored in older PPT versions, though it works well in newer versions
+SVG `filter` effects may be used for shadows and glows. Verify final PPT output because supported shadows can export natively, while more complex filter graphs may use raster fallback.
 
 ---
 

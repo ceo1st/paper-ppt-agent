@@ -13,7 +13,7 @@ from typing import Any
 
 from .context import ConvertContext
 from .paths import normalize_path, parse_svg_path, path_commands_to_drawingml
-from .styles import build_fill_xml, build_stroke_xml
+from .styles import build_effect_xml, build_fill_xml, build_stroke_xml
 from .utils import (
     EMU_PER_PX,
     ANGLE_UNIT,
@@ -46,6 +46,7 @@ def _wrap_shape(
     geom_xml: str,
     fill_xml: str,
     stroke_xml: str,
+    effect_xml: str = "",
     rot: int = 0,
 ) -> str:
     """Wrap geometry into a standard <p:sp> shape element."""
@@ -62,6 +63,7 @@ def _wrap_shape(
         f'{geom_xml}'
         f'{fill_xml}'
         f'{stroke_xml}'
+        f'{effect_xml}'
         f'</p:spPr>'
         f'</p:sp>'
     )
@@ -87,10 +89,11 @@ def convert_rect(elem: Any, ctx: ConvertContext) -> str:
     opacity = _get_opacity(elem, ctx)
     fill = build_fill_xml(elem, ctx, opacity)
     stroke = build_stroke_xml(elem, ctx, opacity)
+    effect = build_effect_xml(elem, ctx)
 
     geom = '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
     sid = ctx.next_id()
-    return _wrap_shape(sid, f"Rect {sid}", off_x, off_y, ext_cx, ext_cy, geom, fill, stroke)
+    return _wrap_shape(sid, f"Rect {sid}", off_x, off_y, ext_cx, ext_cy, geom, fill, stroke, effect)
 
 
 def convert_circle(elem: Any, ctx: ConvertContext) -> str:
@@ -111,10 +114,11 @@ def convert_circle(elem: Any, ctx: ConvertContext) -> str:
     opacity = _get_opacity(elem, ctx)
     fill = build_fill_xml(elem, ctx, opacity)
     stroke = build_stroke_xml(elem, ctx, opacity)
+    effect = build_effect_xml(elem, ctx)
 
     geom = '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
     sid = ctx.next_id()
-    return _wrap_shape(sid, f"Circle {sid}", off_x, off_y, ext_cx, ext_cy, geom, fill, stroke)
+    return _wrap_shape(sid, f"Circle {sid}", off_x, off_y, ext_cx, ext_cy, geom, fill, stroke, effect)
 
 
 def convert_ellipse(elem: Any, ctx: ConvertContext) -> str:
@@ -134,10 +138,11 @@ def convert_ellipse(elem: Any, ctx: ConvertContext) -> str:
     opacity = _get_opacity(elem, ctx)
     fill = build_fill_xml(elem, ctx, opacity)
     stroke = build_stroke_xml(elem, ctx, opacity)
+    effect = build_effect_xml(elem, ctx)
 
     geom = '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
     sid = ctx.next_id()
-    return _wrap_shape(sid, f"Ellipse {sid}", off_x, off_y, ext_cx, ext_cy, geom, fill, stroke)
+    return _wrap_shape(sid, f"Ellipse {sid}", off_x, off_y, ext_cx, ext_cy, geom, fill, stroke, effect)
 
 
 def convert_line(elem: Any, ctx: ConvertContext) -> str:
@@ -160,6 +165,7 @@ def convert_line(elem: Any, ctx: ConvertContext) -> str:
     opacity = _get_opacity(elem, ctx)
     fill = "<a:noFill/>"
     stroke = build_stroke_xml(elem, ctx, opacity)
+    effect = build_effect_xml(elem, ctx)
 
     geom = '<a:prstGeom prst="line"><a:avLst/></a:prstGeom>'
     sid = ctx.next_id()
@@ -181,6 +187,7 @@ def convert_line(elem: Any, ctx: ConvertContext) -> str:
         f'{geom}'
         f'{fill}'
         f'{stroke}'
+        f'{effect}'
         f'</p:spPr>'
         f'</p:sp>'
     )
@@ -206,10 +213,11 @@ def convert_path(elem: Any, ctx: ConvertContext) -> str:
     opacity = _get_opacity(elem, ctx)
     fill = build_fill_xml(elem, ctx, opacity)
     stroke = build_stroke_xml(elem, ctx, opacity)
+    effect = build_effect_xml(elem, ctx)
 
     geom = f'<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="0" b="0"/><a:pathLst>{path_xml}</a:pathLst></a:custGeom>'
     sid = ctx.next_id()
-    return _wrap_shape(sid, f"Path {sid}", bx, by, bw, bh, geom, fill, stroke)
+    return _wrap_shape(sid, f"Path {sid}", bx, by, bw, bh, geom, fill, stroke, effect)
 
 
 def convert_polygon(elem: Any, ctx: ConvertContext) -> str:
@@ -238,6 +246,7 @@ def convert_text(elem: Any, ctx: ConvertContext) -> str:
     y = parse_svg_length(elem.get("y", 0))
     font_size_str = ctx.get_attr(elem, "font-size", "16")
     font_size = parse_svg_length(font_size_str, 16)
+    effect = build_effect_xml(elem, ctx)
 
     # PowerPoint does not reliably preserve positioned tspans, so split them
     # into independent text boxes when x/y/dx/dy is involved.
@@ -300,10 +309,10 @@ def convert_text(elem: Any, ctx: ConvertContext) -> str:
     if has_positioned_tspan:
         parts = []
         for segment in segments:
-            parts.append(_build_text_shape(segment["x"], segment["y"], segment["runs"], ctx, segment["anchor"]))
+            parts.append(_build_text_shape(segment["x"], segment["y"], segment["runs"], ctx, segment["anchor"], effect))
         return "".join(parts)
 
-    return _build_text_shape(x, y, [run for segment in segments for run in segment["runs"]], ctx, ctx.get_attr(elem, "text-anchor", "start"))
+    return _build_text_shape(x, y, [run for segment in segments for run in segment["runs"]], ctx, ctx.get_attr(elem, "text-anchor", "start"), effect)
 
 
 def convert_image(elem: Any, ctx: ConvertContext) -> str:
@@ -369,6 +378,7 @@ def convert_image(elem: Any, ctx: ConvertContext) -> str:
     off_y = px_to_emu(ctx.ctx_y(y))
     ext_cx = px_to_emu(ctx.ctx_w(w))
     ext_cy = px_to_emu(ctx.ctx_h(h))
+    effect = build_effect_xml(elem, ctx)
 
     sid = ctx.next_id()
     return (
@@ -384,6 +394,7 @@ def convert_image(elem: Any, ctx: ConvertContext) -> str:
         f'<a:xfrm><a:off x="{off_x}" y="{off_y}"/>'
         f'<a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>'
         f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+        f'{effect}'
         f'</p:spPr>'
         f'</p:pic>'
     )
@@ -479,7 +490,7 @@ def _build_run_xml(run: dict) -> str:
     )
 
 
-def _build_text_shape(x: float, y: float, runs: list[dict], ctx: ConvertContext, anchor: str) -> str:
+def _build_text_shape(x: float, y: float, runs: list[dict], ctx: ConvertContext, anchor: str, effect_xml: str = "") -> str:
     """Build a single DrawingML text box."""
     total_text = "".join(run["text"] for run in runs)
     max_font_size = max((run["font_size"] for run in runs), default=16)
@@ -512,6 +523,7 @@ def _build_text_shape(x: float, y: float, runs: list[dict], ctx: ConvertContext,
         f'<a:ext cx="{ext_cx}" cy="{ext_cy}"/></a:xfrm>'
         f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
         f'<a:noFill/>'
+        f'{effect_xml}'
         f'</p:spPr>'
         f'<p:txBody>'
         f'<a:bodyPr wrap="none" anchor="t" lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></a:bodyPr>'
