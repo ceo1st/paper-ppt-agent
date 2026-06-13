@@ -78,6 +78,7 @@ from backend.generator.template_manager import load_template
 from backend.generator.template_agent import (
     TemplateAgentConfig,
     claude_code_environment_status,
+    template_agent_runtime_status,
     template_agent_manager,
 )
 from backend.runtime import aensure_dir, aoffload, awrite_bytes, awrite_text
@@ -174,12 +175,18 @@ class ImportStartResponse(BaseModel):
 
 
 class ClaudeCodeStatusResponse(BaseModel):
+    runtime: str = "claude_code"
     available: bool
     cli_path: str | None = None
     sdk_available: bool = False
     sdk_error: str | None = None
+    authenticated: bool | None = None
+    requires_openai_auth: bool | None = None
+    supports_chatgpt_oauth: bool | None = None
+    error: str | None = None
     message: str = ""
     default_model: str | None = None
+    reasoning_effort: str | None = None
     available_models: list[str] = Field(default_factory=list)
     configured_models: dict[str, str] = Field(default_factory=dict)
     provider_config: dict[str, Any] = Field(default_factory=dict)
@@ -234,12 +241,30 @@ class UserTemplateItem(BaseModel):
 class TemplateReviewDraftRequest(BaseModel):
     label: str | None = None
     page_selections: dict[str, int | None] | None = None
-    assets: dict[str, dict[str, str | None]] | None = None
+    assets: dict[str, dict[str, Any]] | None = None
     preserve_texts: list[str] | None = None
     placeholder_hints: dict[str, dict[str, str]] | None = None
     element_actions: list[dict[str, Any]] | None = None
     design_spec: str | None = None
     annotations: list[dict[str, Any]] | None = None
+
+    @field_validator("assets", mode="before")
+    @classmethod
+    def _normalize_assets(cls, value: Any) -> dict[str, dict[str, Any]] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, dict[str, Any]] = {}
+        for asset_id, raw_meta in value.items():
+            if not asset_id:
+                continue
+            key = str(asset_id)
+            if isinstance(raw_meta, dict):
+                normalized[key] = dict(raw_meta)
+            elif raw_meta is not None:
+                normalized[key] = {"value": raw_meta}
+        return normalized
 
     @field_validator("placeholder_hints", mode="before")
     @classmethod
@@ -329,11 +354,12 @@ class TemplateDesignSpecRequest(BaseModel):
 
 
 class TemplateAgentConfigRequest(BaseModel):
-    mode: Literal["claude_code", "custom"] = "claude_code"
+    mode: Literal["claude_code", "custom", "codex"] = "claude_code"
     api_key: str | None = None
     auth_token: str | None = None
     base_url: str | None = None
     model: str | None = None
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] | None = None
     custom_model_option: str | None = None
     load_project_settings: bool = True
     # ``None`` => unlimited; otherwise must be at least 1 (the SDK still
@@ -1063,6 +1089,14 @@ async def _save_review_draft(import_id: str, payload: dict[str, Any]) -> dict[st
 async def get_template_agent_claude_code_status() -> ClaudeCodeStatusResponse:
     """Check whether the backend can run Claude Code Agent mode."""
     return ClaudeCodeStatusResponse(**claude_code_environment_status())
+
+
+@router.get("/agent/runtime/{runtime}/status", response_model=ClaudeCodeStatusResponse)
+async def get_template_agent_runtime_status(
+    runtime: Literal["claude_code", "custom", "codex"],
+) -> ClaudeCodeStatusResponse:
+    """Check whether the backend can run the selected template Agent runtime."""
+    return ClaudeCodeStatusResponse(**await template_agent_runtime_status(runtime))
 
 
 @router.post("/upload", response_model=ImportStartResponse)
@@ -2102,12 +2136,6 @@ async def start_template_import_agent(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Templateization must be started by an explicit user request.",
         )
-    if payload.config.mode != "claude_code":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Template Agent mode currently supports Claude Code only.",
-        )
-
     # Make sure the review exists and persist the current UI draft first so
     # the agent sees exactly the same state the user is looking at.
     if not await aoffload(_get_import_review_any, import_id):
@@ -2130,11 +2158,12 @@ async def start_template_import_agent(
     if payload.draft is not None:
         await _save_review_draft(import_id, payload.draft.model_dump(exclude_none=True))
 
-    agent_runtime = claude_code_environment_status()
+    runtime_key = "codex" if payload.config.mode == "codex" else "claude_code"
+    agent_runtime = await template_agent_runtime_status(runtime_key)
     if not agent_runtime.get("available"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=agent_runtime.get("message") or "Claude Code is not available.",
+            detail=agent_runtime.get("message") or f"Agent runtime '{runtime_key}' is not available.",
         )
 
     cfg = TemplateAgentConfig(
@@ -2142,7 +2171,8 @@ async def start_template_import_agent(
         api_key=(payload.config.api_key or "").strip() or None,
         auth_token=(payload.config.auth_token or "").strip() or None,
         base_url=(payload.config.base_url or "").strip() or None,
-        model=(payload.config.model or "").strip() or None,
+        model=None if payload.config.mode == "codex" else (payload.config.model or "").strip() or None,
+        reasoning_effort=payload.config.reasoning_effort,
         custom_model_option=payload.config.custom_model_option,
         load_project_settings=payload.config.load_project_settings,
         max_turns=payload.config.max_turns,

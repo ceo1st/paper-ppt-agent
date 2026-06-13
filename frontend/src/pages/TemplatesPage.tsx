@@ -34,7 +34,7 @@ import { useTemplateImport } from "../hooks/useTemplateImport";
 import { translateTemplateImportMessage } from "../lib/i18nStatus";
 import {
   deleteTemplate,
-  fetchTemplateAgentClaudeCodeStatus,
+  fetchTemplateAgentRuntimeStatus,
   fetchTemplatePreview,
   fetchTemplates,
   generateTemplateDesignSpec,
@@ -140,12 +140,26 @@ function readTemplateAgentConfig(): TemplateAgentConfig {
     if (raw) {
       const parsed = JSON.parse(raw) as TemplateAgentConfig;
       if (parsed) {
+        const parsedMode =
+          parsed.mode === "codex"
+            ? "codex"
+            : parsed.base_url
+              ? "custom"
+              : "claude_code";
+        const reasoningEffort =
+          parsed.reasoning_effort === "low" ||
+          parsed.reasoning_effort === "medium" ||
+          parsed.reasoning_effort === "high" ||
+          parsed.reasoning_effort === "xhigh"
+            ? parsed.reasoning_effort
+            : undefined;
         return {
-          mode: parsed.base_url ? "custom" : "claude_code",
+          mode: parsedMode,
           api_key: typeof parsed.api_key === "string" ? parsed.api_key : undefined,
           auth_token: typeof parsed.auth_token === "string" ? parsed.auth_token : undefined,
           base_url: typeof parsed.base_url === "string" ? parsed.base_url : undefined,
-          model: typeof parsed.model === "string" ? parsed.model : undefined,
+          model: parsedMode === "codex" ? undefined : typeof parsed.model === "string" ? parsed.model : undefined,
+          reasoning_effort: reasoningEffort,
           load_project_settings: parsed.load_project_settings ?? true,
           max_turns:
             typeof parsed.max_turns === "number" && parsed.max_turns > 0 && parsed.max_turns !== 16
@@ -398,15 +412,40 @@ export function TemplatesPage() {
 
   useEffect(() => {
     let cancelled = false;
-    void fetchTemplateAgentClaudeCodeStatus()
+    const runtimeKey = agentConfig.mode === "codex" ? "codex" : "claude_code";
+    void fetchTemplateAgentRuntimeStatus(runtimeKey)
       .then((runtime) => {
         if (cancelled) return;
+        if (runtimeKey === "codex") {
+          setAgentModelOptions([]);
+          setAgentConfig((current) => {
+            if (current.mode !== "codex") return current;
+            return {
+              ...current,
+              base_url: undefined,
+              api_key: undefined,
+              auth_token: undefined,
+              model: undefined,
+              reasoning_effort:
+                current.reasoning_effort ??
+                (runtime.reasoning_effort === "low" ||
+                runtime.reasoning_effort === "medium" ||
+                runtime.reasoning_effort === "high" ||
+                runtime.reasoning_effort === "xhigh"
+                  ? runtime.reasoning_effort
+                  : "high"),
+            };
+          });
+          return;
+        }
         setAgentModelOptions(uniqueStrings([
+          runtime.default_model ?? "",
           ...(runtime.available_models ?? []),
           ...Object.values(runtime.configured_models ?? {}),
         ]));
         const provider = runtime.provider_config;
         setAgentConfig((current) => {
+          if (current.mode === "codex") return current;
           const next: TemplateAgentConfig = { ...current };
           if (provider?.base_url) {
             next.base_url = provider.base_url;
@@ -434,7 +473,7 @@ export function TemplatesPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [agentConfig.mode]);
 
   // ── Load library ──────────────────────────────────────────────────────
   const loadTemplates = useCallback(async () => {
@@ -535,10 +574,11 @@ export function TemplatesPage() {
       try {
         if (uploadMode === "agent") {
           setCheckingAgentRuntime(true);
-          const runtime = await fetchTemplateAgentClaudeCodeStatus();
+          const runtimeKey = agentConfig.mode === "codex" ? "codex" : "claude_code";
+          const runtime = await fetchTemplateAgentRuntimeStatus(runtimeKey);
           if (!runtime.available) {
             const detail = runtime.message ? ` ${runtime.message}` : "";
-            setTemplateError(`${t("template.agentClaudeCodeMissing")}${detail}`);
+            setTemplateError(`${t("template.agentRuntimeMissing")}${detail}`);
             return;
           }
         }
@@ -563,7 +603,7 @@ export function TemplatesPage() {
         setCheckingAgentRuntime(false);
       }
     },
-    [setTemplateError, upload, uploadMode, t],
+    [agentConfig.mode, setTemplateError, upload, uploadMode, t],
   );
 
   const handleGenerateDirectDesignSpec = useCallback(async () => {
@@ -1021,6 +1061,8 @@ export function TemplatesPage() {
               uploading={(importLoading && !importId) || checkingAgentRuntime}
               mode={uploadMode}
               onModeChange={setUploadMode}
+              agentConfig={agentConfig}
+              onAgentConfigChange={setAgentConfig}
               modelConfigured={modelConfigured}
               agentConfigured={agentConfigured}
               checkingAgentRuntime={checkingAgentRuntime}
@@ -1359,7 +1401,9 @@ export function TemplatesPage() {
                 annotationCount={activeAnnotations.length}
                 modelLabel={
                   collabMode === "agent"
-                    ? agentConfig.model?.trim() || t("template.collab.agentClaudeCodeDefault")
+                    ? agentConfig.mode === "codex"
+                      ? undefined
+                      : agentConfig.model?.trim() || t("template.collab.agentClaudeCodeDefault")
                     : modelConfig?.model
                 }
                 importStatus={status}
@@ -1552,6 +1596,8 @@ interface UploadCardProps {
   uploading: boolean;
   mode: CollabMode;
   onModeChange: (mode: CollabMode) => void;
+  agentConfig: TemplateAgentConfig;
+  onAgentConfigChange: (config: TemplateAgentConfig) => void;
   modelConfigured: boolean;
   agentConfigured: boolean;
   checkingAgentRuntime: boolean;
@@ -1563,6 +1609,8 @@ function UploadCard({
   uploading,
   mode,
   onModeChange,
+  agentConfig,
+  onAgentConfigChange,
   modelConfigured,
   agentConfigured,
   checkingAgentRuntime,
@@ -1576,6 +1624,30 @@ function UploadCard({
   const [dismissedGuides, setDismissedGuides] = useState<UploadGuideDismissals>(readTemplateUploadGuideDismissals);
   const [skipGuideNextTime, setSkipGuideNextTime] = useState(false);
   const ready = mode === "agent" ? agentConfigured : true;
+  const isCodexAgent = agentConfig.mode === "codex";
+  const setAgentRuntime = (runtime: "claude_code" | "codex") => {
+    if (runtime === "codex") {
+      onAgentConfigChange({
+        ...agentConfig,
+        mode: "codex",
+        model: undefined,
+        base_url: undefined,
+        api_key: undefined,
+        auth_token: undefined,
+        custom_model_option: undefined,
+        reasoning_effort: agentConfig.reasoning_effort ?? "high",
+      });
+      return;
+    }
+    onAgentConfigChange({
+      ...agentConfig,
+      mode: "claude_code",
+      model: agentConfig.mode === "codex" ? undefined : agentConfig.model,
+      base_url: agentConfig.mode === "codex" ? undefined : agentConfig.base_url,
+      api_key: agentConfig.mode === "codex" ? undefined : agentConfig.api_key,
+      auth_token: agentConfig.mode === "codex" ? undefined : agentConfig.auth_token,
+    });
+  };
 
   const handleFile = async (file: File) => {
     const isPptx =
@@ -1679,6 +1751,62 @@ function UploadCard({
           );
         })}
       </div>
+      {mode === "agent" ? (
+        <div
+          className="grid gap-2 rounded-[var(--ti-radius-sm,6px)] border p-2"
+          style={{ borderColor: "var(--ti-line)", background: "var(--ti-surface-inset)" }}
+        >
+          <div
+            className="grid grid-cols-2 rounded-[var(--ti-radius-sm,6px)] border p-0.5"
+            style={{ borderColor: "var(--ti-line)", background: "var(--ti-surface)" }}
+            role="radiogroup"
+            aria-label={t("template.collab.agentRuntime")}
+          >
+            {(["claude_code", "codex"] as const).map((runtime) => {
+              const active = isCodexAgent ? runtime === "codex" : runtime === "claude_code";
+              return (
+                <button
+                  key={runtime}
+                  type="button"
+                  disabled={uploading}
+                  onClick={() => setAgentRuntime(runtime)}
+                  className="ti-focusable inline-flex items-center justify-center gap-1 rounded px-2 py-1 text-[11px] font-semibold"
+                  style={{
+                    background: active ? "var(--ti-surface-inset)" : "transparent",
+                    color: active ? "var(--ti-text)" : "var(--ti-muted)",
+                  }}
+                  aria-checked={active}
+                  role="radio"
+                >
+                  {runtime === "codex" ? "Codex" : t("template.collab.agentClaudeCode")}
+                </button>
+              );
+            })}
+          </div>
+          {isCodexAgent ? (
+            <label className="ti-agent-model-field">
+              <span>{t("template.collab.agentReasoningEffort")}</span>
+              <select
+                value={agentConfig.reasoning_effort ?? "high"}
+                disabled={uploading}
+                onChange={(event) =>
+                  onAgentConfigChange({
+                    ...agentConfig,
+                    mode: "codex",
+                    model: undefined,
+                    reasoning_effort: event.target.value as NonNullable<TemplateAgentConfig["reasoning_effort"]>,
+                  })
+                }
+              >
+                <option value="low">{t("template.collab.agentReasoningLow")}</option>
+                <option value="medium">{t("template.collab.agentReasoningMedium")}</option>
+                <option value="high">{t("template.collab.agentReasoningHigh")}</option>
+                <option value="xhigh">{t("template.collab.agentReasoningXhigh")}</option>
+              </select>
+            </label>
+          ) : null}
+        </div>
+      ) : null}
       <div
         role="button"
         tabIndex={0}
@@ -1700,7 +1828,7 @@ function UploadCard({
         </span>
         <strong className="text-sm">{t("templates.upload.title")}</strong>
         <span className="text-xs" style={{ color: "var(--ti-muted)" }}>
-          {checkingAgentRuntime ? t("templates.upload.checkingClaude") : t("templates.upload.hint")}
+          {checkingAgentRuntime ? t("templates.upload.checkingAgent") : t("templates.upload.hint")}
         </span>
         <input
           ref={inputRef}
@@ -1726,7 +1854,7 @@ function UploadCard({
         >
           <span>
             {mode === "agent"
-              ? t("template.agentClaudeCodeRequired")
+              ? t("template.agentRuntimeRequired")
               : ""}
           </span>
         </div>

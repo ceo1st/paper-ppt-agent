@@ -245,6 +245,7 @@ export function translateTemplateImportMessage(message: string | undefined | nul
     "Agent task queued.": "智能体任务已排队。",
     "Starting Claude Agent.": "正在启动 Claude Agent。",
     "Agent running.": "智能体正在运行。",
+    "Agent reached the current turn limit; continuing...": "智能体达到当前轮次上限，正在继续。",
     "Agent stream interrupted; resuming the session.": "智能体流中断，正在恢复会话。",
     "Template artifacts updated.": "模板产物已更新。",
     "Agent task complete.": "智能体任务已完成。",
